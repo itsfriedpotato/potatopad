@@ -1,0 +1,11 @@
+# Code owners for PotatoPad.
+#
+# Every path below is owned by @itsfriedpotato. Combined with a branch-protection
+# rule on `main` that requires "review from Code Owners", this means NO pull
+# request can be merged without @itsfriedpotato's approval — regardless of how
+# many other contributors approve it.
+#
+# (Anyone can still SUBMIT a review on a public PR, but only a Code Owner's
+#  approval satisfies the merge gate, and only the owner has merge/write access.)
+
+* @itsfriedpotato
