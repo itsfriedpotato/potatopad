@@ -42,7 +42,7 @@ export function HarvestCard({
   const { weth, chainId } = usePad();
   const collectTx = useTx();
   const claimTx = useTx();
-  const accrued = useAccruedFees(lpTokenId, pool);
+  const accrued = useAccruedFees(lpTokenId, pool, pad);
 
   const { data: locker } = useReadContract({
     address: pad,

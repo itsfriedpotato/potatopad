@@ -330,21 +330,27 @@ export interface AccruedFees {
 export function useAccruedFees(
   lpTokenId: bigint | undefined,
   pool: Address | undefined,
+  pad: Address | undefined,
 ): AccruedFees {
-  const { pad, weth, chainId } = usePad();
+  const { weth, chainId } = usePad();
   const client = usePublicClient();
 
+  // Read the locker + NPM from the pad that ACTUALLY launched this token (the
+  // token page resolves it and passes it in). A legacy token's LP position is
+  // owned by the legacy pad's locker, so using the primary pad's locker here
+  // would make the collect-simulate revert and report zero fees.
+  const padReady = !!pad && pad !== ZERO_ADDRESS;
   const { data: lockerData } = useReadContract({
     address: pad,
     abi: potatoPadAbi,
     functionName: "locker",
-    query: { enabled: pad !== ZERO_ADDRESS },
+    query: { enabled: padReady },
   });
   const { data: npmData } = useReadContract({
     address: pad,
     abi: potatoPadAbi,
     functionName: "positionManager",
-    query: { enabled: pad !== ZERO_ADDRESS },
+    query: { enabled: padReady },
   });
   const { data: token0Data } = useReadContract({
     address: pool,

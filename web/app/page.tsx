@@ -3,9 +3,7 @@
 import { Sprout, TrendingUp } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
-import type { Address } from "viem";
-import { useReadContract, useReadContracts } from "wagmi";
-import { potatoPadAbi, potatoTokenAbi } from "@/lib/abi";
+import { useReadContracts } from "wagmi";
 import { ZERO_ADDRESS } from "@/lib/config";
 import { useLaunchActivity } from "@/lib/events";
 import { usePad } from "@/lib/hooks";
@@ -28,97 +26,57 @@ const TABS = [
 type TabId = (typeof TABS)[number]["id"];
 
 type Slot0 = readonly [bigint, number, number, number, number, number, boolean];
-type TokenInfo = readonly [Address, Address, bigint];
 
 export default function DiscoverPage() {
-  const { pad, weth, chainId, isDeployed } = usePad();
+  const { weth, chainId, isDeployed } = usePad();
   const { query } = useSearch();
   const [tab, setTab] = useState<TabId>("fresh");
-  const { creationByToken } = useLaunchActivity();
+  // Token list spans ALL pads (primary + legacy), so tokens launched on an
+  // earlier pad (e.g. CHIP on the pre-CREATE2 pad) still show after a repoint.
+  const { creations, isLoading: launchLoading } = useLaunchActivity();
 
-  const { data: tokens } = useReadContract({
-    address: pad,
-    abi: potatoPadAbi,
-    functionName: "getTokens",
-    args: [0n, 100n],
-    query: { enabled: isDeployed },
-  });
-
-  // Stage 1: name, symbol and on-chain info (creator/pool/lpTokenId) per token.
-  const metaContracts = useMemo(
-    () =>
-      (tokens ?? []).flatMap((token) => [
-        { address: token, abi: potatoTokenAbi, functionName: "name" },
-        { address: token, abi: potatoTokenAbi, functionName: "symbol" },
-        { address: pad, abi: potatoPadAbi, functionName: "tokens", args: [token] },
-      ]),
-    [tokens, pad],
-  );
-
-  const { data: metaReads, isLoading: metaLoading } = useReadContracts({
-    contracts: metaContracts as never[],
-    allowFailure: true,
-    query: { enabled: isDeployed && (tokens?.length ?? 0) > 0 },
-  });
-
-  // Stage 2: each token's pool price (slot0), keyed to the same token order.
-  const pools = useMemo<(Address | undefined)[]>(() => {
-    if (!tokens || !metaReads) return [];
-    return tokens.map((_, i) => {
-      const info = metaReads[i * 3 + 2]?.result as TokenInfo | undefined;
-      return info?.[1];
-    });
-  }, [tokens, metaReads]);
-
+  // Price each token from its pool's slot0, index-aligned to `creations`.
   const poolContracts = useMemo(
     () =>
-      pools.map((pool) => ({
-        address: pool ?? ZERO_ADDRESS,
+      creations.map((c) => ({
+        address: c.pool ?? ZERO_ADDRESS,
         abi: uniswapV3PoolAbi,
         functionName: "slot0",
       })),
-    [pools],
+    [creations],
   );
 
   const { data: poolReads } = useReadContracts({
     contracts: poolContracts as never[],
     allowFailure: true,
-    query: { enabled: isDeployed && pools.some(Boolean) },
+    query: {
+      enabled: isDeployed && creations.some((c) => !!c.pool && c.pool !== ZERO_ADDRESS),
+    },
   });
 
-  const rows = useMemo<TokenRow[]>(() => {
-    if (!tokens || !metaReads) return [];
-    const out: TokenRow[] = [];
-    for (let i = 0; i < tokens.length; i++) {
-      const base = i * 3;
-      const name = metaReads[base]?.result as string | undefined;
-      const symbol = metaReads[base + 1]?.result as string | undefined;
-      const info = metaReads[base + 2]?.result as TokenInfo | undefined;
-      if (name === undefined || symbol === undefined || !info) continue;
-
-      const pool = info[1];
-      const slot0 = poolReads?.[i]?.result as Slot0 | undefined;
-      const sqrtPriceX96 = slot0?.[0];
-      const priceWeth =
-        sqrtPriceX96 !== undefined
-          ? priceWethPerToken(sqrtPriceX96, tokenIsToken0(tokens[i], weth))
-          : 0;
-
-      const creation = creationByToken.get(tokens[i].toLowerCase());
-      out.push({
-        address: tokens[i],
-        name,
-        symbol,
-        creator: info[0],
-        pool,
-        priceWeth,
-        marketCapEth: priceWeth * TOTAL_SUPPLY_WHOLE,
-        createdAt: creation?.timestamp,
-        imageURI: creation?.imageURI,
-      });
-    }
-    return out;
-  }, [tokens, metaReads, poolReads, weth, creationByToken]);
+  const rows = useMemo<TokenRow[]>(
+    () =>
+      creations.map((c, i) => {
+        const slot0 = poolReads?.[i]?.result as Slot0 | undefined;
+        const sqrtPriceX96 = slot0?.[0];
+        const priceWeth =
+          sqrtPriceX96 !== undefined
+            ? priceWethPerToken(sqrtPriceX96, tokenIsToken0(c.token, weth))
+            : 0;
+        return {
+          address: c.token,
+          name: c.name,
+          symbol: c.symbol,
+          creator: c.creator,
+          pool: c.pool,
+          priceWeth,
+          marketCapEth: priceWeth * TOTAL_SUPPLY_WHOLE,
+          createdAt: c.timestamp,
+          imageURI: c.imageURI,
+        };
+      }),
+    [creations, poolReads, weth],
+  );
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -140,7 +98,7 @@ export default function DiscoverPage() {
     return <NotDeployed chainId={chainId} />;
   }
 
-  const loading = tokens === undefined || (tokens.length > 0 && (metaLoading || !metaReads));
+  const loading = launchLoading && creations.length === 0;
 
   return (
     <div>
