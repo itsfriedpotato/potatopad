@@ -47,10 +47,11 @@ async function main() {
 
   // ------------------------------------------------------------------ launch
   console.log("\n1️⃣  LAUNCH — creator deploys $POTATO with a 0.05 ETH dev-buy\n");
+  const salt = ethers.id("POTATO-demo"); // deterministic bytes32 salt (fine locally)
   const tokenAddr = await pad
     .connect(creator)
-    .createToken.staticCall("Potato", "POTATO", NO_META, 0, { value: ethers.parseEther("0.05") });
-  await pad.connect(creator).createToken("Potato", "POTATO", NO_META, 0, { value: ethers.parseEther("0.05") });
+    .createToken.staticCall("Potato", "POTATO", NO_META, salt, { value: ethers.parseEther("0.05") });
+  await pad.connect(creator).createToken("Potato", "POTATO", NO_META, salt, { value: ethers.parseEther("0.05") });
   const token = await ethers.getContractAt("PotatoToken", tokenAddr);
   const poolAddr = (await pad.tokens(tokenAddr)).pool;
 

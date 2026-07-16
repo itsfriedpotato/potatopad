@@ -46,8 +46,9 @@ async function main() {
       telegram: `https://t.me/${symbol.toLowerCase()}`,
     };
     const value = ethers.parseEther(devBuyEth);
-    const addr = await pad.connect(who).createToken.staticCall(name, symbol, meta, 0, { value });
-    await pad.connect(who).createToken(name, symbol, meta, 0, { value });
+    const salt = ethers.id(`${symbol}-${name}`); // deterministic bytes32 salt (fine locally)
+    const addr = await pad.connect(who).createToken.staticCall(name, symbol, meta, salt, { value });
+    await pad.connect(who).createToken(name, symbol, meta, salt, { value });
     return addr;
   };
   const buy = async (who: any, token: string, eth: string) =>

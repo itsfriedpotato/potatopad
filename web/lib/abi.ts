@@ -55,6 +55,11 @@ export const potatoPadAbi = [
   },
   {
     "inputs": [],
+    "name": "LaunchGriefed",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "NotSingleSided",
     "type": "error"
   },
@@ -233,6 +238,19 @@ export const potatoPadAbi = [
   },
   {
     "inputs": [],
+    "name": "MAX_SALT_TRIES",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "MAX_WALLET",
     "outputs": [
       {
@@ -379,6 +397,11 @@ export const potatoPadAbi = [
         "internalType": "struct PotatoPad.TokenMeta",
         "name": "meta",
         "type": "tuple"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "salt",
+        "type": "bytes32"
       }
     ],
     "name": "createToken",

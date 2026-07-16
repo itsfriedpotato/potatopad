@@ -18,6 +18,9 @@ const ANTI_SNIPE_BLOCKS = 10;
 
 const NO_META = { imageURI: "", website: "", twitter: "", telegram: "" };
 
+/** Deterministic per-token CREATE2 salt (real launches pass a random one). */
+const saltFor = (s: string) => ethers.id(s);
+
 /** WETH-per-token * TOTAL_SUPPLY, from a raw sqrtPriceX96 and token/WETH ordering. */
 function fdvFromSqrt(sqrtP: bigint, tokenIs0: boolean): bigint {
   if (tokenIs0) return (sqrtP * sqrtP * TOTAL_SUPPLY) >> 192n;
@@ -59,8 +62,8 @@ async function deployFixture() {
 
 async function createTokenFixture() {
   const ctx = await deployFixture();
-  const tokenAddr = await ctx.pad.connect(ctx.creator).createToken.staticCall("Spud", "SPUD", NO_META);
-  await ctx.pad.connect(ctx.creator).createToken("Spud", "SPUD", NO_META);
+  const tokenAddr = await ctx.pad.connect(ctx.creator).createToken.staticCall("Spud", "SPUD", NO_META, saltFor("Spud"));
+  await ctx.pad.connect(ctx.creator).createToken("Spud", "SPUD", NO_META, saltFor("Spud"));
   const token = await ethers.getContractAt("PotatoToken", tokenAddr);
   const info = await ctx.pad.tokens(tokenAddr);
   const pool = await ethers.getContractAtFromArtifact(PoolArtifact, info.pool);
@@ -184,8 +187,8 @@ describe("PotatoPad v2 (direct-to-Uniswap single-sided launch)", () => {
       let seen0 = false;
       let seen1 = false;
       for (let i = 0; i < 16 && !(seen0 && seen1); i++) {
-        const addr = await ctx.pad.connect(ctx.creator).createToken.staticCall("T" + i, "T" + i, NO_META);
-        await ctx.pad.connect(ctx.creator).createToken("T" + i, "T" + i, NO_META);
+        const addr = await ctx.pad.connect(ctx.creator).createToken.staticCall("T" + i, "T" + i, NO_META, saltFor("T" + i));
+        await ctx.pad.connect(ctx.creator).createToken("T" + i, "T" + i, NO_META, saltFor("T" + i));
         const tokenIs0 = isToken0(addr as string, ctx.weth.target as string);
         const info = await ctx.pad.tokens(addr);
         const token = await ethers.getContractAt("PotatoToken", addr);
@@ -207,8 +210,8 @@ describe("PotatoPad v2 (direct-to-Uniswap single-sided launch)", () => {
         twitter: "https://x.com/spud",
         telegram: "https://t.me/spud",
       };
-      const addr = await pad.connect(creator).createToken.staticCall("Spud", "SPUD", meta);
-      await expect(pad.connect(creator).createToken("Spud", "SPUD", meta))
+      const addr = await pad.connect(creator).createToken.staticCall("Spud", "SPUD", meta, saltFor("Spud"));
+      await expect(pad.connect(creator).createToken("Spud", "SPUD", meta, saltFor("Spud")))
         .to.emit(pad, "TokenCreated")
         .withArgs(
           addr,
@@ -224,29 +227,65 @@ describe("PotatoPad v2 (direct-to-Uniswap single-sided launch)", () => {
       expect((await pad.tokens(addr)).pool).to.not.equal(ethers.ZeroAddress);
     });
 
-    it("fails closed if the pool was front-run + pre-initialized at a bad price", async () => {
-      const { pad, creator, v3Factory, weth } = await loadFixture(deployFixture);
-      // predict the token address the next createToken will deploy
-      const addr = await pad.connect(creator).createToken.staticCall("FR", "FR", NO_META);
+    it("skips a griefer's pre-initialized pool and still lands a clean single-sided lock", async () => {
+      const { pad, creator, v3Factory, weth, npm, locker } = await loadFixture(deployFixture);
 
-      // attacker pre-creates + initializes the pool at 1:1 (tick 0), which is
-      // outside our launch range for BOTH orderings (range needs WETH there)
-      await v3Factory.createPool(addr, weth.target, POOL_FEE);
-      const poolAddr = await v3Factory.getPool(addr, weth.target, POOL_FEE);
-      const pool = await ethers.getContractAtFromArtifact(PoolArtifact, poolAddr);
-      await pool.initialize(2n ** 96n); // sqrtPriceX96 for price 1.0
+      const name = "FR";
+      const symbol = "FR";
+      const salt = saltFor("FR");
 
-      // the launch must revert rather than seed a broken / mispriced LP (the
-      // zero-liquidity mint fails closed inside Uniswap; SeedFailed is a
-      // defense-in-depth guard for the residual case where mint returns dust)
-      await expect(pad.connect(creator).createToken("FR", "FR", NO_META)).to.be.reverted;
+      // Reproduce the pad's FIRST CREATE2 candidate address exactly (see PotatoPad
+      // createToken): initCodeHash = keccak(creationCode ++ abi.encode(ctorArgs)),
+      // seed = keccak(abi.encode(creator, salt)), addr = CREATE2(pad, seed, hash).
+      const abi = ethers.AbiCoder.defaultAbiCoder();
+      const PotatoToken = await ethers.getContractFactory("PotatoToken");
+      const ctor = abi.encode(
+        ["string", "string", "uint256", "address", "address", "address", "uint256", "uint256"],
+        [
+          name,
+          symbol,
+          await pad.TOTAL_SUPPLY(),
+          await pad.getAddress(),
+          await pad.positionManager(),
+          await pad.locker(),
+          await pad.MAX_WALLET(),
+          await pad.antiSnipeBlocks(),
+        ]
+      );
+      const initCodeHash = ethers.keccak256(ethers.concat([PotatoToken.bytecode, ctor]));
+      const seed = ethers.keccak256(abi.encode(["address", "bytes32"], [creator.address, salt]));
+      const candidate0 = ethers.getCreate2Address(await pad.getAddress(), seed, initCodeHash);
+      expect(await ethers.provider.getCode(candidate0)).to.equal("0x"); // not deployed yet
+
+      // Attacker pre-creates + initializes candidate0's WETH pool at a hostile
+      // price (1:1, tick 0 — outside our launch range for both orderings, so a
+      // single-sided token mint there would need WETH). Under the old CREATE this
+      // one ~gas-only tx would brick every future launch permanently.
+      await v3Factory.createPool(candidate0, weth.target, POOL_FEE);
+      const poisonPoolAddr = await v3Factory.getPool(candidate0, weth.target, POOL_FEE);
+      const poisonPool = await ethers.getContractAtFromArtifact(PoolArtifact, poisonPoolAddr);
+      await poisonPool.initialize(2n ** 96n); // sqrtPriceX96 for price 1.0
+
+      // The launch SUCCEEDS by walking past the poisoned candidate to a fresh one.
+      const deployed = await pad.connect(creator).createToken.staticCall(name, symbol, NO_META, salt);
+      expect(deployed).to.not.equal(candidate0); // skipped the poisoned address
+      await pad.connect(creator).createToken(name, symbol, NO_META, salt);
+
+      // And it is a proper single-sided lock on a pool WE initialized, not theirs.
+      const info = await pad.tokens(deployed);
+      expect(info.pool).to.not.equal(poisonPoolAddr);
+      const token = await ethers.getContractAt("PotatoToken", deployed);
+      expect(await weth.balanceOf(info.pool)).to.equal(0n); // zero WETH used
+      expect(await token.balanceOf(info.pool)).to.be.closeTo(TOTAL_SUPPLY, 10n ** 15n);
+      expect(await npm.ownerOf(info.lpTokenId)).to.equal(locker.target); // LP NFT locked
+      expect((await npm.positions(info.lpTokenId)).liquidity).to.be.gt(0);
     });
 
     it("dev-buy: attached ETH delivers tokens to the creator (under the wallet cap)", async () => {
       const { pad, creator, weth } = await loadFixture(deployFixture);
       const value = ethers.parseEther("0.005"); // small — stays under the 5% window cap
-      const addr = await pad.connect(creator).createToken.staticCall("Dev", "DEV", NO_META, { value });
-      await expect(pad.connect(creator).createToken("Dev", "DEV", NO_META, { value })).to.emit(pad, "DevBuy");
+      const addr = await pad.connect(creator).createToken.staticCall("Dev", "DEV", NO_META, saltFor("Dev"), { value });
+      await expect(pad.connect(creator).createToken("Dev", "DEV", NO_META, saltFor("Dev"), { value })).to.emit(pad, "DevBuy");
 
       const token = await ethers.getContractAt("PotatoToken", addr);
       const bal = await token.balanceOf(creator.address);
@@ -358,8 +397,8 @@ describe("PotatoPad v2 (direct-to-Uniswap single-sided launch)", () => {
       ).deploy(revTreasury.target, START_FDV, TOP_FDV, ANTI_SNIPE_BLOCKS, v3Factory.target, npm.target, weth.target);
       const locker = await ethers.getContractAt("PotatoFeeLocker", await pad.locker());
 
-      const tokenAddr = await pad.connect(creator).createToken.staticCall("Rev", "REV", NO_META);
-      await pad.connect(creator).createToken("Rev", "REV", NO_META);
+      const tokenAddr = await pad.connect(creator).createToken.staticCall("Rev", "REV", NO_META, saltFor("Rev"));
+      await pad.connect(creator).createToken("Rev", "REV", NO_META, saltFor("Rev"));
       const info = await pad.tokens(tokenAddr);
       await mine(ANTI_SNIPE_BLOCKS + 1);
 

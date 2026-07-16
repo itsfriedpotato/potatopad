@@ -12,7 +12,7 @@ import type { Address, PublicClient } from "viem";
 import { parseAbiItem } from "viem";
 import { usePublicClient, useWatchContractEvent } from "wagmi";
 import { potatoPadAbi, potatoTokenAbi } from "@/lib/abi";
-import { PAD_START_BLOCK, ZERO_ADDRESS } from "@/lib/config";
+import { PAD_START_BLOCK, ZERO_ADDRESS, padDeployments } from "@/lib/config";
 import { usePad } from "@/lib/hooks";
 
 const tokenCreatedEvent = parseAbiItem(
@@ -93,6 +93,8 @@ export interface CreationEvent {
   telegram: string;
   timestamp: number;
   blockNumber: bigint;
+  /** The pad (primary or legacy) that launched this token. */
+  pad: Address;
 }
 
 interface LaunchActivity {
@@ -106,39 +108,63 @@ export function useLaunchActivity() {
   const { pad, chainId, isDeployed } = usePad();
   const client = usePublicClient();
   const queryClient = useQueryClient();
-  const queryKey = useMemo(() => ["launch-activity", chainId, pad], [chainId, pad]);
+  const pads = useMemo(() => padDeployments(chainId), [chainId]);
+  const queryKey = useMemo(
+    () => ["launch-activity", chainId, pads.map((p) => p.address).join(",")],
+    [chainId, pads],
+  );
 
   const query = useQuery<LaunchActivity>({
     queryKey,
-    enabled: isDeployed && !!client,
+    enabled: isDeployed && !!client && pads.length > 0,
     staleTime: 15_000,
     queryFn: async () => {
       if (!client) return EMPTY_LAUNCH;
       try {
         const latest = await client.getBlockNumber();
-        const startBlock = PAD_START_BLOCK[chainId] ?? 0n;
-        const createdLogs = await collectLogs(startBlock, latest, (from, to) =>
-          client.getLogs({ address: pad, event: tokenCreatedEvent, fromBlock: from, toBlock: to }),
+        // Scan TokenCreated on every pad (primary + legacy), each from its own
+        // deploy block, and tag each log with the pad that emitted it.
+        const perPad = await Promise.all(
+          pads.map(async (p) => {
+            const logs = await collectLogs(p.startBlock, latest, (from, to) =>
+              client.getLogs({
+                address: p.address,
+                event: tokenCreatedEvent,
+                fromBlock: from,
+                toBlock: to,
+              }),
+            );
+            return logs.map((log) => ({ log, pad: p.address }));
+          }),
         );
+        const tagged = perPad.flat();
         const ts = await fetchBlockTimestamps(
           client,
           chainId,
-          createdLogs.map((l) => l.blockNumber),
+          tagged.map((t) => t.log.blockNumber),
         );
-        const creations: CreationEvent[] = createdLogs.map((l) => ({
-          token: l.args.token as Address,
-          creator: l.args.creator as Address,
-          name: l.args.name ?? "",
-          symbol: l.args.symbol ?? "",
-          pool: (l.args.pool as Address) ?? ZERO_ADDRESS,
-          imageURI: l.args.imageURI ?? "",
-          website: l.args.website ?? "",
-          twitter: l.args.twitter ?? "",
-          telegram: l.args.telegram ?? "",
-          timestamp: ts.get(l.blockNumber) ?? 0,
-          blockNumber: l.blockNumber,
-        }));
-        return { creations, unavailable: false };
+        // A token belongs to exactly one pad; dedupe by token address.
+        const byToken = new Map<string, CreationEvent>();
+        for (const { log: l, pad: padAddr } of tagged) {
+          const token = l.args.token as Address;
+          const key = token.toLowerCase();
+          if (byToken.has(key)) continue;
+          byToken.set(key, {
+            token,
+            creator: l.args.creator as Address,
+            name: l.args.name ?? "",
+            symbol: l.args.symbol ?? "",
+            pool: (l.args.pool as Address) ?? ZERO_ADDRESS,
+            imageURI: l.args.imageURI ?? "",
+            website: l.args.website ?? "",
+            twitter: l.args.twitter ?? "",
+            telegram: l.args.telegram ?? "",
+            timestamp: ts.get(l.blockNumber) ?? 0,
+            blockNumber: l.blockNumber,
+            pad: padAddr,
+          });
+        }
+        return { creations: Array.from(byToken.values()), unavailable: false };
       } catch {
         // RPC capped the range / log queries unsupported — degrade gracefully.
         return { ...EMPTY_LAUNCH, unavailable: true };
@@ -146,6 +172,7 @@ export function useLaunchActivity() {
     },
   });
 
+  // Live updates: watch the primary (write) pad; legacy pads are historical.
   useWatchContractEvent({
     address: pad,
     abi: potatoPadAbi,
@@ -205,7 +232,12 @@ export function useTokenHolders(token: Address | undefined) {
       if (!client || !token) return EMPTY_HOLDERS;
       try {
         const latest = await client.getBlockNumber();
-        const startBlock = PAD_START_BLOCK[chainId] ?? 0n;
+        // Scan from the EARLIEST pad's deploy block so a legacy token's full
+        // Transfer history is covered, not truncated at the newest pad's block.
+        const deployments = padDeployments(chainId);
+        const startBlock = deployments.length
+          ? deployments.reduce((m, p) => (p.startBlock < m ? p.startBlock : m), deployments[0].startBlock)
+          : (PAD_START_BLOCK[chainId] ?? 0n);
         const logs = await collectLogs(startBlock, latest, (from, to) =>
           client.getLogs({ address: token, event: transferEvent, fromBlock: from, toBlock: to }),
         );

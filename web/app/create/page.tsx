@@ -3,7 +3,7 @@
 import { Loader2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
-import { decodeEventLog, parseEther } from "viem";
+import { bytesToHex, decodeEventLog, parseEther } from "viem";
 import { potatoPadAbi } from "@/lib/abi";
 import { usePad, useTx } from "@/lib/hooks";
 import { formatEth, resolveImageUri, tryParseEther } from "@/lib/format";
@@ -90,6 +90,11 @@ export default function CreatePage() {
   function onSubmit(e: FormEvent) {
     e.preventDefault();
     if (!formValid || devBuyWei === undefined) return;
+    // Random CREATE2 salt: makes the new token's address unpredictable so a
+    // griefer can't pre-initialize its Uniswap pool to brick the launch. A fresh
+    // value per submit means a retry after the rare LaunchGriefed revert probes a
+    // brand-new candidate set.
+    const salt = bytesToHex(crypto.getRandomValues(new Uint8Array(32)));
     tx.writeContract({
       address: pad,
       abi: potatoPadAbi,
@@ -103,6 +108,7 @@ export default function CreatePage() {
           twitter: twitter.trim(),
           telegram: telegram.trim(),
         },
+        salt,
       ],
       value: devBuyWei,
     });

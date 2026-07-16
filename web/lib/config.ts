@@ -71,10 +71,50 @@ export const QUOTER_ADDRESSES: Record<number, Address | undefined> = {
  * (fine for a fresh local chain). UPDATE the live value when you redeploy the pad.
  */
 export const PAD_START_BLOCK: Record<number, bigint> = {
-  [robinhoodChain.id]: 11_481_181n, // deploy block of v2 pad 0xc127…a79d
+  [robinhoodChain.id]: 11_555_000n, // deploy block of the CREATE2 pad 0x12A0…D91F
   [baseSepolia.id]: 0n,
   [hardhat.id]: 0n,
 };
+
+/** A single PotatoPad deployment: its address and the block to scan logs from. */
+export interface PadDeployment {
+  address: Address;
+  startBlock: bigint;
+}
+
+/**
+ * Read-only pads from EARLIER deploys that still custody launched tokens. The
+ * primary (write) pad lives in {PAD_ADDRESSES} via env; these are historical,
+ * hard-coded address constants so their tokens keep showing after a repoint.
+ */
+export const LEGACY_PADS: Record<number, PadDeployment[]> = {
+  [robinhoodChain.id]: [
+    // v2 pad (pre-CREATE2 fix). Still holds CHIP + anything launched on it.
+    { address: "0xc12723c251dABcBe10c4F44060A6AE6b5E96a79d", startBlock: 11_481_181n },
+  ],
+};
+
+/**
+ * Every pad to READ for a chain when discovering / resolving tokens: the primary
+ * (write) pad first, then legacy pads. Deduped by address and stripped of the
+ * zero address, so if the primary env pad still equals a legacy one we never
+ * double-scan.
+ */
+export function padDeployments(chainId: number): PadDeployment[] {
+  const all: PadDeployment[] = [
+    { address: PAD_ADDRESSES[chainId] ?? ZERO_ADDRESS, startBlock: PAD_START_BLOCK[chainId] ?? 0n },
+    ...(LEGACY_PADS[chainId] ?? []),
+  ];
+  const seen = new Set<string>();
+  const out: PadDeployment[] = [];
+  for (const p of all) {
+    const key = p.address.toLowerCase();
+    if (p.address === ZERO_ADDRESS || seen.has(key)) continue;
+    seen.add(key);
+    out.push(p);
+  }
+  return out;
+}
 
 export const SUPPORTED_CHAINS = [robinhoodChain, baseSepolia, hardhat] as const;
 

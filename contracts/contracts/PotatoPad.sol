@@ -73,6 +73,12 @@ contract PotatoPad is ReentrancyGuard {
     /// @notice Anti-snipe max wallet: 5% of supply during the launch window.
     uint256 public constant MAX_WALLET = TOTAL_SUPPLY / 20;
 
+    /// @notice How many CREATE2 salts {createToken} will probe to find a token
+    ///         address whose Uniswap pool a griefer hasn't already front-run.
+    ///         In normal operation the very first candidate is clean (one probe);
+    ///         this only iterates under an active griefing attack.
+    uint256 public constant MAX_SALT_TRIES = 64;
+
     // ----------------------------------------------------------- immutables --
 
     /// @notice Receives the protocol half of all LP fees (via the locker).
@@ -141,6 +147,7 @@ contract PotatoPad is ReentrancyGuard {
     error NotSingleSided();
     error SeedFailed();
     error TickRangeInvalid();
+    error LaunchGriefed();
 
     // ---------------------------------------------------------- constructor --
 
@@ -193,15 +200,78 @@ contract PotatoPad is ReentrancyGuard {
     ///         with the attached ETH.
     /// @dev During the anti-snipe window a dev-buy is capped like any wallet at
     ///      MAX_WALLET (5%); size the attached ETH so the output stays under it.
-    function createToken(string calldata name, string calldata symbol, TokenMeta calldata meta)
-        external
-        payable
-        nonReentrant
-        returns (address token)
-    {
-        // 1. Deploy the fixed-supply token; entire supply minted to this pad.
+    /// @param salt Caller-supplied entropy for the token's CREATE2 address. Pass a
+    ///        fresh RANDOM value each call: it makes the token address unpredictable
+    ///        so a griefer can't pre-initialize its Uniswap pool at a hostile price
+    ///        to brick the launch (see the CREATE2 rationale in the body). On the
+    ///        rare {LaunchGriefed} revert, retry with a new random salt.
+    function createToken(
+        string calldata name,
+        string calldata symbol,
+        TokenMeta calldata meta,
+        bytes32 salt
+    ) external payable nonReentrant returns (address token) {
+        // 1. Deploy the fixed-supply token with CREATE2, at an address that has NO
+        //    pre-existing Uniswap pool and NO code.
+        //
+        //    Why not plain CREATE: a token deployed with `new PotatoToken(...)`
+        //    lands at an address that is a pure function of the pad's nonce, so
+        //    anyone can compute the *next* one. The Uniswap factory lets you
+        //    `createPool` + `initialize` a pool for a token that doesn't exist yet,
+        //    so a griefer could pre-initialize the pool at a hostile price, making
+        //    our single-sided mint revert. And because a reverted createToken rolls
+        //    the pad's nonce back, that SAME address (and poisoned pool) would be
+        //    retried forever: one ~gas-only transaction would brick every future
+        //    launch permanently.
+        //
+        //    Fix: CREATE2 off the caller's RANDOM `salt`, skipping any address a
+        //    griefer has already taken. The salt is unpredictable until the tx hits
+        //    the mempool, so the pool can't be pre-poisoned; if a front-run still
+        //    races us, the loop just walks to the next free address. If a griefer
+        //    somehow takes ALL {MAX_SALT_TRIES} candidates, we revert and the caller
+        //    retries with a fresh random salt — an entirely new candidate set. No
+        //    attacker can poison every future candidate, so a clean launch is always
+        //    one retry away: no permanent brick.
+        bytes32 initCodeHash = keccak256(
+            abi.encodePacked(
+                type(PotatoToken).creationCode,
+                abi.encode(
+                    name,
+                    symbol,
+                    TOTAL_SUPPLY,
+                    address(this),
+                    address(positionManager),
+                    address(locker),
+                    MAX_WALLET,
+                    antiSnipeBlocks
+                )
+            )
+        );
+
+        // Seed from caller + their random salt, then walk past any taken candidate.
+        uint256 seed = uint256(keccak256(abi.encode(msg.sender, salt)));
+        uint256 tries;
+        address predicted;
+        for (; tries < MAX_SALT_TRIES;) {
+            predicted = _computeTokenAddress(bytes32(seed), initCodeHash);
+            // Clean iff no pool exists for token/WETH AND the address holds no code
+            // (either would make our own createPool / CREATE2 deploy fail).
+            if (v3Factory.getPool(predicted, address(weth), POOL_FEE) == address(0) && predicted.code.length == 0)
+            {
+                break;
+            }
+            unchecked {
+                ++tries;
+                ++seed;
+            }
+        }
+        // Every candidate is taken: an attacker has burned ~MAX_SALT_TRIES pool
+        // inits front-running this exact salt. Fail cleanly; the caller retries with
+        // a fresh random salt for a brand-new (un-pre-poisonable) candidate set.
+        if (tries == MAX_SALT_TRIES) revert LaunchGriefed();
+
         token = address(
-            new PotatoToken(
+            new PotatoToken{salt: bytes32(seed)}(
                 name,
                 symbol,
                 TOTAL_SUPPLY,
@@ -212,12 +282,14 @@ contract PotatoPad is ReentrancyGuard {
                 antiSnipeBlocks
             )
         );
+        // CREATE2 determinism: the deployed address is exactly the one we vetted.
+        assert(token == predicted);
 
         bool tokenIs0 = token < address(weth);
         (int24 tickLower, int24 tickUpper, int24 initTick) = _rangeFor(tokenIs0);
 
-        // 2. Create the pool. The token is freshly deployed, so this address pair
-        //    cannot already have a pool — but stay defensive.
+        // 2. Create the pool. We vetted above that no pool exists for this token,
+        //    so this always deploys a fresh pool that only we initialize.
         address pool = v3Factory.getPool(token, address(weth), POOL_FEE);
         if (pool == address(0)) {
             pool = v3Factory.createPool(token, address(weth), POOL_FEE);
@@ -294,10 +366,10 @@ contract PotatoPad is ReentrancyGuard {
         }
 
         // The seed MUST be pure token: zero WETH, real liquidity, ~the whole
-        // supply deployed. This also fails-closed against a front-run that
-        // pre-initialized the pool at a price where our range needs WETH (the
-        // mint would otherwise silently seed ~nothing) — createToken reverts
-        // instead of producing a broken launch; the creator simply retries.
+        // supply deployed. Defense-in-depth: createToken already guarantees a
+        // fresh, self-initialized pool (see the CREATE2 salt logic), so a poisoned
+        // pool can't reach here — but if one ever did, we revert rather than
+        // produce a broken launch.
         if (wethUsed != 0) revert NotSingleSided();
         if (liquidity == 0 || tokenUsed < supply - supply / 1000) revert SeedFailed();
     }
@@ -392,6 +464,15 @@ contract PotatoPad is ReentrancyGuard {
     function _fdvFromSqrtPriceX96(uint160 sqrtPriceX96) internal pure returns (uint256) {
         uint256 p = uint256(sqrtPriceX96);
         return Math.mulDiv(p * p, TOTAL_SUPPLY, 1 << 192);
+    }
+
+    /// @dev The CREATE2 address a token with `initCodeHash` deploys to from this
+    ///      pad for a given `salt`. Lets {createToken} vet an address (no pool, no
+    ///      code) BEFORE committing the deploy.
+    function _computeTokenAddress(bytes32 salt, bytes32 initCodeHash) internal view returns (address) {
+        return address(
+            uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, initCodeHash))))
+        );
     }
 
     /// @dev Rounds a tick to the nearest multiple of TICK_SPACING.
