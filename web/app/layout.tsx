@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import "./globals.css";
 import { Providers } from "./providers";
 import { ChainSync } from "@/components/ChainSync";
+import { DisclaimerGate } from "@/components/DisclaimerGate";
 import { Footer } from "@/components/Footer";
 import { Header } from "@/components/Header";
 import { SearchProvider } from "@/components/SearchContext";
@@ -19,6 +20,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       <body>
         <Providers>
           <ChainSync />
+          <DisclaimerGate />
           <SearchProvider>
             <div className="flex min-h-screen flex-col">
               <div className="sticky top-0 z-40">
