@@ -2,6 +2,8 @@
 
 An open-source, pump.fun-style bonding-curve launchpad that graduates tokens into permanently locked Uniswap V3 liquidity. Built to be read, forked, and shipped by people who want to understand exactly how a launchpad works, end to end.
 
+**Live demo: [potato.fm](https://potato.fm/)**
+
 > Demo software. Unaudited. Not production-ready. Not financial advice. This exists to showcase how curve-launchpad mechanics work. Read every line before it touches real money.
 
 This README is written to be vibecoded: if you can run a few terminal commands and edit an env file, you can run the whole thing locally, deploy it to a testnet, and host the website. Every step is spelled out below.
