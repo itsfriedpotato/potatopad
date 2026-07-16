@@ -1,0 +1,57 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-neutral-950 text-neutral-200 antialiased selection:bg-amber-500/30;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-xl border border-neutral-800 bg-neutral-900/50;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply btn bg-amber-500 text-neutral-900 hover:bg-amber-400;
+  }
+
+  .btn-secondary {
+    @apply btn border border-neutral-800 bg-neutral-900 text-neutral-300 hover:border-amber-500/40 hover:text-neutral-100;
+  }
+
+  .btn-danger {
+    @apply btn bg-red-500/20 text-red-400 ring-1 ring-inset ring-red-500/40 hover:bg-red-500/30;
+  }
+
+  .input {
+    @apply w-full rounded-lg border border-neutral-800 bg-neutral-950 px-3.5 py-2.5 text-neutral-100 placeholder-neutral-600 outline-none transition-colors focus:border-amber-500/60;
+  }
+
+  .label {
+    @apply mb-1.5 block text-xs font-semibold uppercase tracking-wider text-neutral-500;
+  }
+
+  .skeleton {
+    @apply animate-pulse rounded-lg bg-neutral-800/80;
+  }
+}
+
+/* Ticker-strip marquee: content is rendered twice, shift by exactly half. */
+@keyframes marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+.animate-marquee {
+  animation: marquee 40s linear infinite;
+}
