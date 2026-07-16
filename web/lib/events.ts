@@ -8,16 +8,13 @@
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
-import type { Address, PublicClient } from "viem";
+import type { Address } from "viem";
 import { parseAbiItem } from "viem";
 import { usePublicClient, useWatchContractEvent } from "wagmi";
 import { potatoPadAbi, potatoTokenAbi } from "@/lib/abi";
 import { PAD_START_BLOCK, ZERO_ADDRESS, padDeployments } from "@/lib/config";
 import { usePad } from "@/lib/hooks";
 
-const tokenCreatedEvent = parseAbiItem(
-  "event TokenCreated(address indexed token, address indexed creator, string name, string symbol, address pool, string imageURI, string website, string twitter, string telegram)",
-);
 const transferEvent = parseAbiItem(
   "event Transfer(address indexed from, address indexed to, uint256 value)",
 );
@@ -106,45 +103,7 @@ function writeLaunchCache(key: string, data: LaunchActivity) {
 }
 
 // ---------------------------------------------------------------------------
-// Block timestamps (module-level cache; block timestamps never change)
-// ---------------------------------------------------------------------------
-
-const timestampCache = new Map<string, number>();
-
-async function fetchBlockTimestamps(
-  client: PublicClient,
-  chainId: number,
-  blockNumbers: bigint[],
-): Promise<Map<bigint, number>> {
-  const out = new Map<bigint, number>();
-  const missing: bigint[] = [];
-  const seen = new Set<string>();
-
-  for (const bn of blockNumbers) {
-    const key = bn.toString();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const cached = timestampCache.get(`${chainId}:${key}`);
-    if (cached !== undefined) out.set(bn, cached);
-    else missing.push(bn);
-  }
-
-  const CHUNK = 20;
-  for (let i = 0; i < missing.length; i += CHUNK) {
-    const blocks = await Promise.all(
-      missing.slice(i, i + CHUNK).map((n) => client.getBlock({ blockNumber: n })),
-    );
-    for (const block of blocks) {
-      const ts = Number(block.timestamp);
-      timestampCache.set(`${chainId}:${block.number.toString()}`, ts);
-      out.set(block.number, ts);
-    }
-  }
-  return out;
-}
-
-// ---------------------------------------------------------------------------
-// Launch activity: TokenCreated (ticker, card ages, symbols, pool addresses)
+// Launch activity: TokenCreated, served pre-scanned + cached by /api/tokens
 // ---------------------------------------------------------------------------
 
 export interface CreationEvent {
@@ -172,7 +131,6 @@ const EMPTY_LAUNCH: LaunchActivity = { creations: [], unavailable: false };
 
 export function useLaunchActivity() {
   const { pad, chainId, isDeployed } = usePad();
-  const client = usePublicClient();
   const queryClient = useQueryClient();
   const pads = useMemo(() => padDeployments(chainId), [chainId]);
   const queryKey = useMemo(
@@ -183,67 +141,40 @@ export function useLaunchActivity() {
 
   const query = useQuery<LaunchActivity>({
     queryKey,
-    enabled: isDeployed && !!client && pads.length > 0,
+    enabled: isDeployed && pads.length > 0,
     // Cached refreshes paint instantly (initialData) and revalidate in the
-    // background; only truly cold loads wait on the scan.
+    // background; the scan itself now runs server-side (cached) at /api/tokens,
+    // so no visitor pays the multi-pad getLogs cost anymore.
     staleTime: 60_000,
     gcTime: 24 * 60 * 60 * 1000,
     initialData: () => readLaunchCache(cacheKey)?.data,
     initialDataUpdatedAt: () => readLaunchCache(cacheKey)?.updatedAt,
     queryFn: async () => {
-      if (!client) return EMPTY_LAUNCH;
       try {
-        const latest = await client.getBlockNumber();
-        // Scan TokenCreated on every pad (primary + legacy), each from its own
-        // deploy block, and tag each log with the pad that emitted it.
-        const perPad = await Promise.all(
-          pads.map(async (p) => {
-            const logs = await collectLogs(p.startBlock, latest, (from, to) =>
-              client.getLogs({
-                address: p.address,
-                event: tokenCreatedEvent,
-                fromBlock: from,
-                toBlock: to,
-              }),
-            );
-            return logs.map((log) => ({ log, pad: p.address }));
-          }),
-        );
-        const tagged = perPad.flat();
-        const ts = await fetchBlockTimestamps(
-          client,
-          chainId,
-          tagged.map((t) => t.log.blockNumber),
-        );
-        // A token belongs to exactly one pad; dedupe by token address.
-        const byToken = new Map<string, CreationEvent>();
-        for (const { log: l, pad: padAddr } of tagged) {
-          const token = l.args.token as Address;
-          const key = token.toLowerCase();
-          if (byToken.has(key)) continue;
-          byToken.set(key, {
-            token,
-            creator: l.args.creator as Address,
-            name: l.args.name ?? "",
-            symbol: l.args.symbol ?? "",
-            pool: (l.args.pool as Address) ?? ZERO_ADDRESS,
-            imageURI: l.args.imageURI ?? "",
-            website: l.args.website ?? "",
-            twitter: l.args.twitter ?? "",
-            telegram: l.args.telegram ?? "",
-            timestamp: ts.get(l.blockNumber) ?? 0,
-            blockNumber: l.blockNumber,
-            pad: padAddr,
-          });
-        }
-        const result: LaunchActivity = {
-          creations: Array.from(byToken.values()),
-          unavailable: false,
+        const res = await fetch("/api/tokens");
+        if (!res.ok) return { ...EMPTY_LAUNCH, unavailable: true };
+        const json = (await res.json()) as {
+          creations: Array<Omit<CreationEvent, "blockNumber"> & { blockNumber: string }>;
+          unavailable: boolean;
         };
+        const creations: CreationEvent[] = (json.creations ?? []).map((c) => ({
+          token: c.token,
+          creator: c.creator,
+          name: c.name,
+          symbol: c.symbol,
+          pool: c.pool,
+          imageURI: c.imageURI,
+          website: c.website,
+          twitter: c.twitter,
+          telegram: c.telegram,
+          timestamp: c.timestamp,
+          blockNumber: BigInt(c.blockNumber),
+          pad: c.pad,
+        }));
+        const result: LaunchActivity = { creations, unavailable: !!json.unavailable };
         writeLaunchCache(cacheKey, result);
         return result;
       } catch {
-        // RPC capped the range / log queries unsupported — degrade gracefully.
         return { ...EMPTY_LAUNCH, unavailable: true };
       }
     },
