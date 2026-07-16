@@ -4,25 +4,33 @@ import { NextRequest, NextResponse } from "next/server";
  * Server-side JSON-RPC proxy for Robinhood Chain.
  *
  * The browser talks to THIS route (same-origin /api/rpc); it forwards to the
- * Alchemy endpoint held in the server-only ROBINHOOD_RPC_URL env var. The
- * Alchemy key therefore never ships to the client and can't be scraped.
+ * Alchemy endpoint(s) held in server-only env vars. The Alchemy keys therefore
+ * never ship to the client and can't be scraped.
  *
  * Two abuse guards:
- *   1. Method allowlist — only read-only JSON-RPC calls pass, so the endpoint
- *      can't be used to relay transactions or open subscriptions. Wallet writes
- *      go through the user's own wallet RPC, never this proxy.
+ *   1. Method denylist — block only methods that could relay transactions or
+ *      open subscriptions through our key. Everything else (all reads, incl. the
+ *      event filters viem uses) passes. Wallet writes go through the user's own
+ *      wallet RPC, never this proxy.
  *   2. A coarse in-memory per-IP rate limit — fine on a single Railway instance;
  *      for multi-instance or serious protection, put Cloudflare / a shared store
  *      in front.
+ *
+ * Multiple upstreams: requests are round-robined across every configured Alchemy
+ * endpoint and fail over to the next on a 429 (compute-unit limit) or 5xx, so a
+ * spike on one key spills to another instead of surfacing as an error. Add more
+ * keys via ROBINHOOD_RPC_URL, ROBINHOOD_RPC_URL_2, ROBINHOOD_RPC_URL_3.
  */
 
-const UPSTREAM =
-  process.env.ROBINHOOD_RPC_URL || "https://rpc.mainnet.chain.robinhood.com";
+const UPSTREAMS = [
+  process.env.ROBINHOOD_RPC_URL,
+  process.env.ROBINHOOD_RPC_URL_2,
+  process.env.ROBINHOOD_RPC_URL_3,
+].filter((u): u is string => !!u && u.length > 0);
+if (UPSTREAMS.length === 0) UPSTREAMS.push("https://rpc.mainnet.chain.robinhood.com");
 
 // Denylist, not allowlist: block only the methods that could be abused to relay
-// transactions or open subscriptions through our key. Everything else (all reads,
-// incl. event filters viem uses) passes, so the app keeps working; the rate
-// limiter caps volume. Wallet writes go through the user's own wallet RPC anyway.
+// transactions or open subscriptions through our key.
 const BLOCKED_METHODS = new Set([
   "eth_sendRawTransaction",
   "eth_sendTransaction",
@@ -36,8 +44,10 @@ const BLOCKED_METHODS = new Set([
 ]);
 
 // Coarse per-IP sliding-window limiter (in-memory; nodejs runtime keeps it warm).
+// Sized for the app's own read bursts (multi-pad log scans + multicalls) while
+// still capping outright abuse.
 const WINDOW_MS = 10_000;
-const MAX_PER_WINDOW = 200;
+const MAX_PER_WINDOW = 500;
 const hits = new Map<string, number[]>();
 
 function rateLimited(ip: string): boolean {
@@ -51,6 +61,37 @@ function rateLimited(ip: string): boolean {
     }
   }
   return recent.length > MAX_PER_WINDOW;
+}
+
+// Round-robin starting point across upstreams; module-level so it persists warm.
+let rrCounter = 0;
+
+/**
+ * Forward the JSON-RPC body to the upstreams. Starts at a round-robin offset and
+ * fails over to the next upstream on a 429 or 5xx. Returns the first response
+ * that is neither, or the last throttled/errored response if all are exhausted.
+ */
+async function forward(bodyStr: string): Promise<{ status: number; text: string }> {
+  const n = UPSTREAMS.length;
+  const start = rrCounter++ % n;
+  let last: { status: number; text: string } | null = null;
+  for (let i = 0; i < n; i++) {
+    const url = UPSTREAMS[(start + i) % n];
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: bodyStr,
+        cache: "no-store",
+      });
+      const text = await res.text();
+      if (res.status !== 429 && res.status < 500) return { status: res.status, text };
+      last = { status: res.status, text }; // 429 / 5xx — try the next upstream
+    } catch {
+      // network error — try the next upstream
+    }
+  }
+  return last ?? { status: 502, text: JSON.stringify({ error: "upstream unreachable" }) };
 }
 
 export async function POST(req: NextRequest) {
@@ -80,21 +121,9 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  let upstream: Response;
-  try {
-    upstream = await fetch(UPSTREAM, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-      cache: "no-store",
-    });
-  } catch {
-    return NextResponse.json({ error: "upstream unreachable" }, { status: 502 });
-  }
-
-  const text = await upstream.text();
+  const { status, text } = await forward(JSON.stringify(body));
   return new NextResponse(text, {
-    status: upstream.status,
+    status,
     headers: { "content-type": "application/json" },
   });
 }
