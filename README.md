@@ -4,6 +4,8 @@ An open-source, pump.fun-style bonding-curve launchpad that graduates tokens int
 
 **Live demo: [potato.fm](https://potato.fm/)**
 
+**Official $CHIP contract (Robinhood Chain):** `0x1e4d3243a287EDb687A4cBf2A1223dA54E8c835f` — this is the **only** official token address. Any other address circulating (e.g. `0xee218888246d9e7db71d2afbfb02fcc952b1623d`) is **not** the official contract. Always verify here before you trade.
+
 > Demo software. Unaudited. Not production-ready. Not financial advice. This exists to showcase how curve-launchpad mechanics work. Read every line before it touches real money.
 
 This README is written to be vibecoded: if you can run a few terminal commands and edit an env file, you can run the whole thing locally, deploy it to a testnet, and host the website. Every step is spelled out below.
