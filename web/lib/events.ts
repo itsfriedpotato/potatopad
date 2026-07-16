@@ -25,18 +25,84 @@ const transferEvent = parseAbiItem(
 // Live RPCs cap eth_getLogs block ranges (Alchemy on Robinhood = 10k blocks), so
 // scan forward from the pad's deploy block in sub-cap windows and concatenate.
 const LOG_CHUNK = 9_000n;
+// Run this many window fetches at once: cuts wall-clock on wide (legacy-pad) scans
+// without a burst big enough to trip the RPC compute-unit limit.
+const SCAN_CONCURRENCY = 4;
 
 async function collectLogs<T>(
   fromBlock: bigint,
   toBlock: bigint,
   fetchRange: (from: bigint, to: bigint) => Promise<T[]>,
 ): Promise<T[]> {
-  const out: T[] = [];
+  const ranges: [bigint, bigint][] = [];
   for (let start = fromBlock; start <= toBlock; start += LOG_CHUNK + 1n) {
     const end = start + LOG_CHUNK <= toBlock ? start + LOG_CHUNK : toBlock;
-    out.push(...(await fetchRange(start, end)));
+    ranges.push([start, end]);
+  }
+  const out: T[] = [];
+  for (let i = 0; i < ranges.length; i += SCAN_CONCURRENCY) {
+    const batch = ranges.slice(i, i + SCAN_CONCURRENCY);
+    const results = await Promise.all(batch.map(([from, to]) => fetchRange(from, to)));
+    for (const r of results) out.push(...r);
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// localStorage cache for the launch feed (bigint-safe). The historical scan is
+// expensive; persisting it means a refresh paints instantly from cache and
+// revalidates in the background instead of re-scanning cold every time.
+// ---------------------------------------------------------------------------
+
+const LAUNCH_CACHE_PREFIX = "potatopad:launch:v2:";
+
+// JSON can't hold bigint; tag them as {__b} so token names/symbols that happen to
+// look numeric are never mistaken for one.
+function launchReplacer(_key: string, value: unknown) {
+  return typeof value === "bigint" ? { __b: value.toString() } : value;
+}
+function launchReviver(_key: string, value: unknown) {
+  if (
+    value &&
+    typeof value === "object" &&
+    typeof (value as { __b?: unknown }).__b === "string" &&
+    Object.keys(value as object).length === 1
+  ) {
+    return BigInt((value as { __b: string }).__b);
+  }
+  return value;
+}
+
+interface CachedLaunch {
+  data: LaunchActivity;
+  updatedAt: number;
+}
+
+function readLaunchCache(key: string): CachedLaunch | undefined {
+  if (typeof window === "undefined") return undefined;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return undefined;
+    const parsed = JSON.parse(raw, launchReviver) as CachedLaunch;
+    if (!parsed?.data || !Array.isArray(parsed.data.creations)) return undefined;
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeLaunchCache(key: string, data: LaunchActivity) {
+  if (typeof window === "undefined") return;
+  try {
+    // Never cache an empty/failed scan — it would mask a real result on refresh.
+    if (data.unavailable || data.creations.length === 0) return;
+    window.localStorage.setItem(
+      key,
+      JSON.stringify({ data, updatedAt: Date.now() } satisfies CachedLaunch, launchReplacer),
+    );
+  } catch {
+    // quota / disabled storage — caching is best-effort.
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -113,11 +179,17 @@ export function useLaunchActivity() {
     () => ["launch-activity", chainId, pads.map((p) => p.address).join(",")],
     [chainId, pads],
   );
+  const cacheKey = LAUNCH_CACHE_PREFIX + chainId + ":" + pads.map((p) => p.address).join(",");
 
   const query = useQuery<LaunchActivity>({
     queryKey,
     enabled: isDeployed && !!client && pads.length > 0,
-    staleTime: 15_000,
+    // Cached refreshes paint instantly (initialData) and revalidate in the
+    // background; only truly cold loads wait on the scan.
+    staleTime: 60_000,
+    gcTime: 24 * 60 * 60 * 1000,
+    initialData: () => readLaunchCache(cacheKey)?.data,
+    initialDataUpdatedAt: () => readLaunchCache(cacheKey)?.updatedAt,
     queryFn: async () => {
       if (!client) return EMPTY_LAUNCH;
       try {
@@ -164,7 +236,12 @@ export function useLaunchActivity() {
             pad: padAddr,
           });
         }
-        return { creations: Array.from(byToken.values()), unavailable: false };
+        const result: LaunchActivity = {
+          creations: Array.from(byToken.values()),
+          unavailable: false,
+        };
+        writeLaunchCache(cacheKey, result);
+        return result;
       } catch {
         // RPC capped the range / log queries unsupported — degrade gracefully.
         return { ...EMPTY_LAUNCH, unavailable: true };
