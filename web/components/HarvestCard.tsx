@@ -1,7 +1,7 @@
 "use client";
 
 import { Coins, Leaf, Lock } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Address } from "viem";
 import { useAccount, useReadContract } from "wagmi";
 import { potatoFeeLockerAbi, potatoPadAbi } from "@/lib/abi";
@@ -14,24 +14,43 @@ import { TxStatus } from "@/components/TxStatus";
 
 type ClaimAsset = "weth" | "token";
 
-/**
- * Orchestration for collect → ordered claims. One machine owns the whole flow so
- * latched receipt flags from a prior claim cannot re-fire claims later, and
- * independent claimable refetches cannot start the wrong asset first.
- */
+/** Immutable binding for a collect→claim orchestration — rejects stale continuations. */
+type FlowCtx = {
+  user: string;
+  chainId: number;
+  locker: string;
+  token: string;
+  creator: string;
+  lpTokenId: string;
+};
+
 type FeeFlow =
   | { kind: "idle" }
-  /** Collect mined; waiting for a fresh (post-collect) claimable snapshot. */
-  | { kind: "await_claimables"; collectHash: string; minUpdatedAt: number }
-  /** Ordered queue of assets still to claim (WETH always before token). */
+  | {
+      kind: "await_claimables";
+      collectHash: string;
+      minUpdatedAt: number;
+      ctx: FlowCtx;
+    }
   | {
       kind: "claiming";
       queue: ClaimAsset[];
       active: ClaimAsset;
       collectHash?: string;
-      /** Receipt hashes already consumed to advance the queue (dedupe). */
       advanced: ReadonlySet<string>;
+      ctx: FlowCtx;
     };
+
+function sameCtx(a: FlowCtx, b: FlowCtx): boolean {
+  return (
+    a.user === b.user &&
+    a.chainId === b.chainId &&
+    a.locker === b.locker &&
+    a.token === b.token &&
+    a.creator === b.creator &&
+    a.lpTokenId === b.lpTokenId
+  );
+}
 
 /**
  * v2 fee card: the launch LP is locked forever in the {PotatoFeeLocker}. Its
@@ -114,11 +133,28 @@ export function HarvestCard({
   const hasUncollected =
     (accrued.wethAmount ?? 0n) > 0n || (accrued.tokenAmount ?? 0n) > 0n;
 
+  // Live claimable snapshot for timeout callbacks (avoid stale closures).
+  const claimableRef = useRef({ weth: claimableWeth, token: claimableToken, known: claimablesKnown });
+  claimableRef.current = { weth: claimableWeth, token: claimableToken, known: claimablesKnown };
+
+  const ctx: FlowCtx = useMemo(
+    () => ({
+      user: (user ?? "").toLowerCase(),
+      chainId,
+      locker: lockerAddr.toLowerCase(),
+      token: token.toLowerCase(),
+      creator: creator.toLowerCase(),
+      lpTokenId: lpTokenId.toString(),
+    }),
+    [user, chainId, lockerAddr, token, creator, lpTokenId],
+  );
+  const ctxRef = useRef(ctx);
+  ctxRef.current = ctx;
+
   const [flow, setFlow] = useState<FeeFlow>({ kind: "idle" });
   const flowRef = useRef(flow);
   flowRef.current = flow;
 
-  // Stable refs to tx helpers so identity-reset effect doesn't need them as deps.
   const collectTxRef = useRef(collectTx);
   const claimWethTxRef = useRef(claimWethTx);
   const claimTokenTxRef = useRef(claimTokenTx);
@@ -126,14 +162,15 @@ export function HarvestCard({
   claimWethTxRef.current = claimWethTx;
   claimTokenTxRef.current = claimTokenTx;
 
-  // Drop in-flight orchestration when the user, chain, locker, or token changes
-  // so a latched receipt cannot claim against a different context.
+  // Bump epoch on context change; all in-flight continuations check this.
+  const epochRef = useRef(0);
   useEffect(() => {
+    epochRef.current += 1;
     setFlow({ kind: "idle" });
     collectTxRef.current.reset();
     claimWethTxRef.current.reset();
     claimTokenTxRef.current.reset();
-  }, [user, chainId, lockerAddr, token, creator, lpTokenId]);
+  }, [ctx.user, ctx.chainId, ctx.locker, ctx.token, ctx.creator, ctx.lpTokenId]);
 
   const busy =
     collectTx.busy ||
@@ -145,25 +182,30 @@ export function HarvestCard({
   const nothingToDo = !hasUncollected && !(isCreator && hasClaimable);
   const disabled = !lockerReady || busy || nothingToDo;
 
-  const writeClaim = useCallback((asset: ClaimAsset) => {
-    if (asset === "weth") {
-      claimWethTxRef.current.writeContract({
-        address: lockerAddr,
-        abi: potatoFeeLockerAbi,
-        functionName: "claim",
-        args: [weth],
-      });
-    } else {
-      claimTokenTxRef.current.writeContract({
-        address: lockerAddr,
-        abi: potatoFeeLockerAbi,
-        functionName: "claim",
-        args: [token],
-      });
-    }
-  }, [lockerAddr, weth, token]);
+  const writeClaim = useCallback(
+    (asset: ClaimAsset, expectedCtx: FlowCtx, epoch: number) => {
+      // Refuse to submit if the account/chain/token context drifted.
+      if (epoch !== epochRef.current) return;
+      if (!sameCtx(expectedCtx, ctxRef.current)) return;
+      if (asset === "weth") {
+        claimWethTxRef.current.writeContract({
+          address: lockerAddr,
+          abi: potatoFeeLockerAbi,
+          functionName: "claim",
+          args: [weth],
+        });
+      } else {
+        claimTokenTxRef.current.writeContract({
+          address: lockerAddr,
+          abi: potatoFeeLockerAbi,
+          functionName: "claim",
+          args: [token],
+        });
+      }
+    },
+    [lockerAddr, weth, token],
+  );
 
-  /** Build WETH-first claim queue from a known claimable snapshot. */
   function buildQueue(wethAmt: bigint, tokenAmt: bigint): ClaimAsset[] {
     const q: ClaimAsset[] = [];
     if (wethAmt > 0n) q.push("weth");
@@ -171,9 +213,10 @@ export function HarvestCard({
     return q;
   }
 
-  function startQueue(queue: ClaimAsset[], collectHash?: string) {
-    // Clear latched receipts so a prior confirmed claim can't immediately
-    // advance / re-fire the new queue.
+  function startQueue(queue: ClaimAsset[], collectHash: string | undefined, expectedCtx: FlowCtx) {
+    const epoch = epochRef.current;
+    if (!sameCtx(expectedCtx, ctxRef.current)) return;
+
     claimWethTxRef.current.reset();
     claimTokenTxRef.current.reset();
 
@@ -188,8 +231,9 @@ export function HarvestCard({
       active,
       collectHash,
       advanced: new Set(),
+      ctx: expectedCtx,
     });
-    writeClaim(active);
+    writeClaim(active, expectedCtx, epoch);
   }
 
   function collect() {
@@ -202,10 +246,9 @@ export function HarvestCard({
     });
   }
 
-  /** Manual claim of standing balances (no collect). Snapshot now → queue. */
   function claimStanding() {
     if (!claimablesKnown) return;
-    startQueue(buildQueue(claimableWeth, claimableToken));
+    startQueue(buildQueue(claimableWeth, claimableToken), undefined, ctx);
   }
 
   function handleClick() {
@@ -216,8 +259,8 @@ export function HarvestCard({
     collect();
   }
 
-  // Collect confirmed → wait for a post-collect claimable snapshot (both assets
-  // refreshed after invalidateQueries). Do not build the queue from pre-collect cache.
+  // Collect confirmed → wait for a fresh post-collect claimable snapshot.
+  // Only the creator who owns the current context may auto-claim.
   useEffect(() => {
     if (!collectTx.confirmed || !collectTx.hash || !isCreator) return;
     const f = flowRef.current;
@@ -227,30 +270,31 @@ export function HarvestCard({
     ) {
       return;
     }
-    // Ignore if mid manual claim with no collect linkage.
     if (f.kind === "claiming" && !f.collectHash) return;
+
+    // Snapshot the context at collect-handling time; later transitions must match.
+    const bound = ctxRef.current;
     setFlow({
       kind: "await_claimables",
       collectHash: collectTx.hash,
-      // Require claimable queries to have updated at/after this moment.
       minUpdatedAt: Date.now(),
+      ctx: bound,
     });
   }, [collectTx.confirmed, collectTx.hash, isCreator]);
 
-  // Once both claimables are known AND freshly updated after collect, freeze the
-  // ordered queue and start. Waiting on dataUpdatedAt + !isFetching closes the
-  // race where a standing token balance would claim before newly collected WETH
-  // appears in cache.
+  // Fresh claimables ready → freeze WETH-then-token queue.
   useEffect(() => {
     if (flow.kind !== "await_claimables") return;
+    if (!sameCtx(flow.ctx, ctx)) return; // context drifted — identity effect will idle
     if (!claimablesKnown) return;
     if (wethFetching || tokenFetching) return;
     if (wethUpdatedAt < flow.minUpdatedAt || tokenUpdatedAt < flow.minUpdatedAt) return;
 
-    startQueue(buildQueue(claimableWeth, claimableToken), flow.collectHash);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- deliberate snapshot when fresh
+    startQueue(buildQueue(claimableWeth, claimableToken), flow.collectHash, flow.ctx);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     flow,
+    ctx,
     claimablesKnown,
     claimableWeth,
     claimableToken,
@@ -260,28 +304,32 @@ export function HarvestCard({
     tokenUpdatedAt,
   ]);
 
-  // Fallback: if claimable queries never refresh (RPC stall), don't leave the
-  // creator stuck on "Preparing claim…". Proceed with best-known balances.
+  // Fallback: read latest claimables from refs so a partial refresh still
+  // includes newly collected WETH even if one query stalled.
   useEffect(() => {
     if (flow.kind !== "await_claimables") return;
     const collectHash = flow.collectHash;
+    const bound = flow.ctx;
     const t = setTimeout(() => {
       if (flowRef.current.kind !== "await_claimables") return;
       if (flowRef.current.collectHash !== collectHash) return;
-      startQueue(buildQueue(claimableWeth, claimableToken), collectHash);
+      if (!sameCtx(bound, ctxRef.current)) return;
+      const snap = claimableRef.current;
+      startQueue(buildQueue(snap.weth, snap.token), collectHash, bound);
     }, 8_000);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flow.kind === "await_claimables" ? flow.collectHash : null]);
 
-  // Advance the queue when the active claim confirms. Each receipt hash advances
-  // the machine at most once — never a separate effect on a latched WETH receipt.
+  // Advance queue on active claim confirmation (each receipt once).
   useEffect(() => {
     if (flow.kind !== "claiming") return;
+    if (!sameCtx(flow.ctx, ctx)) return;
     const activeTx = flow.active === "weth" ? claimWethTx : claimTokenTx;
     if (!activeTx.confirmed || !activeTx.hash) return;
     if (flow.advanced.has(activeTx.hash)) return;
 
+    const epoch = epochRef.current;
     const advanced = new Set(flow.advanced);
     advanced.add(activeTx.hash);
 
@@ -297,10 +345,12 @@ export function HarvestCard({
       active: next,
       collectHash: flow.collectHash,
       advanced,
+      ctx: flow.ctx,
     });
-    writeClaim(next);
+    writeClaim(next, flow.ctx, epoch);
   }, [
     flow,
+    ctx,
     claimWethTx.confirmed,
     claimWethTx.hash,
     claimTokenTx.confirmed,
@@ -308,8 +358,6 @@ export function HarvestCard({
     writeClaim,
   ]);
 
-  // If the active claim reverts or errors, abort the rest of the queue so we
-  // don't keep prompting the wallet against a broken state.
   useEffect(() => {
     if (flow.kind !== "claiming") return;
     const activeTx = flow.active === "weth" ? claimWethTx : claimTokenTx;
