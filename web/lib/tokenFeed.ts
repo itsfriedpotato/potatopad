@@ -56,7 +56,26 @@ const client = createPublicClient({
   transport: http(process.env.ROBINHOOD_RPC_URL || "https://rpc.mainnet.chain.robinhood.com"),
 });
 
-let cache: { payload: FeedPayload; expiresAt: number } | null = null;
+// When a Ponder indexer is configured, serve the feed from it, if not tthen from the app scan.
+const INDEXER_URL = process.env.INDEXER_URL?.replace(/\/+$/, "");
+
+async function fromIndexer(): Promise<FeedPayload | null> {
+  if (!INDEXER_URL) return null;
+  try {
+    const res = await fetch(`${INDEXER_URL}/tokens`, { signal: AbortSignal.timeout(5_000) });
+    if (!res.ok) return null;
+    const json = (await res.json()) as Partial<FeedPayload>;
+    if (!json || !Array.isArray(json.creations)) return null;
+    return { creations: json.creations as CreationDTO[], unavailable: false };
+  } catch {
+    return null;
+  }
+}
+
+// indicator from where the feed comes from.
+export type FeedSource = "indexer" | "scan";
+
+let cache: { payload: FeedPayload; source: FeedSource; expiresAt: number } | null = null;
 
 async function fetchCreatedLogs(pad: Address, from: bigint, to: bigint): Promise<CreatedLog[]> {
   const logs = await client.getLogs({
@@ -138,18 +157,30 @@ async function scan(): Promise<FeedPayload> {
 /**
  * Cached feed getter. Returns the last good payload on a scan failure (soft
  * degrade) so callers never throw; `unavailable` flags a cold-cache RPC miss.
+ * A cached payload keeps the source that originally produced it.
  */
-export async function loadFeed(): Promise<FeedPayload> {
+export async function loadFeedWithSource(): Promise<{
+  payload: FeedPayload;
+  source: FeedSource;
+}> {
   const now = Date.now();
-  if (cache && cache.expiresAt > now) return cache.payload;
-  try {
-    const payload = await scan();
-    cache = { payload, expiresAt: now + CACHE_TTL_MS };
-    return payload;
-  } catch {
-    if (cache) return cache.payload;
-    return { creations: [], unavailable: true };
+  if (cache && cache.expiresAt > now) {
+    return { payload: cache.payload, source: cache.source };
   }
+  try {
+    const indexed = await fromIndexer();
+    const source: FeedSource = indexed ? "indexer" : "scan";
+    const payload = indexed ?? (await scan());
+    cache = { payload, source, expiresAt: now + CACHE_TTL_MS };
+    return { payload, source };
+  } catch {
+    if (cache) return { payload: cache.payload, source: cache.source };
+    return { payload: { creations: [], unavailable: true }, source: "scan" };
+  }
+}
+
+export async function loadFeed(): Promise<FeedPayload> {
+  return (await loadFeedWithSource()).payload;
 }
 
 /** One token's creation record (name/symbol/image/pool), by address, from the cached feed. */
