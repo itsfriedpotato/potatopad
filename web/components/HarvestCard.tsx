@@ -17,23 +17,27 @@ import { TxStatus } from "@/components/TxStatus";
  * Uniswap V3 swap fees flow out in two on-chain steps:
  *   1. {collect} (permissionless) harvests accrued pool fees INTO the locker,
  *      auto-pays the treasury its 50%, and sets aside the creator's 50%.
- *   2. {claim} (creator-only) withdraws that set-aside share to the wallet.
+ *   2. {claim} (creator-only) withdraws that set-aside share to the wallet —
+ *      once per asset (WETH and the launched token).
  *
  * The UI folds both into ONE button. For the creator, "Collect & claim" fires
- * {collect} and then — once it confirms and the creator's balance lands in the
- * locker — automatically fires {claim} for them. Non-creators get a plain
- * "Collect fees" crank (anyone can collect; only the creator can claim).
+ * {collect} and then — once it confirms and the creator's balances land in the
+ * locker — automatically fires {claim} for WETH and the token. Non-creators get
+ * a plain "Collect fees" crank (anyone can collect; only the creator can claim).
  */
 export function HarvestCard({
   creator,
   lpTokenId,
   pool,
+  token,
   symbol,
   pad,
 }: {
   creator: Address;
   lpTokenId: bigint;
   pool: Address;
+  /** Launched token address — fees also accrue on this side of the pool. */
+  token: Address;
   symbol: string;
   /** The pad that launched this token (primary or legacy) — its locker holds the fees. */
   pad: Address;
@@ -41,7 +45,8 @@ export function HarvestCard({
   const { address: user, isConnected } = useAccount();
   const { weth, chainId } = usePad();
   const collectTx = useTx();
-  const claimTx = useTx();
+  const claimWethTx = useTx();
+  const claimTokenTx = useTx();
   const accrued = useAccruedFees(lpTokenId, pool, pad);
 
   const { data: locker } = useReadContract({
@@ -53,8 +58,9 @@ export function HarvestCard({
 
   const lockerAddr = (locker as Address | undefined) ?? ZERO_ADDRESS;
   const lockerReady = lockerAddr !== ZERO_ADDRESS;
+  const tokenReady = token !== ZERO_ADDRESS;
 
-  const { data: creatorClaimable } = useReadContract({
+  const { data: creatorClaimableWeth } = useReadContract({
     address: lockerAddr,
     abi: potatoFeeLockerAbi,
     functionName: "claimable",
@@ -62,14 +68,23 @@ export function HarvestCard({
     query: { enabled: lockerReady && weth !== ZERO_ADDRESS },
   });
 
+  const { data: creatorClaimableToken } = useReadContract({
+    address: lockerAddr,
+    abi: potatoFeeLockerAbi,
+    functionName: "claimable",
+    args: [token, creator],
+    query: { enabled: lockerReady && tokenReady },
+  });
+
   const isCreator = !!user && user.toLowerCase() === creator.toLowerCase();
 
-  const claimableAmt = (creatorClaimable as bigint | undefined) ?? 0n;
-  const hasClaimable = claimableAmt > 0n;
+  const claimableWeth = (creatorClaimableWeth as bigint | undefined) ?? 0n;
+  const claimableToken = (creatorClaimableToken as bigint | undefined) ?? 0n;
+  const hasClaimable = claimableWeth > 0n || claimableToken > 0n;
   const hasUncollected =
     (accrued.wethAmount ?? 0n) > 0n || (accrued.tokenAmount ?? 0n) > 0n;
 
-  const busy = collectTx.busy || claimTx.busy;
+  const busy = collectTx.busy || claimWethTx.busy || claimTokenTx.busy;
   // Nothing to do: no pool fees to harvest AND (for the creator) no standing
   // balance to withdraw. Non-creators can only ever collect.
   const nothingToDo = !hasUncollected && !(isCreator && hasClaimable);
@@ -84,8 +99,8 @@ export function HarvestCard({
     });
   }
 
-  function claim() {
-    claimTx.writeContract({
+  function claimWeth() {
+    claimWethTx.writeContract({
       address: lockerAddr,
       abi: potatoFeeLockerAbi,
       functionName: "claim",
@@ -93,19 +108,39 @@ export function HarvestCard({
     });
   }
 
+  function claimToken() {
+    claimTokenTx.writeContract({
+      address: lockerAddr,
+      abi: potatoFeeLockerAbi,
+      functionName: "claim",
+      args: [token],
+    });
+  }
+
+  /** Kick off claims for any standing creator balances (WETH first, then token). */
+  function claimStanding() {
+    if (claimableWeth > 0n) {
+      claimWeth();
+      return;
+    }
+    if (claimableToken > 0n) {
+      claimToken();
+    }
+  }
+
   function handleClick() {
     // Creator with a standing balance and nothing left in the pool → claim now.
     if (isCreator && !hasUncollected && hasClaimable) {
-      claim();
+      claimStanding();
       return;
     }
-    // Otherwise harvest. For the creator this auto-chains into a claim below.
+    // Otherwise harvest. For the creator this auto-chains into claims below.
     collect();
   }
 
   // After a creator's collect confirms, the treasury is paid and the creator's
-  // share lands in the locker (react-query refetches `claimable`). Fire the
-  // claim exactly once per collect, guarded by the collect tx hash.
+  // share lands in the locker (react-query refetches `claimable`). Fire claims
+  // exactly once per collect, guarded by the collect tx hash.
   const autoClaimedFor = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (
@@ -113,22 +148,45 @@ export function HarvestCard({
       collectTx.hash &&
       autoClaimedFor.current !== collectTx.hash &&
       isCreator &&
-      claimableAmt > 0n &&
-      !claimTx.busy
+      hasClaimable &&
+      !claimWethTx.busy &&
+      !claimTokenTx.busy
     ) {
       autoClaimedFor.current = collectTx.hash;
-      claim();
+      claimStanding();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [collectTx.confirmed, collectTx.hash, isCreator, claimableAmt]);
+  }, [collectTx.confirmed, collectTx.hash, isCreator, claimableWeth, claimableToken]);
+
+  // After WETH claim confirms, continue with token-side claim if still pending.
+  const tokenClaimedAfterWeth = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (
+      claimWethTx.confirmed &&
+      claimWethTx.hash &&
+      tokenClaimedAfterWeth.current !== claimWethTx.hash &&
+      isCreator &&
+      claimableToken > 0n &&
+      !claimTokenTx.busy
+    ) {
+      tokenClaimedAfterWeth.current = claimWethTx.hash;
+      claimToken();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [claimWethTx.confirmed, claimWethTx.hash, isCreator, claimableToken]);
 
   let label: string;
   if (collectTx.busy) label = "Collecting…";
-  else if (claimTx.busy) label = "Claiming…";
+  else if (claimWethTx.busy || claimTokenTx.busy) label = "Claiming…";
   else if (nothingToDo) label = "No fees yet";
   else if (!isCreator) label = "Collect fees";
   else if (hasUncollected) label = "Collect & claim";
+  else if (claimableWeth > 0n && claimableToken > 0n) label = "Claim fees";
+  else if (claimableToken > 0n) label = `Claim ${symbol}`;
   else label = "Claim WETH";
+
+  const claimableKnown =
+    creatorClaimableWeth !== undefined && creatorClaimableToken !== undefined;
 
   return (
     <div className="card p-5">
@@ -181,16 +239,17 @@ export function HarvestCard({
         <div className="mt-3 flex items-baseline justify-between gap-3 border-t border-neutral-800 pt-3">
           <p className="text-xs text-neutral-500">Ready to claim (creator)</p>
           <p className="font-mono text-sm font-semibold text-neutral-100">
-            {creatorClaimable !== undefined
-              ? `${formatEth(claimableAmt)} WETH`
+            {claimableKnown
+              ? `${formatEth(claimableWeth)} WETH + ${formatTokens(claimableToken)} ${symbol}`
               : "…"}
           </p>
         </div>
 
         <p className="mt-2 text-[11px] text-neutral-600">
-          Fees accrue in the Uniswap position as people trade. Collecting harvests them into
-          the locker — the treasury is auto-paid its 50% and the creator&apos;s 50% is set
-          aside — then the creator claims their share. One click does both.
+          Fees accrue in the Uniswap position as people trade (WETH and {symbol}). Collecting
+          harvests them into the locker — the treasury is auto-paid its 50% and the
+          creator&apos;s 50% is set aside — then the creator claims both sides. One click does
+          both.
         </p>
         {isConnected && !isCreator && (
           <p className="mt-1 text-[11px] text-neutral-600">
@@ -204,7 +263,16 @@ export function HarvestCard({
           chainId={chainId}
           successLabel="Collected fees into the locker."
         />
-        <TxStatus tx={claimTx} chainId={chainId} successLabel="Claimed your WETH fees!" />
+        <TxStatus
+          tx={claimWethTx}
+          chainId={chainId}
+          successLabel="Claimed your WETH fees!"
+        />
+        <TxStatus
+          tx={claimTokenTx}
+          chainId={chainId}
+          successLabel={`Claimed your ${symbol} fees!`}
+        />
       </div>
     </div>
   );
