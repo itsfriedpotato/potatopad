@@ -35,7 +35,13 @@ export function TokenCard({ row }: { row: TokenRow }) {
       className="card block p-5 transition-colors hover:border-amber-500/40"
     >
       <div className="flex items-center gap-3">
-        <TokenAvatar address={row.address} symbol={row.symbol} imageURI={row.imageURI} />
+        {/* Thumbnail: resolves ipfs:// via public gateways; broken URLs fall back to a potato tile */}
+        <TokenAvatar
+          address={row.address}
+          symbol={row.symbol}
+          imageURI={row.imageURI}
+          size="md"
+        />
         <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
           <h3 className="truncate font-bold text-neutral-100">{row.name}</h3>
           <span className="shrink-0 font-mono text-xs text-neutral-500">${row.symbol}</span>
