@@ -77,7 +77,14 @@ export const erc20BalanceAbi = [
   },
 ] as const;
 
-/** SwapRouter02 exactInputSingle (no deadline in the "02" struct). */
+/**
+ * SwapRouter02 `exactInputSingle` (no `deadline` in the "02" struct) plus the
+ * deadline-checked `multicall(uint256 deadline, bytes[] data)`. Wrapping a single
+ * `exactInputSingle` call in `multicall(deadline, [...])` reverts once
+ * `block.timestamp > deadline`, so a signed-but-unmined swap can't be held in
+ * the mempool and executed later at a sandwich-profitable moment. `multicall` is
+ * `payable` and delegatecalls each entry, so native-ETH buys behave identically.
+ */
 export const swapRouter02Abi = [
   {
     inputs: [
@@ -98,6 +105,16 @@ export const swapRouter02Abi = [
     ],
     name: "exactInputSingle",
     outputs: [{ internalType: "uint256", name: "amountOut", type: "uint256" }],
+    stateMutability: "payable",
+    type: "function",
+  },
+  {
+    inputs: [
+      { internalType: "uint256", name: "deadline", type: "uint256" },
+      { internalType: "bytes[]", name: "data", type: "bytes[]" },
+    ],
+    name: "multicall",
+    outputs: [{ internalType: "bytes[]", name: "", type: "bytes[]" }],
     stateMutability: "payable",
     type: "function",
   },
