@@ -58,6 +58,7 @@ export default function CreatePage() {
   const formValid =
     name.trim().length > 0 &&
     symbol.trim().length > 0 &&
+    image.trim().length > 0 &&
     devBuyWei !== undefined &&
     !devBuyTooLarge;
 
@@ -156,7 +157,7 @@ export default function CreatePage() {
 
             <div>
               <label htmlFor="image" className="label">
-                Image (optional)
+                Image <span className="text-amber-500">*</span>
               </label>
               <div className="flex items-center gap-3">
                 {resolveImageUri(image) ? (
@@ -204,7 +205,8 @@ export default function CreatePage() {
               </div>
               {uploadErr && <p className="mt-1.5 text-xs text-red-400">{uploadErr}</p>}
               <p className="mt-1.5 text-xs text-neutral-500">
-                Upload a logo (pinned to IPFS) or paste a URL. Saved in the launch event on-chain.
+                Required — upload a logo (pinned to IPFS) or paste a URL. Saved in the launch
+                event on-chain.
               </p>
             </div>
 
