@@ -35,6 +35,39 @@ function rangeFor(tokenIs0: boolean, tickFloor: bigint, tickCeil: bigint) {
 
 const isToken0 = (token: string, weth: string) => token.toLowerCase() < weth.toLowerCase();
 
+/**
+ * Reproduces PotatoPad's CREATE2 salt loop off-chain. `createToken` seeds from
+ * keccak(sender, salt) and walks `seed, seed+1, …` deriving each candidate token
+ * address as CREATE2(pad, seed+i, initCodeHash). Lets a test predict — and thus
+ * poison — the exact addresses the loop will probe.
+ */
+async function saltLoopParams(pad: any, name: string, symbol: string, sender: string, salt: string) {
+  const abi = ethers.AbiCoder.defaultAbiCoder();
+  const PotatoToken = await ethers.getContractFactory("PotatoToken");
+  const ctor = abi.encode(
+    ["string", "string", "uint256", "address", "address", "address", "uint256", "uint256"],
+    [
+      name,
+      symbol,
+      await pad.TOTAL_SUPPLY(),
+      await pad.getAddress(),
+      await pad.positionManager(),
+      await pad.locker(),
+      await pad.MAX_WALLET(),
+      await pad.antiSnipeBlocks(),
+    ]
+  );
+  const initCodeHash = ethers.keccak256(ethers.concat([PotatoToken.bytecode, ctor]));
+  const seed = BigInt(ethers.keccak256(abi.encode(["address", "bytes32"], [sender, salt])));
+  return { initCodeHash, seed };
+}
+
+/** The i-th CREATE2 candidate the loop probes (mirrors `bytes32(seed + i)`, 256-bit wrapping). */
+function candidateAt(padAddr: string, seed: bigint, i: number, initCodeHash: string): string {
+  const saltI = ethers.toBeHex(BigInt.asUintN(256, seed + BigInt(i)), 32);
+  return ethers.getCreate2Address(padAddr, saltI, initCodeHash);
+}
+
 async function deployRealUniswap() {
   // Real Uniswap V3, deployed from the official npm artifacts.
   const weth = await (await ethers.getContractFactory("WETH9")).deploy();
@@ -295,6 +328,84 @@ describe("PotatoPad v2 (direct-to-Uniswap single-sided launch)", () => {
       // the dev-buy WETH landed in the pool (net of the 1% fee, which also stays in the pool)
       const info = await pad.tokens(addr);
       expect(await weth.balanceOf(info.pool)).to.be.closeTo(value, value / 20n);
+    });
+  });
+
+  describe("CREATE2 salt exhaustion + recovery", () => {
+    const GRIEF_NAME = "GR";
+    const GRIEF_SYMBOL = "GR";
+    const GRIEF_SALT = saltFor("griefed");
+
+    // Deploys the stack, then front-runs EVERY candidate in the caller's salt
+    // sequence by pre-creating its token/WETH pool — the loop skips any address
+    // that already has a pool, so all MAX_SALT_TRIES candidates read as taken.
+    async function griefedFixture() {
+      const ctx = await deployFixture();
+      const maxTries = Number(await ctx.pad.MAX_SALT_TRIES());
+      const padAddr = await ctx.pad.getAddress();
+      const { initCodeHash, seed } = await saltLoopParams(
+        ctx.pad,
+        GRIEF_NAME,
+        GRIEF_SYMBOL,
+        ctx.creator.address,
+        GRIEF_SALT
+      );
+      for (let i = 0; i < maxTries; i++) {
+        const candidate = candidateAt(padAddr, seed, i, initCodeHash);
+        await ctx.v3Factory.createPool(candidate, ctx.weth.target, POOL_FEE);
+      }
+      return { ...ctx, maxTries };
+    }
+
+    it("reverts LaunchGriefed when all MAX_SALT_TRIES candidates are taken", async () => {
+      const { pad, creator, v3Factory, weth } = await loadFixture(griefedFixture);
+
+      // Sanity: the loop's whole candidate window really is poisoned.
+      const { initCodeHash, seed } = await saltLoopParams(
+        pad,
+        GRIEF_NAME,
+        GRIEF_SYMBOL,
+        creator.address,
+        GRIEF_SALT
+      );
+      const padAddr = await pad.getAddress();
+      const first = candidateAt(padAddr, seed, 0, initCodeHash);
+      const last = candidateAt(padAddr, seed, Number(await pad.MAX_SALT_TRIES()) - 1, initCodeHash);
+      expect(await v3Factory.getPool(first, weth.target, POOL_FEE)).to.not.equal(ethers.ZeroAddress);
+      expect(await v3Factory.getPool(last, weth.target, POOL_FEE)).to.not.equal(ethers.ZeroAddress);
+
+      await expect(
+        pad.connect(creator).createToken(GRIEF_NAME, GRIEF_SYMBOL, NO_META, GRIEF_SALT)
+      ).to.be.revertedWithCustomError(pad, "LaunchGriefed");
+    });
+
+    it("a fresh salt recovers: a new candidate set is unpoisoned and launches cleanly", async () => {
+      const { pad, creator, weth, npm, locker } = await loadFixture(griefedFixture);
+
+      // The exhausted salt still reverts...
+      await expect(
+        pad.connect(creator).createToken(GRIEF_NAME, GRIEF_SYMBOL, NO_META, GRIEF_SALT)
+      ).to.be.revertedWithCustomError(pad, "LaunchGriefed");
+
+      // ...but a fresh random salt gives a brand-new candidate set the attacker
+      // could not have pre-poisoned, so the very next launch succeeds.
+      const freshSalt = saltFor("recovered");
+      const deployed = await pad
+        .connect(creator)
+        .createToken.staticCall(GRIEF_NAME, GRIEF_SYMBOL, NO_META, freshSalt);
+      await expect(pad.connect(creator).createToken(GRIEF_NAME, GRIEF_SYMBOL, NO_META, freshSalt)).to.emit(
+        pad,
+        "TokenCreated"
+      );
+
+      // And it is a proper single-sided lock, identical to an unmolested launch.
+      const info = await pad.tokens(deployed);
+      expect(info.creator).to.equal(creator.address);
+      const token = await ethers.getContractAt("PotatoToken", deployed);
+      expect(await weth.balanceOf(info.pool)).to.equal(0n); // zero WETH used
+      expect(await token.balanceOf(info.pool)).to.be.closeTo(TOTAL_SUPPLY, 10n ** 15n);
+      expect(await npm.ownerOf(info.lpTokenId)).to.equal(locker.target); // LP NFT locked
+      expect((await npm.positions(info.lpTokenId)).liquidity).to.be.gt(0);
     });
   });
 
