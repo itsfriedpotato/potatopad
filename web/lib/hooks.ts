@@ -1,6 +1,7 @@
 "use client";
 
 import { useQueryClient } from "@tanstack/react-query";
+import { getChainId } from "@wagmi/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Address } from "viem";
 import {
@@ -12,6 +13,7 @@ import {
 } from "wagmi";
 import { potatoPadAbi } from "@/lib/abi";
 import { PAD_ADDRESSES, WETH_ADDRESSES, ZERO_ADDRESS, padDeployments } from "@/lib/config";
+import { wagmiConfig } from "@/lib/wagmi";
 
 /** Resolve PotatoPad + WETH addresses for the active chain. */
 export function usePad() {
@@ -48,6 +50,11 @@ function hasExplicitFeeOverride(params: Record<string, unknown> | null | undefin
   );
 }
 
+/** Live wallet chain — not a render-captured value (survives mid-flight switches). */
+function liveChainId(): number {
+  return getChainId(wagmiConfig);
+}
+
 /**
  * Write + wait-for-receipt in one hook. Invalidates all react-query caches
  * once a transaction confirms so on-chain reads refresh automatically.
@@ -66,11 +73,21 @@ export function useTx() {
     error: writeError,
     reset: rawReset,
   } = useWriteContract();
+
+  /**
+   * Chain the write was submitted on. Receipt polling must use this — not the
+   * live wallet chain — so a mid-flight switch cannot leave the UI hanging.
+   */
+  const [submitChainId, setSubmitChainId] = useState<number | undefined>(undefined);
+
   const {
     data: receipt,
     isLoading: isConfirming,
     error: receiptError,
-  } = useWaitForTransactionReceipt({ hash });
+  } = useWaitForTransactionReceipt({
+    hash,
+    chainId: submitChainId,
+  });
 
   /** Sync reentrancy lock — closes the gap while async fee estimate runs. */
   const inFlightRef = useRef(false);
@@ -94,6 +111,7 @@ export function useTx() {
   const reset = useCallback(() => {
     inFlightRef.current = false;
     setPreparing(false);
+    setSubmitChainId(undefined);
     rawReset();
   }, [rawReset]);
 
@@ -115,9 +133,8 @@ export function useTx() {
           const effectiveChainId: number =
             typeof params?.chainId === "number" ? params.chainId : chainId;
 
-          // Abort if the wallet chain drifted while we were preparing — better
-          // to no-op than submit old-chain addresses with new-chain fees.
-          if (effectiveChainId !== chainId) {
+          // Abort if wallet is not on the intended chain (live read, not closure).
+          if (liveChainId() !== effectiveChainId) {
             return;
           }
 
@@ -131,8 +148,7 @@ export function useTx() {
                 // on legacy and would otherwise skip the buffer entirely).
                 const block = await publicClient.getBlock({ blockTag: "latest" });
 
-                // Re-check chain after the await.
-                if (effectiveChainId !== chainId) return;
+                if (liveChainId() !== effectiveChainId) return;
 
                 if (block.baseFeePerGas != null) {
                   const fees = await publicClient.estimateFeesPerGas({ type: "eip1559" });
@@ -158,12 +174,17 @@ export function useTx() {
             }
           }
 
-          // Final chain check before the wallet prompt.
-          if (effectiveChainId !== chainId) return;
+          // Final live chain check before the wallet prompt.
+          if (liveChainId() !== effectiveChainId) return;
+
+          // Pin receipt polling to the submission chain before the wallet returns.
+          setSubmitChainId(effectiveChainId);
 
           await rawWriteContractAsync(submitParams, options);
         } catch {
-          // write errors still surface via the hook's `error` state
+          // write errors still surface via the hook's `error` state;
+          // clear pin so a retry on another chain is not stuck.
+          setSubmitChainId(undefined);
         } finally {
           setPreparing(false);
         }
