@@ -26,7 +26,7 @@ This README is written to be vibecoded: if you can run a few terminal commands a
 - **Smart contracts** (Solidity 0.8.24, Hardhat): a factory that mints single-sided Uniswap V3 liquidity, a permanent fee locker, and a minimal fixed-supply ERC-20. No owner, no mint function, no pause switch, no blacklist.
 - **A website** (Next.js App Router, wagmi v2, viem, RainbowKit): a Discover feed, a "Plant a Coin" launch form, and per-token pages with price / market cap, holders, a trade widget, and fee collection. A few small server routes keep infrastructure fast and keys hidden: `/api/rpc` (RPC-key proxy with a write-method denylist, rate limit, and multi-key failover), `/api/tokens` (server-side cached launch feed), and `/api/upload` (image → IPFS via Pinata).
 - **Scripts**: a narrated end-to-end demo, a deploy script (local, Base Sepolia, and Robinhood Chain), and a seeder that fills a local chain with sample tokens.
-- **Tests**: 21 Hardhat tests that run against the real Uniswap V3 contracts (factory, position manager, router) deployed from the official `@uniswap/*` npm artifacts. No mocks.
+- **Tests**: 23 Hardhat tests that run against the real Uniswap V3 contracts (factory, position manager, router) deployed from the official `@uniswap/*` npm artifacts. No mocks.
 
 ## How it works
 
@@ -56,7 +56,7 @@ potatopad/
     contracts/PotatoToken.sol         minimal fixed-supply ERC-20 (+ time-boxed anti-snipe)
     contracts/libraries/TickMath.sol  Uniswap tick math, ported to 0.8.24
     contracts/interfaces/             minimal Uniswap V3 interfaces
-    test/potatopad.test.ts            21 tests vs real Uniswap V3 bytecode
+    test/potatopad.test.ts            23 tests vs real Uniswap V3 bytecode
     scripts/demo.ts                   narrated launch showcase
     scripts/deploy.ts                 local / Base Sepolia / Robinhood deployment
     scripts/seed-demo.ts              fill a local chain for the frontend
@@ -96,7 +96,7 @@ This gets you the contracts, the demo, and the website running against a local c
 ```bash
 cd contracts
 npm install
-npx hardhat test                    # 21 tests, all green
+npx hardhat test                    # 23 tests, all green
 npx hardhat run scripts/demo.ts     # the whole story, narrated in your terminal
 ```
 
