@@ -168,7 +168,7 @@ npx hardhat run scripts/deploy.ts --network baseSepolia
 
 It deploys the pad and its `PotatoFeeLocker`, prints both addresses, and writes `deployments.baseSepolia.json`. The `PotatoPad` constructor takes `(treasury, startFdvWei, topFdvWei, antiSnipeBlocks, factory, positionManager, weth)`; the deploy script fills in the Uniswap addresses per network and the FDV/anti-snipe values from the env above.
 
-To target a different chain, add its Uniswap V3 factory, NonfungiblePositionManager, and WETH addresses to the `CANONICAL` map in `scripts/deploy.ts` and add a network entry in `hardhat.config.ts`. **Robinhood Chain mainnet (chainId 4663)** is already wired this way, and is where the live demo runs.
+To target a different chain, follow the end-to-end guide in **[docs/ADDING_A_CHAIN.md](docs/ADDING_A_CHAIN.md)**: it's three small edits (a `hardhat.config.ts` network entry, a `CANONICAL` entry in `scripts/deploy.ts`, and one entry in the frontend's `CHAINS` config). **Robinhood Chain mainnet (chainId 4663)** is already wired this way, and is where the live demo runs.
 
 ## Host the website
 
@@ -191,7 +191,7 @@ The website is a standard Next.js app, so any host that runs Next works (Vercel,
 That is it. There is **no database and no indexer to run**: the Discover feed is served by the `/api/tokens` route, which scans launch events once server-side and caches the result for all visitors; everything else is read live from the chain over RPC.
 
 Notes:
-- To point the site at mainnet or another chain, add that chain and its pad address to `web/lib/config.ts` and set the matching env var. Earlier pads for a chain can be listed as `LEGACY_PADS` so their tokens keep showing after you redeploy.
+- To point the site at mainnet or another chain, add one entry to the `CHAINS` array in `web/lib/config.ts` and set the matching env var — see **[docs/ADDING_A_CHAIN.md](docs/ADDING_A_CHAIN.md)**. Earlier pads for a chain can be listed under that entry's `legacyPads` so their tokens keep showing after you redeploy.
 - **You must keep the "Made by proofofpotato.com" footer credit** (see the license section).
 
 ## Configuration
