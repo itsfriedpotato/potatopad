@@ -1,16 +1,19 @@
 "use client";
 
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo } from "react";
+import { getChainId } from "@wagmi/core";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Address } from "viem";
 import {
   useChainId,
+  usePublicClient,
   useReadContracts,
   useWaitForTransactionReceipt,
   useWriteContract,
 } from "wagmi";
 import { potatoPadAbi } from "@/lib/abi";
 import { PAD_ADDRESSES, WETH_ADDRESSES, ZERO_ADDRESS, padDeployments } from "@/lib/config";
+import { wagmiConfig } from "@/lib/wagmi";
 
 /** Resolve PotatoPad + WETH addresses for the active chain. */
 export function usePad() {
@@ -21,23 +24,74 @@ export function usePad() {
 }
 
 /**
+ * Multiplier applied on top of the network's estimated EIP-1559 (or legacy)
+ * gas price when submitting writes. Robinhood Chain wallets sometimes under-
+ * estimate fees so claims/trades fail with "gas price too low, retry" — a
+ * modest pad makes the first attempt stick. Callers that already pass their
+ * own maxFeePerGas / maxPriorityFeePerGas / gasPrice are left untouched.
+ *
+ * 15_000 bps = 1.5× the RPC estimate.
+ */
+const FEE_BUFFER_BPS = 15_000n;
+const BPS = 10_000n;
+
+function padFee(value: bigint): bigint {
+  return (value * FEE_BUFFER_BPS) / BPS;
+}
+
+function hasExplicitFeeOverride(params: Record<string, unknown> | null | undefined): boolean {
+  if (!params || typeof params !== "object") return false;
+  // Only treat as an intentional override when a value is actually supplied.
+  // `maxFeePerGas: undefined` (optional spread) must still get the buffer.
+  return (
+    params.maxFeePerGas != null ||
+    params.maxPriorityFeePerGas != null ||
+    params.gasPrice != null
+  );
+}
+
+/** Live wallet chain — not a render-captured value (survives mid-flight switches). */
+function liveChainId(): number {
+  return getChainId(wagmiConfig);
+}
+
+/**
  * Write + wait-for-receipt in one hook. Invalidates all react-query caches
  * once a transaction confirms so on-chain reads refresh automatically.
+ *
+ * Also applies a modest gas-fee buffer (see {FEE_BUFFER_BPS}) so write txs
+ * on chains with sticky under-estimates (Robinhood) confirm on the first try.
  */
 export function useTx() {
   const queryClient = useQueryClient();
+  const chainId = useChainId();
+  const publicClient = usePublicClient({ chainId });
   const {
-    writeContract,
+    writeContractAsync: rawWriteContractAsync,
     data: hash,
     isPending,
     error: writeError,
-    reset,
+    reset: rawReset,
   } = useWriteContract();
+
+  /**
+   * Chain the write was submitted on. Receipt polling must use this — not the
+   * live wallet chain — so a mid-flight switch cannot leave the UI hanging.
+   */
+  const [submitChainId, setSubmitChainId] = useState<number | undefined>(undefined);
+
   const {
     data: receipt,
     isLoading: isConfirming,
     error: receiptError,
-  } = useWaitForTransactionReceipt({ hash });
+  } = useWaitForTransactionReceipt({
+    hash,
+    chainId: submitChainId,
+  });
+
+  /** Sync reentrancy lock — closes the gap while async fee estimate runs. */
+  const inFlightRef = useRef(false);
+  const [preparing, setPreparing] = useState(false);
 
   const confirmed = receipt?.status === "success";
   const reverted = receipt?.status === "reverted";
@@ -46,18 +100,111 @@ export function useTx() {
     if (confirmed) queryClient.invalidateQueries();
   }, [confirmed, queryClient]);
 
+  // Release the reentrancy lock once the mutation is fully idle again
+  // (wallet reject, error, or confirmation finished).
+  useEffect(() => {
+    if (!preparing && !isPending && !isConfirming) {
+      inFlightRef.current = false;
+    }
+  }, [preparing, isPending, isConfirming]);
+
+  const reset = useCallback(() => {
+    inFlightRef.current = false;
+    setPreparing(false);
+    setSubmitChainId(undefined);
+    rawReset();
+  }, [rawReset]);
+
+  // Wrap writeContract so every dapp write inherits the fee buffer without
+  // touching HarvestCard / TradeWidget / create call sites individually.
+  // Implementation is deliberately untyped; the exported surface is re-cast to
+  // wagmi's writeContract so ABI-generic call sites keep their inference.
+  const writeContractBuffered = useCallback(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (params: any, options?: any) => {
+      // Synchronous reentrancy guard — must flip before any await so rapid
+      // clicks cannot launch two fee estimates / two payable mutations.
+      if (inFlightRef.current) return;
+      inFlightRef.current = true;
+      setPreparing(true);
+
+      void (async () => {
+        try {
+          const effectiveChainId: number =
+            typeof params?.chainId === "number" ? params.chainId : chainId;
+
+          // Abort if wallet is not on the intended chain (live read, not closure).
+          if (liveChainId() !== effectiveChainId) {
+            return;
+          }
+
+          let submitParams = { ...params, chainId: effectiveChainId };
+
+          if (!hasExplicitFeeOverride(params)) {
+            try {
+              if (publicClient) {
+                // Detect fee market from the latest block so legacy chains get
+                // a gasPrice pad (estimateFeesPerGas() EIP-1559 default throws
+                // on legacy and would otherwise skip the buffer entirely).
+                const block = await publicClient.getBlock({ blockTag: "latest" });
+
+                if (liveChainId() !== effectiveChainId) return;
+
+                if (block.baseFeePerGas != null) {
+                  const fees = await publicClient.estimateFeesPerGas({ type: "eip1559" });
+                  if (fees.maxFeePerGas != null && fees.maxPriorityFeePerGas != null) {
+                    submitParams = {
+                      ...submitParams,
+                      maxFeePerGas: padFee(fees.maxFeePerGas),
+                      maxPriorityFeePerGas: padFee(fees.maxPriorityFeePerGas),
+                    };
+                  }
+                } else {
+                  const fees = await publicClient.estimateFeesPerGas({ type: "legacy" });
+                  if (fees.gasPrice != null) {
+                    submitParams = {
+                      ...submitParams,
+                      gasPrice: padFee(fees.gasPrice),
+                    };
+                  }
+                }
+              }
+            } catch {
+              // leave fee fields empty → wallet / middleware estimate
+            }
+          }
+
+          // Final live chain check before the wallet prompt.
+          if (liveChainId() !== effectiveChainId) return;
+
+          // Pin receipt polling to the submission chain before the wallet returns.
+          setSubmitChainId(effectiveChainId);
+
+          await rawWriteContractAsync(submitParams, options);
+        } catch {
+          // write errors still surface via the hook's `error` state;
+          // clear pin so a retry on another chain is not stuck.
+          setSubmitChainId(undefined);
+        } finally {
+          setPreparing(false);
+        }
+      })();
+    },
+    [chainId, publicClient, rawWriteContractAsync],
+  );
+
   return {
-    writeContract,
+    writeContract: writeContractBuffered as typeof rawWriteContractAsync,
     hash,
     receipt,
-    /** waiting for the wallet signature */
-    isPending,
+    /** waiting for fee estimate and/or wallet signature */
+    isPending: preparing || isPending,
     /** signed, waiting for inclusion */
     isConfirming,
     confirmed,
     reverted,
     error: writeError ?? receiptError ?? null,
-    busy: isPending || isConfirming,
+    busy: preparing || isPending || isConfirming,
     reset,
   };
 }
