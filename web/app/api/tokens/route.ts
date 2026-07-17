@@ -64,6 +64,24 @@ const client = createPublicClient({
   transport: http(process.env.ROBINHOOD_RPC_URL || "https://rpc.mainnet.chain.robinhood.com"),
 });
 
+// When a Ponder indexer is configured, serve the feed from it (a real indexer,
+// not the poor-man's in-memory scan). Falls back to the live log scan below if
+// unset or unreachable, so prod keeps working even if the indexer is down.
+const INDEXER_URL = process.env.INDEXER_URL?.replace(/\/+$/, "");
+
+async function fromIndexer(): Promise<FeedPayload | null> {
+  if (!INDEXER_URL) return null;
+  try {
+    const res = await fetch(`${INDEXER_URL}/tokens`, { signal: AbortSignal.timeout(5_000) });
+    if (!res.ok) return null;
+    const json = (await res.json()) as Partial<FeedPayload>;
+    if (!json || !Array.isArray(json.creations)) return null;
+    return { creations: json.creations as CreationDTO[], unavailable: false };
+  } catch {
+    return null;
+  }
+}
+
 let cache: { payload: FeedPayload; expiresAt: number } | null = null;
 
 async function fetchCreatedLogs(pad: Address, from: bigint, to: bigint): Promise<CreatedLog[]> {
@@ -149,7 +167,7 @@ export async function GET() {
     return NextResponse.json(cache.payload, { headers: CACHE_HEADERS });
   }
   try {
-    const payload = await scan();
+    const payload = (await fromIndexer()) ?? (await scan());
     cache = { payload, expiresAt: now + CACHE_TTL_MS };
     return NextResponse.json(payload, { headers: CACHE_HEADERS });
   } catch {

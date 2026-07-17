@@ -9,41 +9,10 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
 import type { Address } from "viem";
-import { parseAbiItem } from "viem";
-import { usePublicClient, useWatchContractEvent } from "wagmi";
+import { useWatchContractEvent } from "wagmi";
 import { potatoPadAbi, potatoTokenAbi } from "@/lib/abi";
-import { PAD_START_BLOCK, ZERO_ADDRESS, padDeployments } from "@/lib/config";
+import { padDeployments } from "@/lib/config";
 import { usePad } from "@/lib/hooks";
-
-const transferEvent = parseAbiItem(
-  "event Transfer(address indexed from, address indexed to, uint256 value)",
-);
-
-// Live RPCs cap eth_getLogs block ranges (Alchemy on Robinhood = 10k blocks), so
-// scan forward from the pad's deploy block in sub-cap windows and concatenate.
-const LOG_CHUNK = 9_000n;
-// Run this many window fetches at once: cuts wall-clock on wide (legacy-pad) scans
-// without a burst big enough to trip the RPC compute-unit limit.
-const SCAN_CONCURRENCY = 4;
-
-async function collectLogs<T>(
-  fromBlock: bigint,
-  toBlock: bigint,
-  fetchRange: (from: bigint, to: bigint) => Promise<T[]>,
-): Promise<T[]> {
-  const ranges: [bigint, bigint][] = [];
-  for (let start = fromBlock; start <= toBlock; start += LOG_CHUNK + 1n) {
-    const end = start + LOG_CHUNK <= toBlock ? start + LOG_CHUNK : toBlock;
-    ranges.push([start, end]);
-  }
-  const out: T[] = [];
-  for (let i = 0; i < ranges.length; i += SCAN_CONCURRENCY) {
-    const batch = ranges.slice(i, i + SCAN_CONCURRENCY);
-    const results = await Promise.all(batch.map(([from, to]) => fetchRange(from, to)));
-    for (const r of results) out.push(...r);
-  }
-  return out;
-}
 
 // ---------------------------------------------------------------------------
 // localStorage cache for the launch feed (bigint-safe). The historical scan is
@@ -222,10 +191,13 @@ interface HoldersData {
 
 const EMPTY_HOLDERS: HoldersData = { holders: [], total: 0n, unavailable: false };
 
-/** Balances per address from Transfer logs, sorted descending. */
+/**
+ * Balances per address, sorted descending. The Transfer-log scan now runs
+ * server-side (cached) at /api/holders, so no visitor pays the per-token getLogs
+ * cost — the browser just fetches a small JSON payload.
+ */
 export function useTokenHolders(token: Address | undefined) {
   const { chainId, isDeployed } = usePad();
-  const client = usePublicClient();
   const queryClient = useQueryClient();
   const queryKey = useMemo(
     () => ["token-holders", chainId, token ?? "none"],
@@ -234,38 +206,25 @@ export function useTokenHolders(token: Address | undefined) {
 
   const query = useQuery<HoldersData>({
     queryKey,
-    enabled: isDeployed && !!client && !!token,
+    enabled: isDeployed && !!token,
     staleTime: 10_000,
     queryFn: async () => {
-      if (!client || !token) return EMPTY_HOLDERS;
+      if (!token) return EMPTY_HOLDERS;
       try {
-        const latest = await client.getBlockNumber();
-        // Scan from the EARLIEST pad's deploy block so a legacy token's full
-        // Transfer history is covered, not truncated at the newest pad's block.
-        const deployments = padDeployments(chainId);
-        const startBlock = deployments.length
-          ? deployments.reduce((m, p) => (p.startBlock < m ? p.startBlock : m), deployments[0].startBlock)
-          : (PAD_START_BLOCK[chainId] ?? 0n);
-        const logs = await collectLogs(startBlock, latest, (from, to) =>
-          client.getLogs({ address: token, event: transferEvent, fromBlock: from, toBlock: to }),
-        );
-        const balances = new Map<string, bigint>();
-        for (const log of logs) {
-          const { from, to, value } = log.args;
-          if (value === undefined || value === 0n) continue;
-          if (from && from !== ZERO_ADDRESS) {
-            balances.set(from, (balances.get(from) ?? 0n) - value);
-          }
-          if (to && to !== ZERO_ADDRESS) {
-            balances.set(to, (balances.get(to) ?? 0n) + value);
-          }
-        }
-        const holders: Holder[] = Array.from(balances.entries())
-          .filter(([, balance]) => balance > 0n)
-          .map(([address, balance]) => ({ address: address as Address, balance }))
-          .sort((a, b) => (b.balance > a.balance ? 1 : b.balance < a.balance ? -1 : 0));
-        const total = holders.reduce((sum, h) => sum + h.balance, 0n);
-        return { holders, total, unavailable: false };
+        const res = await fetch(`/api/holders?token=${token}`);
+        if (!res.ok) return { ...EMPTY_HOLDERS, unavailable: true };
+        const json = (await res.json()) as {
+          holders: Array<{ address: Address; balance: string }>;
+          total: string;
+          unavailable: boolean;
+        };
+        // JSON has no bigint; balances arrive as decimal strings.
+        const holders: Holder[] = (json.holders ?? []).map((h) => ({
+          address: h.address,
+          balance: BigInt(h.balance),
+        }));
+        const total = BigInt(json.total ?? "0");
+        return { holders, total, unavailable: !!json.unavailable };
       } catch {
         return { ...EMPTY_HOLDERS, unavailable: true };
       }
