@@ -68,6 +68,11 @@ potatopad/
   LICENSE                             MIT with an attribution requirement
 ```
 
+New to the codebase? **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** walks the
+full contract flow (`createToken` → CREATE2 salt → pool init → single-sided mint
+→ locker) and the frontend data layer (the cached `/api/tokens` feed, multi-pad
+reads, and the `/api/rpc` proxy).
+
 ## What you need
 
 To run locally:
