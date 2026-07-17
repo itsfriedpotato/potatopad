@@ -9,6 +9,9 @@ import { Header } from "@/components/Header";
 import { SearchProvider } from "@/components/SearchContext";
 
 export const metadata: Metadata = {
+  // Absolute base for OG/Twitter image URLs (per-token cards live under
+  // /token/[address]/opengraph-image). Override via NEXT_PUBLIC_SITE_URL.
+  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL || "https://potato.fm"),
   title: "Potato Pad: plant a coin, live on Uniswap V3",
   description:
     "Single-sided token launchpad: plant a coin and it launches straight into a locked Uniswap V3 position, live and tradable from the first block. Open-source MVP, demo only.",
