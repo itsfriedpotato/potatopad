@@ -63,21 +63,22 @@ export function StatsCard({
         <Activity className="h-4 w-4 text-amber-500" />
         Stats
       </h3>
-      <dl className="mt-3 divide-y divide-neutral-800/70">
+      <div className="mt-4 grid grid-cols-2 gap-2">
         {rows.map((row) => (
-          <div key={row.label} className="flex items-center justify-between py-2 text-sm">
-            <dt className="text-neutral-500">{row.label}</dt>
-            <dd className="text-right">
-              <span className="font-mono text-neutral-100">{row.value}</span>
-              {row.sub && (
-                <span className="block font-mono text-[10px] text-neutral-500">
-                  {row.sub}
-                </span>
-              )}
-            </dd>
+          <div
+            key={row.label}
+            className="rounded-lg border border-neutral-800 bg-neutral-950 p-2.5"
+          >
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-neutral-500">
+              {row.label}
+            </p>
+            <p className="mt-1 font-mono text-sm tabular-nums text-neutral-100">{row.value}</p>
+            {row.sub && (
+              <p className="mt-0.5 font-mono text-[10px] tabular-nums text-neutral-500">{row.sub}</p>
+            )}
           </div>
         ))}
-      </dl>
+      </div>
       <p className="mt-3 text-[11px] text-neutral-600">
         Price &amp; market cap from the Uniswap V3 pool. Live on Uniswap since launch.
       </p>

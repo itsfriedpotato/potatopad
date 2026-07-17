@@ -1,10 +1,11 @@
 "use client";
 
-import { Hourglass, TrendingUp } from "lucide-react";
+import { Hourglass } from "lucide-react";
 import Link from "next/link";
 import type { Address } from "viem";
-import { formatFloatPrice, formatUsd, formatUsdPrice, shortAddress, timeAgo } from "@/lib/format";
+import { formatUsd, formatUsdPrice, shortAddress, timeAgo } from "@/lib/format";
 import { useEthUsdPrice } from "@/lib/price";
+import { fdvProgressBps, useFdvRange } from "@/lib/pool";
 import { TokenAvatar } from "@/components/TokenAvatar";
 
 export interface TokenRow {
@@ -31,6 +32,7 @@ export interface TokenRow {
 
 export function TokenCard({ row }: { row: TokenRow }) {
   const { usd: ethUsd } = useEthUsdPrice();
+  const range = useFdvRange();
 
   if (row.ancient) {
     return (
@@ -80,6 +82,16 @@ export function TokenCard({ row }: { row: TokenRow }) {
   const mcapLabel =
     ethUsd !== null && row.marketCapEth > 0 ? formatUsd(row.marketCapEth * ethUsd) : mcapEthLabel;
 
+  // Range climb: how far price has walked from the open (~3 ETH FDV) toward the
+  // top (~525 ETH FDV). NOT a bonding curve — the token is live from block one.
+  const progress = Math.max(0, Math.min(100, Number(fdvProgressBps(row.marketCapEth, range)) / 100));
+  const stage =
+    progress < 12
+      ? { label: "Seed", emoji: "🥔", cls: "border-amber-700/40 bg-amber-900/25 text-amber-500/90" }
+      : progress < 90
+        ? { label: "Growing", emoji: "🌱", cls: "border-emerald-500/30 bg-emerald-500/10 text-emerald-400" }
+        : { label: "Harvested", emoji: "🌻", cls: "border-amber-500/40 bg-amber-500/15 text-amber-300" };
+
   return (
     <Link
       href={`/token/${row.address}`}
@@ -97,9 +109,11 @@ export function TokenCard({ row }: { row: TokenRow }) {
           <h3 className="truncate font-bold text-neutral-100">{row.name}</h3>
           <span className="shrink-0 font-mono text-xs text-neutral-500">${row.symbol}</span>
         </div>
-        <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-green-500/30 bg-green-500/10 px-2 py-0.5 text-[11px] font-semibold text-green-400">
-          <TrendingUp className="h-3 w-3" aria-hidden />
-          Live
+        <span
+          className={`inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold ${stage.cls}`}
+        >
+          <span aria-hidden>{stage.emoji}</span>
+          {stage.label}
         </span>
       </div>
 
@@ -119,19 +133,29 @@ export function TokenCard({ row }: { row: TokenRow }) {
             Price
           </p>
           <p className="mt-0.5 font-mono text-sm text-neutral-100">
-            {row.priceWeth > 0 ? `${formatFloatPrice(row.priceWeth)} ETH` : "—"}
+            {ethUsd !== null && row.priceWeth > 0 ? formatUsdPrice(row.priceWeth * ethUsd) : "—"}
           </p>
-          {ethUsd !== null && row.priceWeth > 0 && (
-            <p className="mt-0.5 font-mono text-[10px] text-neutral-500">
-              {formatUsdPrice(row.priceWeth * ethUsd)}
-            </p>
-          )}
         </div>
         <div>
           <p className="text-[10px] font-semibold uppercase tracking-wider text-neutral-500">
             Market Cap
           </p>
-          <p className="mt-0.5 font-mono text-sm text-neutral-100">{mcapLabel}</p>
+          <p className="mt-0.5 font-mono text-sm tabular-nums text-neutral-100">{mcapLabel}</p>
+        </div>
+      </div>
+
+      {/* Range climb (open → top FDV): Seed → Sprout → Bloom. Not a bonding curve. */}
+      <div className="mt-4">
+        <div className="h-1.5 w-full overflow-hidden rounded-full bg-neutral-800">
+          <div
+            className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-amber-500"
+            style={{ width: `${Math.max(2, progress)}%` }}
+          />
+        </div>
+        <div className="mt-1 flex justify-between font-mono text-[10px] tabular-nums text-neutral-600">
+          <span>🥔 Seed</span>
+          <span>{progress.toFixed(0)}% up range</span>
+          <span>🌻 Harvest</span>
         </div>
       </div>
     </Link>

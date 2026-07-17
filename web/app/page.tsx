@@ -164,11 +164,17 @@ export default function DiscoverPage() {
       </div>
 
       {isAncientTab && (
-        <p className="mx-auto mb-5 max-w-xl text-center text-xs text-neutral-500">
-          <Hourglass className="mr-1 inline h-3 w-3 text-amber-600/80" aria-hidden />
-          Ancient tokens are pre-existing Robinhood runners (not PotatoPad launches). View and
-          trade them here — they can&apos;t be planted on the pad.
-        </p>
+        <div className="mx-auto mb-5 max-w-xl rounded-xl border border-amber-600/20 bg-amber-500/5 px-4 py-3 text-center text-xs text-neutral-400">
+          <p className="font-semibold text-amber-500">
+            <Hourglass className="mr-1 inline h-3.5 w-3.5" aria-hidden />
+            What&apos;s an Ancient? 🏛️
+          </p>
+          <p className="mt-1">
+            A token that launched on <span className="text-neutral-200">Noxa</span> and ran with a
+            community — a pre-existing Robinhood runner. We honor the originals here: view and trade
+            them, but they can&apos;t be planted on PotatoPad.
+          </p>
+        </div>
       )}
 
       {loading ? (

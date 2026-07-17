@@ -401,6 +401,20 @@ export function HarvestCard({
           Principal is locked permanently and unruggable. Swap fees split 50/50 between
           the creator and the treasury.
         </p>
+        <div className="mt-2.5">
+          <div className="flex h-2 overflow-hidden rounded-full border border-neutral-800">
+            <div className="h-full w-1/2 bg-amber-500/70" />
+            <div className="h-full w-1/2 bg-emerald-500/60" />
+          </div>
+          <div className="mt-1 flex justify-between text-[10px] text-neutral-500">
+            <span className="flex items-center gap-1">
+              <span className="inline-block h-2 w-2 rounded-full bg-amber-500/70" /> Creator 50%
+            </span>
+            <span className="flex items-center gap-1">
+              Treasury 50% <span className="inline-block h-2 w-2 rounded-full bg-emerald-500/60" />
+            </span>
+          </div>
+        </div>
       </div>
 
       <div className="mt-4 rounded-lg border border-neutral-800 bg-neutral-950 p-3">
