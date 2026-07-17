@@ -18,9 +18,24 @@ const ALLOWED_TYPES = new Set([
   "image/svg+xml",
 ]);
 
+// NOTE: the per-IP key is derived from `x-forwarded-for` / `x-real-ip`, which
+// are client-settable. Unless a fixed upstream proxy overwrites them, a caller
+// can rotate the header per request and evade this cap, burning the Pinata
+// quota. The GLOBAL backstop below is the unspoofable ceiling.
 const WINDOW_MS = 60_000;
 const MAX_PER_WINDOW = 20;
 const hits = new Map<string, number[]>();
+
+// Global backstop across ALL callers — independent of the (spoofable) IP key.
+const MAX_GLOBAL_PER_WINDOW = Number(process.env.UPLOAD_MAX_GLOBAL_PER_WINDOW) || 200;
+let globalHits: number[] = [];
+
+function globalRateLimited(): boolean {
+  const now = Date.now();
+  globalHits = globalHits.filter((t) => now - t < WINDOW_MS);
+  globalHits.push(now);
+  return globalHits.length > MAX_GLOBAL_PER_WINDOW;
+}
 
 function rateLimited(ip: string): boolean {
   const now = Date.now();
@@ -46,7 +61,8 @@ export async function POST(req: NextRequest) {
     req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
     req.headers.get("x-real-ip") ||
     "unknown";
-  if (rateLimited(ip)) {
+  // Global backstop first (unspoofable), then the soft per-IP cap.
+  if (globalRateLimited() || rateLimited(ip)) {
     return NextResponse.json({ error: "rate limited" }, { status: 429 });
   }
 
