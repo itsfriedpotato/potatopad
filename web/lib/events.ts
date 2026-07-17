@@ -7,7 +7,7 @@
 // `unavailable: true` instead of throwing.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import type { Address } from "viem";
 import { useWatchContractEvent } from "wagmi";
 import { potatoPadAbi, potatoTokenAbi } from "@/lib/abi";
@@ -111,13 +111,10 @@ export function useLaunchActivity() {
   const query = useQuery<LaunchActivity>({
     queryKey,
     enabled: isDeployed && pads.length > 0,
-    // Cached refreshes paint instantly (initialData) and revalidate in the
-    // background; the scan itself now runs server-side (cached) at /api/tokens,
-    // so no visitor pays the multi-pad getLogs cost anymore.
+    // The scan itself runs server-side (cached) at /api/tokens, so no visitor
+    // pays the multi-pad getLogs cost anymore.
     staleTime: 60_000,
     gcTime: 24 * 60 * 60 * 1000,
-    initialData: () => readLaunchCache(cacheKey)?.data,
-    initialDataUpdatedAt: () => readLaunchCache(cacheKey)?.updatedAt,
     queryFn: async () => {
       try {
         const res = await fetch("/api/tokens");
@@ -148,6 +145,20 @@ export function useLaunchActivity() {
       }
     },
   });
+
+  // localStorage is unavailable during SSR. Seed React Query only after the
+  // initial hydration render so the server and browser produce the same tree
+  // (fix courtesy of #14). Cached refreshes still paint immediately after mount
+  // while the API request revalidates in the background.
+  useEffect(() => {
+    const cached = readLaunchCache(cacheKey);
+    if (!cached) return;
+    queryClient.setQueryData<LaunchActivity>(
+      queryKey,
+      (current) => current ?? cached.data,
+      { updatedAt: cached.updatedAt },
+    );
+  }, [cacheKey, queryClient, queryKey]);
 
   // Live updates: watch the primary (write) pad; legacy pads are historical.
   useWatchContractEvent({
