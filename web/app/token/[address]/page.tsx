@@ -134,6 +134,7 @@ export default function TokenPage() {
           creator={creator}
           lpTokenId={lpTokenId}
           pool={pool}
+          token={token}
           symbol={symbol}
           pad={resolved.pad}
         />
