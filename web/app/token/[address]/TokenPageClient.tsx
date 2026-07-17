@@ -1,13 +1,16 @@
 "use client";
 
+import { ExternalLink } from "lucide-react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { getAddress, isAddress } from "viem";
 import { useReadContracts } from "wagmi";
 import { potatoTokenAbi } from "@/lib/abi";
 import { ZERO_ADDRESS } from "@/lib/config";
+import { useAncientTokens } from "@/lib/ancient";
 import { usePad, useTokenPad } from "@/lib/hooks";
 import { usePoolStats } from "@/lib/pool";
+import { formatUsd } from "@/lib/format";
 import { ActivityTabs } from "@/components/ActivityTabs";
 import { HarvestCard } from "@/components/HarvestCard";
 import { NotDeployed } from "@/components/NotDeployed";
@@ -27,9 +30,14 @@ export default function TokenPageClient() {
 
   // Resolve which pad (primary or legacy) launched this token, and its info.
   const resolved = useTokenPad(token);
+  // If no pad claims it, it may be a pre-existing "ancient" Robinhood token.
+  const { byAddress: ancientByAddress, isLoading: ancientLoading } = useAncientTokens();
+  const ancient = token ? ancientByAddress.get(token.toLowerCase()) : undefined;
+
+  const isAncient = !resolved.resolved && !!ancient;
   const creator = resolved.creator;
-  const pool = resolved.pool;
   const lpTokenId = resolved.lpTokenId;
+  const pool = isAncient ? ancient.tradePool : resolved.pool;
 
   // Queries are disabled unless the address is valid; ZERO_ADDRESS is a typed placeholder.
   const queryToken = token ?? ZERO_ADDRESS;
@@ -45,8 +53,8 @@ export default function TokenPageClient() {
   const name = data?.[0] as string | undefined;
   const symbol = data?.[1] as string | undefined;
 
-  // Price / market cap / liquidity come from the Uniswap pool (hook is always
-  // called; it no-ops until the pool address resolves).
+  // Price / market cap / liquidity from the Uniswap pool (hook always called;
+  // no-ops until the pool resolves). Only used by the PotatoPad StatsCard.
   const poolStats = usePoolStats(token, pool !== ZERO_ADDRESS ? pool : undefined);
 
   if (!isDeployed) return <NotDeployed chainId={chainId} />;
@@ -70,7 +78,7 @@ export default function TokenPageClient() {
       <div className="card mx-auto max-w-lg p-8 text-center">
         <h2 className="text-lg font-bold text-neutral-100">Token not found</h2>
         <p className="mt-2 text-sm text-neutral-400">
-          This address isn&apos;t a Potato Pad launch on the current network.
+          This address isn&apos;t a Potato Pad launch or a known Robinhood token.
         </p>
         <Link href="/" className="btn-secondary mt-5">
           Back to Discover
@@ -79,7 +87,9 @@ export default function TokenPageClient() {
     );
   }
 
-  if (isLoading || resolved.isLoading || !data || name === undefined || symbol === undefined) {
+  // Wait for pad resolution; if it's not a pad token, also wait for the ancient list.
+  const stillResolving = resolved.isLoading || (!resolved.resolved && ancientLoading);
+  if (isLoading || stillResolving || !data || name === undefined || symbol === undefined) {
     return (
       <div className="grid gap-6 lg:grid-cols-3">
         <div className="space-y-6 lg:col-span-2">
@@ -106,6 +116,85 @@ export default function TokenPageClient() {
     );
   }
 
+  // ── Ancient (pre-existing Robinhood) token: chart + trade + USD stats, no fees ──
+  if (isAncient && ancient) {
+    const dexUrl = `https://dexscreener.com/robinhood/${ancient.address}`;
+    return (
+      <div className="grid gap-6 lg:grid-cols-3">
+        <div className="min-w-0 space-y-6 lg:col-span-2">
+          <TokenHeaderCard
+            token={token}
+            name={name}
+            symbol={symbol}
+            creator={ZERO_ADDRESS}
+            chainId={chainId}
+            ancient
+          />
+          <TokenChart token={token} pool={pool} />
+        </div>
+
+        <div className="space-y-6">
+          {ancient.hasWethPool && pool !== ZERO_ADDRESS ? (
+            <TradeWidget token={token} symbol={symbol} pool={pool} feeTier={ancient.feeTier} />
+          ) : (
+            <div className="card p-5">
+              <h3 className="font-bold text-neutral-100">Trade</h3>
+              <p className="mt-2 text-xs text-neutral-400">
+                This token has no WETH pool for in-app trading. Trade it on DexScreener.
+              </p>
+              <a
+                href={dexUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="btn-primary mt-4 w-full"
+              >
+                Trade on DexScreener
+                <ExternalLink className="h-4 w-4" />
+              </a>
+            </div>
+          )}
+
+          <div className="card p-5">
+            <h3 className="font-bold text-neutral-100">Stats</h3>
+            <dl className="mt-4 space-y-2.5 text-sm">
+              <div className="flex items-center justify-between">
+                <dt className="text-neutral-500">Market Cap</dt>
+                <dd className="font-mono text-neutral-100">
+                  {ancient.fdvUsd > 0 ? formatUsd(ancient.fdvUsd) : "—"}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between">
+                <dt className="text-neutral-500">24h Volume</dt>
+                <dd className="font-mono text-neutral-100">
+                  {ancient.volume24Usd > 0 ? formatUsd(ancient.volume24Usd) : "—"}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between">
+                <dt className="text-neutral-500">Liquidity</dt>
+                <dd className="font-mono text-neutral-100">
+                  {ancient.liquidityUsd > 0 ? formatUsd(ancient.liquidityUsd) : "—"}
+                </dd>
+              </div>
+            </dl>
+            <a
+              href={dexUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-4 inline-flex items-center gap-1 text-xs text-neutral-500 hover:text-amber-400"
+            >
+              View on DexScreener
+              <ExternalLink className="h-3 w-3" />
+            </a>
+            <p className="mt-3 text-[11px] text-neutral-600">
+              Data by GeckoTerminal. This is a pre-existing token, not a PotatoPad launch.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── PotatoPad token: full page with LP-fees card ──
   return (
     <div className="grid gap-6 lg:grid-cols-3">
       {/* LEFT (2/3) */}

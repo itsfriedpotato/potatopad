@@ -45,10 +45,13 @@ export function TradeWidget({
   token,
   symbol,
   pool,
+  feeTier = POOL_FEE_TIER,
 }: {
   token: Address;
   symbol: string;
   pool: Address;
+  /** Uniswap pool fee tier (bps). Defaults to PotatoPad's 1% tier; ancient tokens pass their own. */
+  feeTier?: number;
 }) {
   const { address: user } = useAccount();
   const { chainId, weth } = usePad();
@@ -165,7 +168,7 @@ export function TradeWidget({
         {
           tokenIn: weth,
           tokenOut: token,
-          fee: POOL_FEE_TIER,
+          fee: feeTier,
           recipient: user,
           amountIn: amount,
           amountOutMinimum: minOut,
@@ -202,7 +205,7 @@ export function TradeWidget({
         {
           tokenIn: token,
           tokenOut: weth,
-          fee: POOL_FEE_TIER,
+          fee: feeTier,
           recipient: user,
           amountIn: amount,
           amountOutMinimum: minOut,
@@ -447,7 +450,7 @@ export function TradeWidget({
         )}
 
         <div className="mt-3 flex items-center justify-between text-[11px] text-neutral-600">
-          <span>Swaps route through Uniswap V3 (1% fee).</span>
+          <span>Swaps route through Uniswap V3 ({feeTier / 10_000}% fee).</span>
           <a
             href={uniswapSwapUrl(token, chainId)}
             target="_blank"

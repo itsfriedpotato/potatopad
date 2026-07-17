@@ -22,12 +22,15 @@ export function TokenHeaderCard({
   symbol,
   creator,
   chainId,
+  ancient = false,
 }: {
   token: Address;
   name: string;
   symbol: string;
   creator: Address;
   chainId: number;
+  /** Pre-existing Robinhood token (not a PotatoPad launch): Ancient badge, no creator. */
+  ancient?: boolean;
 }) {
   const { creationByToken } = useLaunchActivity();
   const meta = creationByToken.get(token.toLowerCase());
@@ -55,20 +58,31 @@ export function TokenHeaderCard({
             <span className="rounded-full border border-neutral-800 bg-neutral-900 px-2 py-0.5 text-xs text-neutral-400">
               {chainName(chainId)}
             </span>
-            <span
-              className="rounded-full border border-green-500/30 bg-green-500/10 px-2 py-0.5 text-xs font-semibold text-green-500"
-              title="Live on Uniswap V3 since launch"
-            >
-              Live on Uniswap V3
-            </span>
+            {ancient ? (
+              <span
+                className="rounded-full border border-amber-700/40 bg-amber-900/25 px-2 py-0.5 text-xs font-semibold text-amber-500/90"
+                title="Pre-existing Robinhood token — not a PotatoPad launch"
+              >
+                Ancient
+              </span>
+            ) : (
+              <span
+                className="rounded-full border border-green-500/30 bg-green-500/10 px-2 py-0.5 text-xs font-semibold text-green-500"
+                title="Live on Uniswap V3 since launch"
+              >
+                Live on Uniswap V3
+              </span>
+            )}
           </div>
           <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-neutral-500">
             <span className="flex items-center gap-1.5">
               Contract <AddressChip address={token} chainId={chainId} />
             </span>
-            <span className="flex items-center gap-1.5">
-              Creator <AddressChip address={creator} chainId={chainId} />
-            </span>
+            {!ancient && (
+              <span className="flex items-center gap-1.5">
+                Creator <AddressChip address={creator} chainId={chainId} />
+              </span>
+            )}
           </div>
           {socials.length > 0 && (
             <div className="mt-3 flex flex-wrap items-center gap-2">

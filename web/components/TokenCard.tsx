@@ -1,6 +1,6 @@
 "use client";
 
-import { TrendingUp } from "lucide-react";
+import { Hourglass, TrendingUp } from "lucide-react";
 import Link from "next/link";
 import type { Address } from "viem";
 import { formatFloatPrice, formatUsd, formatUsdPrice, shortAddress, timeAgo } from "@/lib/format";
@@ -21,10 +21,61 @@ export interface TokenRow {
   createdAt?: number;
   /** launch image URL / ipfs hash from TokenCreated (optional) */
   imageURI?: string;
+  /** Ancient (pre-existing Robinhood) token — renders USD stats + an Ancient badge. */
+  ancient?: boolean;
+  /** Ancient market cap (USD) from GeckoTerminal. */
+  marketCapUsd?: number;
+  /** Ancient 24h volume (USD) from GeckoTerminal. */
+  volume24Usd?: number;
 }
 
 export function TokenCard({ row }: { row: TokenRow }) {
   const { usd: ethUsd } = useEthUsdPrice();
+
+  if (row.ancient) {
+    return (
+      <Link
+        href={`/token/${row.address}`}
+        className="card block p-5 transition-colors hover:border-amber-600/50"
+      >
+        <div className="flex items-center gap-3">
+          <TokenAvatar address={row.address} symbol={row.symbol} size="md" />
+          <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
+            <h3 className="truncate font-bold text-neutral-100">{row.name || row.symbol}</h3>
+            <span className="shrink-0 font-mono text-xs text-neutral-500">${row.symbol}</span>
+          </div>
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-amber-700/40 bg-amber-900/25 px-2 py-0.5 text-[11px] font-semibold text-amber-500/90">
+            <Hourglass className="h-3 w-3" aria-hidden />
+            Ancient
+          </span>
+        </div>
+
+        <p className="mt-2.5 truncate text-xs text-neutral-500">
+          Pre-existing Robinhood token
+        </p>
+
+        <div className="mt-4 grid grid-cols-2 gap-2">
+          <div>
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-neutral-500">
+              Market Cap
+            </p>
+            <p className="mt-0.5 font-mono text-sm text-neutral-100">
+              {row.marketCapUsd && row.marketCapUsd > 0 ? formatUsd(row.marketCapUsd) : "—"}
+            </p>
+          </div>
+          <div>
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-neutral-500">
+              24h Volume
+            </p>
+            <p className="mt-0.5 font-mono text-sm text-neutral-100">
+              {row.volume24Usd && row.volume24Usd > 0 ? formatUsd(row.volume24Usd) : "—"}
+            </p>
+          </div>
+        </div>
+      </Link>
+    );
+  }
+
   const mcapEthLabel = `${row.marketCapEth.toLocaleString("en-US", { maximumFractionDigits: 2 })} ETH`;
   const mcapLabel =
     ethUsd !== null && row.marketCapEth > 0 ? formatUsd(row.marketCapEth * ethUsd) : mcapEthLabel;

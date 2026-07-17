@@ -1,11 +1,12 @@
 "use client";
 
-import { Loader2 } from "lucide-react";
+import { Loader2, ShieldCheck } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent } from "react";
 import { bytesToHex, decodeEventLog, parseEther } from "viem";
 import { potatoPadAbi } from "@/lib/abi";
 import { usePad, useTx } from "@/lib/hooks";
+import { useAncientTokens } from "@/lib/ancient";
 import { formatEth, resolveImageUri, tryParseEther } from "@/lib/format";
 
 /**
@@ -22,6 +23,7 @@ export default function CreatePage() {
   const router = useRouter();
   const { pad, chainId, isDeployed } = usePad();
   const tx = useTx();
+  const { tokens: ancientTokens } = useAncientTokens();
 
   const [name, setName] = useState("");
   const [symbol, setSymbol] = useState("");
@@ -55,10 +57,30 @@ export default function CreatePage() {
 
   const devBuyWei = devBuy.trim() === "" ? 0n : tryParseEther(devBuy);
   const devBuyTooLarge = devBuyWei !== undefined && devBuyWei > MAX_DEV_BUY_WEI;
+
+  // Anti-Vampire Shield: block names/tickers of established runners (live Robinhood
+  // tokens above ~$1M FDV) plus a few blue-chips, so copycats can't vamp originals.
+  const blacklist = useMemo(() => {
+    const s = new Set<string>([
+      "doge", "pepe", "shib", "bonk", "wif", "trump", "eth", "weth", "usdc", "usdt", "usdg",
+    ]);
+    for (const t of ancientTokens) {
+      if (t.fdvUsd >= 1_000_000) {
+        if (t.symbol) s.add(t.symbol.trim().toLowerCase());
+        if (t.name) s.add(t.name.trim().toLowerCase());
+      }
+    }
+    return s;
+  }, [ancientTokens]);
+  const nameBlocked = name.trim().length > 0 && blacklist.has(name.trim().toLowerCase());
+  const symbolBlocked = symbol.trim().length > 0 && blacklist.has(symbol.trim().toLowerCase());
+  const vampBlocked = nameBlocked || symbolBlocked;
+
   const formValid =
     name.trim().length > 0 &&
     symbol.trim().length > 0 &&
     image.trim().length > 0 &&
+    !vampBlocked &&
     devBuyWei !== undefined &&
     !devBuyTooLarge;
 
@@ -133,12 +155,18 @@ export default function CreatePage() {
               </label>
               <input
                 id="name"
-                className="input"
+                className={`input ${nameBlocked ? "border-red-500" : ""}`}
                 placeholder="Mashed Potato"
                 value={name}
                 maxLength={48}
                 onChange={(e) => setName(e.target.value)}
               />
+              {nameBlocked && (
+                <p className="mt-1 text-xs text-red-400">
+                  ⚠️ Anti-Vampire Shield: “{name.trim()}” is an established runner. PotatoPad
+                  protects original creators — pick a fresh name.
+                </p>
+              )}
             </div>
 
             <div>
@@ -147,12 +175,18 @@ export default function CreatePage() {
               </label>
               <input
                 id="symbol"
-                className="input font-mono uppercase"
+                className={`input font-mono uppercase ${symbolBlocked ? "border-red-500" : ""}`}
                 placeholder="MASH"
                 value={symbol}
                 maxLength={12}
                 onChange={(e) => setSymbol(e.target.value)}
               />
+              {symbolBlocked && (
+                <p className="mt-1 text-xs text-red-400">
+                  ⚠️ Anti-Vampire Shield: ${symbol.trim().toUpperCase()} belongs to an established
+                  high-cap runner. Duplicate launches are blocked.
+                </p>
+              )}
             </div>
 
             <div>
@@ -267,6 +301,19 @@ export default function CreatePage() {
                   Dev buy is capped at {formatEth(MAX_DEV_BUY_WEI)} ETH (5% of supply).
                 </p>
               )}
+            </div>
+
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs">
+              <p className="flex items-center gap-1.5 font-semibold text-amber-400">
+                <ShieldCheck className="h-3.5 w-3.5" />
+                Anti-Vampire Shield: runner protection active
+              </p>
+              <p className="mt-1 text-neutral-400">
+                PotatoPad blocks copycats of established high-cap runners (&gt;$1M) from being
+                deployed — original creators are protected. Ancient tokens from Noxa (like
+                $TENDIES, $CASHCAT) are honored in the Ancients gallery and can&apos;t be duplicated
+                here.
+              </p>
             </div>
 
             <button

@@ -1,10 +1,11 @@
 "use client";
 
-import { Sprout, TrendingUp } from "lucide-react";
+import { Hourglass, Sprout, TrendingUp } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useReadContracts } from "wagmi";
 import { ZERO_ADDRESS } from "@/lib/config";
+import { useAncientTokens } from "@/lib/ancient";
 import { useLaunchActivity } from "@/lib/events";
 import { usePad } from "@/lib/hooks";
 import {
@@ -21,6 +22,7 @@ import { TokenCardSkeleton } from "@/components/Skeletons";
 const TABS = [
   { id: "fresh", label: "Fresh Sprouts", Icon: Sprout },
   { id: "top", label: "Top Market Cap", Icon: TrendingUp },
+  { id: "ancient", label: "Ancient", Icon: Hourglass },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
@@ -31,11 +33,14 @@ export default function DiscoverPage() {
   const { weth, chainId, isDeployed } = usePad();
   const { query } = useSearch();
   const [tab, setTab] = useState<TabId>("fresh");
-  // Token list spans ALL pads (primary + legacy), so tokens launched on an
-  // earlier pad (e.g. CHIP on the pre-CREATE2 pad) still show after a repoint.
-  const { creations, isLoading: launchLoading } = useLaunchActivity();
+  const isAncientTab = tab === "ancient";
 
-  // Price each token from its pool's slot0, index-aligned to `creations`.
+  // PotatoPad launches — span ALL pads (primary + legacy).
+  const { creations, isLoading: launchLoading } = useLaunchActivity();
+  // Pre-existing Robinhood "ancient" runners (Noxa etc.), served by /api/ancient.
+  const { tokens: ancientTokens, isLoading: ancientLoading } = useAncientTokens();
+
+  // Price each PotatoPad token from its pool's slot0, index-aligned to `creations`.
   const poolContracts = useMemo(
     () =>
       creations.map((c) => ({
@@ -54,7 +59,7 @@ export default function DiscoverPage() {
     },
   });
 
-  const rows = useMemo<TokenRow[]>(
+  const padRows = useMemo<TokenRow[]>(
     () =>
       creations.map((c, i) => {
         const slot0 = poolReads?.[i]?.result as Slot0 | undefined;
@@ -78,12 +83,30 @@ export default function DiscoverPage() {
     [creations, poolReads, weth],
   );
 
+  const ancientRows = useMemo<TokenRow[]>(
+    () =>
+      ancientTokens.map((t) => ({
+        address: t.address,
+        name: t.name,
+        symbol: t.symbol,
+        creator: ZERO_ADDRESS,
+        pool: t.tradePool,
+        priceWeth: 0,
+        marketCapEth: 0,
+        ancient: true,
+        marketCapUsd: t.fdvUsd,
+        volume24Usd: t.volume24Usd,
+      })),
+    [ancientTokens],
+  );
+
+  const activeRows = isAncientTab ? ancientRows : padRows;
+
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
-    let list = rows;
+    let list = activeRows;
     if (q) {
-      // When the query looks like an address (0x…), also match tokens by their
-      // contract address (prefix), so pasting an address filters straight to it.
+      // When the query looks like an address (0x…), also match by contract address.
       const isAddressQuery = q.startsWith("0x");
       list = list.filter(
         (r) =>
@@ -92,19 +115,26 @@ export default function DiscoverPage() {
           (isAddressQuery && r.address.toLowerCase().startsWith(q)),
       );
     }
+    if (isAncientTab) {
+      return [...list].sort((a, b) => (b.marketCapUsd ?? 0) - (a.marketCapUsd ?? 0));
+    }
     switch (tab) {
       case "fresh":
         return [...list].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
       case "top":
         return [...list].sort((a, b) => b.marketCapEth - a.marketCapEth);
+      default:
+        return list;
     }
-  }, [rows, query, tab]);
+  }, [activeRows, query, tab, isAncientTab]);
 
   if (!isDeployed) {
     return <NotDeployed chainId={chainId} />;
   }
 
-  const loading = launchLoading && creations.length === 0;
+  const loading = isAncientTab
+    ? ancientLoading && ancientTokens.length === 0
+    : launchLoading && creations.length === 0;
 
   return (
     <div>
@@ -133,23 +163,44 @@ export default function DiscoverPage() {
         </Link>
       </div>
 
+      {isAncientTab && (
+        <p className="mx-auto mb-5 max-w-xl text-center text-xs text-neutral-500">
+          <Hourglass className="mr-1 inline h-3 w-3 text-amber-600/80" aria-hidden />
+          Ancient tokens are pre-existing Robinhood runners (not PotatoPad launches). View and
+          trade them here — they can&apos;t be planted on the pad.
+        </p>
+      )}
+
       {loading ? (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 6 }).map((_, i) => (
             <TokenCardSkeleton key={i} />
           ))}
         </div>
-      ) : rows.length === 0 ? (
+      ) : activeRows.length === 0 ? (
         <div className="card mx-auto max-w-lg p-10 text-center">
-          <Sprout className="mx-auto h-10 w-10 text-green-500/70" aria-hidden />
-          <h2 className="mt-4 text-lg font-bold text-neutral-100">Nothing planted yet</h2>
-          <p className="mt-2 text-sm text-neutral-400">
-            Be the first to plant a coin. It launches straight onto Uniswap V3, live from
-            the first block.
-          </p>
-          <Link href="/create" className="btn-primary mt-5">
-            Plant the first coin
-          </Link>
+          {isAncientTab ? (
+            <>
+              <Hourglass className="mx-auto h-10 w-10 text-amber-600/70" aria-hidden />
+              <h2 className="mt-4 text-lg font-bold text-neutral-100">No ancient tokens yet</h2>
+              <p className="mt-2 text-sm text-neutral-400">
+                Couldn&apos;t load the pre-existing Robinhood runners right now. Try again in a
+                moment.
+              </p>
+            </>
+          ) : (
+            <>
+              <Sprout className="mx-auto h-10 w-10 text-green-500/70" aria-hidden />
+              <h2 className="mt-4 text-lg font-bold text-neutral-100">Nothing planted yet</h2>
+              <p className="mt-2 text-sm text-neutral-400">
+                Be the first to plant a coin. It launches straight onto Uniswap V3, live from
+                the first block.
+              </p>
+              <Link href="/create" className="btn-primary mt-5">
+                Plant the first coin
+              </Link>
+            </>
+          )}
         </div>
       ) : visible.length === 0 ? (
         <div className="card mx-auto max-w-lg p-10 text-center">
