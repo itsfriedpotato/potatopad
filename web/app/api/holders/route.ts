@@ -49,6 +49,29 @@ const client = createPublicClient({
   transport: http(process.env.ROBINHOOD_RPC_URL || "https://rpc.mainnet.chain.robinhood.com"),
 });
 
+// Prefer a Ponder indexer when configured; fall back to the live log scan below
+// if unset or unreachable, so prod keeps working even if the indexer is down.
+const INDEXER_URL = process.env.INDEXER_URL?.replace(/\/+$/, "");
+
+async function fromIndexer(token: string): Promise<HoldersPayload | null> {
+  if (!INDEXER_URL) return null;
+  try {
+    const res = await fetch(`${INDEXER_URL}/holders?token=${token}`, {
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) return null;
+    const json = (await res.json()) as Partial<HoldersPayload>;
+    if (!json || !Array.isArray(json.holders)) return null;
+    return {
+      holders: json.holders as HolderDTO[],
+      total: json.total ?? "0",
+      unavailable: false,
+    };
+  } catch {
+    return null;
+  }
+}
+
 const cache = new Map<string, { payload: HoldersPayload; expiresAt: number }>();
 
 async function collectLogs<T>(
@@ -129,7 +152,7 @@ export async function GET(req: Request) {
   }
 
   try {
-    const payload = await scan(token as Address);
+    const payload = (await fromIndexer(token)) ?? (await scan(token as Address));
     cache.set(key, { payload, expiresAt: now + CACHE_TTL_MS });
     if (cache.size > MAX_CACHED_TOKENS) {
       const oldest = cache.keys().next().value;
