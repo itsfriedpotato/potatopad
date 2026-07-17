@@ -2,7 +2,7 @@
 
 import { ExternalLink, TrendingUp } from "lucide-react";
 import { useState } from "react";
-import { formatEther, parseEther, type Address } from "viem";
+import { encodeFunctionData, formatEther, parseEther, type Address } from "viem";
 import { useAccount, useBalance, useReadContract } from "wagmi";
 import { potatoTokenAbi } from "@/lib/abi";
 import {
@@ -21,6 +21,19 @@ import { TxStatus } from "@/components/TxStatus";
 
 /** Keep a little ETH aside for gas when quick-filling "Max" on buys. */
 const GAS_BUFFER = parseEther("0.01");
+
+/**
+ * How long a signed swap stays valid, in seconds. SwapRouter02's
+ * `exactInputSingle` struct has no deadline, so a signed-but-unmined swap would
+ * otherwise linger in the mempool indefinitely (bounded only by slippage) and
+ * be executed later when it's sandwich-profitable. We wrap the call in the
+ * router's `multicall(deadline, [...])`, which reverts once the deadline passes.
+ */
+const SWAP_DEADLINE_SECONDS = 600n; // 10 minutes
+
+function swapDeadline(): bigint {
+  return BigInt(Math.floor(Date.now() / 1000)) + SWAP_DEADLINE_SECONDS;
+}
 
 const SLIPPAGE_OPTIONS: Array<{ label: string; bps: bigint }> = [
   { label: "1%", bps: 100n },
@@ -145,8 +158,7 @@ export function TradeWidget({
 
   function onBuy() {
     if (amount === undefined || !user || minOut === 0n || !router) return;
-    buyTx.writeContract({
-      address: router,
+    const swapData = encodeFunctionData({
       abi: swapRouter02Abi,
       functionName: "exactInputSingle",
       args: [
@@ -160,6 +172,13 @@ export function TradeWidget({
           sqrtPriceLimitX96: 0n,
         },
       ],
+    });
+    // Wrap in the deadline-checked multicall so the tx can't be mined late.
+    buyTx.writeContract({
+      address: router,
+      abi: swapRouter02Abi,
+      functionName: "multicall",
+      args: [swapDeadline(), [swapData]],
       value: amount,
     });
   }
@@ -176,8 +195,7 @@ export function TradeWidget({
 
   function onSell() {
     if (amount === undefined || !user || minOut === 0n || !router || exceedsBalance) return;
-    sellTx.writeContract({
-      address: router,
+    const swapData = encodeFunctionData({
       abi: swapRouter02Abi,
       functionName: "exactInputSingle",
       args: [
@@ -191,6 +209,13 @@ export function TradeWidget({
           sqrtPriceLimitX96: 0n,
         },
       ],
+    });
+    // Wrap in the deadline-checked multicall so the tx can't be mined late.
+    sellTx.writeContract({
+      address: router,
+      abi: swapRouter02Abi,
+      functionName: "multicall",
+      args: [swapDeadline(), [swapData]],
     });
   }
 
