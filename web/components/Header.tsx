@@ -7,6 +7,11 @@ import { usePathname } from "next/navigation";
 import { PotatoLogo } from "@/components/PotatoLogo";
 import { useSearch } from "@/components/SearchContext";
 
+// The chain-switcher pill is a dev convenience (hopping between localhost /
+// testnet / mainnet). Production builds serve one chain — never show it there.
+// NODE_ENV is inlined at build time, so the button is compiled out of prod bundles.
+const SHOW_CHAIN_SWITCHER = process.env.NODE_ENV === "development";
+
 export function Header() {
   const pathname = usePathname();
   const { query, setQuery } = useSearch();
@@ -87,13 +92,15 @@ export function Header() {
                   </button>
                 ) : (
                   <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={openChainModal}
-                      className="hidden items-center gap-1.5 rounded-lg border border-neutral-800 bg-neutral-900 px-2.5 py-2 text-xs font-medium text-neutral-300 transition-colors hover:border-amber-500/40 sm:inline-flex"
-                    >
-                      {chain.name}
-                    </button>
+                    {SHOW_CHAIN_SWITCHER && (
+                      <button
+                        type="button"
+                        onClick={openChainModal}
+                        className="hidden items-center gap-1.5 rounded-lg border border-neutral-800 bg-neutral-900 px-2.5 py-2 text-xs font-medium text-neutral-300 transition-colors hover:border-amber-500/40 sm:inline-flex"
+                      >
+                        {chain.name}
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={openAccountModal}
