@@ -82,8 +82,14 @@ export default function DiscoverPage() {
     const q = query.trim().toLowerCase();
     let list = rows;
     if (q) {
+      // When the query looks like an address (0x…), also match tokens by their
+      // contract address (prefix), so pasting an address filters straight to it.
+      const isAddressQuery = q.startsWith("0x");
       list = list.filter(
-        (r) => r.name.toLowerCase().includes(q) || r.symbol.toLowerCase().includes(q),
+        (r) =>
+          r.name.toLowerCase().includes(q) ||
+          r.symbol.toLowerCase().includes(q) ||
+          (isAddressQuery && r.address.toLowerCase().startsWith(q)),
       );
     }
     switch (tab) {
