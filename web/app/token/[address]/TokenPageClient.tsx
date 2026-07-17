@@ -129,6 +129,7 @@ export default function TokenPageClient() {
             creator={ZERO_ADDRESS}
             chainId={chainId}
             ancient
+            imageURI={ancient.imageUrl}
           />
           <TokenChart token={token} pool={pool} />
         </div>

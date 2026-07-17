@@ -1,6 +1,6 @@
 "use client";
 
-import { Loader2, ShieldCheck } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent } from "react";
 import { bytesToHex, decodeEventLog, parseEther } from "viem";
@@ -164,7 +164,7 @@ export default function CreatePage() {
               {nameBlocked && (
                 <p className="mt-1 text-xs text-red-400">
                   ⚠️ Anti-Vampire Shield: “{name.trim()}” is an established runner. PotatoPad
-                  protects original creators — pick a fresh name.
+                  protects original creators. Pick a fresh name.
                 </p>
               )}
             </div>
@@ -232,7 +232,7 @@ export default function CreatePage() {
               </div>
               {uploadErr && <p className="mt-1.5 text-xs text-red-400">{uploadErr}</p>}
               <p className="mt-1.5 text-xs text-neutral-500">
-                Required — upload a logo. Pinned to IPFS and saved in the launch event on-chain.
+                Required. Upload a logo, pinned to IPFS and saved in the launch event on-chain.
               </p>
             </div>
 
@@ -301,19 +301,6 @@ export default function CreatePage() {
                   Dev buy is capped at {formatEth(MAX_DEV_BUY_WEI)} ETH (5% of supply).
                 </p>
               )}
-            </div>
-
-            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs">
-              <p className="flex items-center gap-1.5 font-semibold text-amber-400">
-                <ShieldCheck className="h-3.5 w-3.5" />
-                Anti-Vampire Shield: runner protection active
-              </p>
-              <p className="mt-1 text-neutral-400">
-                PotatoPad blocks copycats of established high-cap runners (&gt;$1M) from being
-                deployed — original creators are protected. Ancient tokens from Noxa (like
-                $TENDIES, $CASHCAT) are honored in the Ancients gallery and can&apos;t be duplicated
-                here.
-              </p>
             </div>
 
             <button

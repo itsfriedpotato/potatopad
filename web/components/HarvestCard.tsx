@@ -1,6 +1,6 @@
 "use client";
 
-import { Coins, Leaf, Lock } from "lucide-react";
+import { Coins, Leaf } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Address } from "viem";
 import { useAccount, useReadContract } from "wagmi";
@@ -9,7 +9,6 @@ import { ZERO_ADDRESS } from "@/lib/config";
 import { usePad, useTx } from "@/lib/hooks";
 import { formatEth, formatTokens } from "@/lib/format";
 import { useAccruedFees } from "@/lib/pool";
-import { AddressChip } from "@/components/AddressChip";
 import { TxStatus } from "@/components/TxStatus";
 
 type ClaimAsset = "weth" | "token";
@@ -377,59 +376,35 @@ export function HarvestCard({
   else if (claimableToken > 0n) label = `Claim ${symbol}`;
   else label = "Claim WETH";
 
+  // Creator's realizable fees = already set-aside (claimable) + their 50% of what
+  // is still uncollected in the pool. One figure so it never reads "0 WETH" while
+  // fees sit uncollected in the position.
+  const creatorWeth = claimableWeth + (accrued.wethAmount ?? 0n) / 2n;
+  const creatorToken = claimableToken + (accrued.tokenAmount ?? 0n) / 2n;
+
   return (
     <div className="card p-5">
       <h3 className="flex items-center gap-2 font-bold text-neutral-100">
         <Leaf className="h-4 w-4 text-amber-500" />
-        LP Fees
+        Creator fees
       </h3>
       <p className="mt-1 text-xs text-neutral-500">
-        Single-sided liquidity, locked forever
+        Your 50% of swap fees. Principal is locked forever and unruggable.
       </p>
-
-      <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm">
-        <p className="flex items-center gap-1.5 font-semibold text-amber-400">
-          <Lock className="h-3.5 w-3.5" />
-          Locked LP position #{lpTokenId.toString()}
-        </p>
-        {pool !== ZERO_ADDRESS && (
-          <p className="mt-1.5 flex items-center gap-1.5 text-xs text-neutral-400">
-            Pool <AddressChip address={pool} chainId={chainId} />
-          </p>
-        )}
-        <p className="mt-1.5 text-xs text-neutral-400">
-          Principal is locked permanently and unruggable. Swap fees split 50/50 between
-          the creator and the treasury.
-        </p>
-        <div className="mt-2.5">
-          <div className="flex h-2 overflow-hidden rounded-full border border-neutral-800">
-            <div className="h-full w-1/2 bg-amber-500/70" />
-            <div className="h-full w-1/2 bg-emerald-500/60" />
-          </div>
-          <div className="mt-1 flex justify-between text-[10px] text-neutral-500">
-            <span className="flex items-center gap-1">
-              <span className="inline-block h-2 w-2 rounded-full bg-amber-500/70" /> Creator 50%
-            </span>
-            <span className="flex items-center gap-1">
-              Treasury 50% <span className="inline-block h-2 w-2 rounded-full bg-emerald-500/60" />
-            </span>
-          </div>
-        </div>
-      </div>
 
       <div className="mt-4 rounded-lg border border-neutral-800 bg-neutral-950 p-3">
         <div className="flex items-center justify-between gap-3">
-          <div>
-            <p className="text-xs text-neutral-500">Uncollected in pool</p>
-            <p className="mt-0.5 font-mono text-sm text-neutral-200">
-              {formatEth(accrued.wethAmount ?? 0n)} WETH
-              <span className="text-neutral-500"> + </span>
-              {formatTokens(accrued.tokenAmount ?? 0n)} {symbol}
+          <div className="min-w-0">
+            <p className="text-xs text-neutral-500">Claimable (your 50%)</p>
+            <p className="mt-0.5 font-mono text-sm font-semibold text-neutral-100">
+              {claimablesKnown
+                ? `${formatEth(creatorWeth)} WETH + ${formatTokens(creatorToken)} ${symbol}`
+                : "…"}
             </p>
           </div>
           <button
             type="button"
-            className="btn-secondary px-3 py-1.5 text-xs"
+            className="btn-secondary shrink-0 px-3 py-1.5 text-xs"
             disabled={disabled}
             onClick={handleClick}
           >
@@ -438,20 +413,9 @@ export function HarvestCard({
           </button>
         </div>
 
-        <div className="mt-3 flex items-baseline justify-between gap-3 border-t border-neutral-800 pt-3">
-          <p className="text-xs text-neutral-500">Ready to claim (creator)</p>
-          <p className="font-mono text-sm font-semibold text-neutral-100">
-            {claimablesKnown
-              ? `${formatEth(claimableWeth)} WETH + ${formatTokens(claimableToken)} ${symbol}`
-              : "…"}
-          </p>
-        </div>
-
-        <p className="mt-2 text-[11px] text-neutral-600">
-          Fees accrue in the Uniswap position as people trade (WETH and {symbol}). Collecting
-          harvests them into the locker — the treasury is auto-paid its 50% and the
-          creator&apos;s 50% is set aside — then the creator claims both sides. One click does
-          both.
+        <p className="mt-2.5 text-[11px] text-neutral-600">
+          Fees accrue as people trade (WETH and {symbol}). One click collects them into
+          the locker and claims your share; the treasury auto-takes its 50%.
         </p>
         {isConnected && !isCreator && (
           <p className="mt-1 text-[11px] text-neutral-600">
@@ -460,21 +424,9 @@ export function HarvestCard({
           </p>
         )}
 
-        <TxStatus
-          tx={collectTx}
-          chainId={chainId}
-          successLabel="Collected fees into the locker."
-        />
-        <TxStatus
-          tx={claimWethTx}
-          chainId={chainId}
-          successLabel="Claimed your WETH fees!"
-        />
-        <TxStatus
-          tx={claimTokenTx}
-          chainId={chainId}
-          successLabel={`Claimed your ${symbol} fees!`}
-        />
+        <TxStatus tx={collectTx} chainId={chainId} successLabel="Collected fees into the locker." />
+        <TxStatus tx={claimWethTx} chainId={chainId} successLabel="Claimed your WETH fees!" />
+        <TxStatus tx={claimTokenTx} chainId={chainId} successLabel={`Claimed your ${symbol} fees!`} />
       </div>
     </div>
   );

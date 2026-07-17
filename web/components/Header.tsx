@@ -4,7 +4,6 @@ import { ConnectButton } from "@rainbow-me/rainbowkit";
 import { Search, Wallet } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { PotatoLogo } from "@/components/PotatoLogo";
 import { useSearch } from "@/components/SearchContext";
 
 // The chain-switcher pill is a dev convenience (hopping between localhost /
@@ -20,7 +19,7 @@ export function Header() {
     <header className="border-b border-neutral-800 bg-neutral-950/80 backdrop-blur-md">
       <div className="mx-auto flex h-16 w-full max-w-6xl items-center gap-4 px-4 sm:px-6">
         <Link href="/" className="flex shrink-0 items-center gap-2">
-          <PotatoLogo className="h-7 w-7 text-amber-500" />
+          <img src="/logo.jpg" alt="PotatoPad" className="h-7 w-7 rounded-lg" />
           <span className="text-lg font-bold tracking-tight text-neutral-100">
             Potato <span className="text-amber-500">Pad</span>
           </span>

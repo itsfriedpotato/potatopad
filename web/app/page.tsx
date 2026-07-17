@@ -33,6 +33,7 @@ export default function DiscoverPage() {
   const { weth, chainId, isDeployed } = usePad();
   const { query } = useSearch();
   const [tab, setTab] = useState<TabId>("fresh");
+  const [sortOrder, setSortOrder] = useState<"new" | "old">("new");
   const isAncientTab = tab === "ancient";
 
   // PotatoPad launches — span ALL pads (primary + legacy).
@@ -93,6 +94,7 @@ export default function DiscoverPage() {
         pool: t.tradePool,
         priceWeth: 0,
         marketCapEth: 0,
+        imageURI: t.imageUrl,
         ancient: true,
         marketCapUsd: t.fdvUsd,
         volume24Usd: t.volume24Usd,
@@ -120,13 +122,17 @@ export default function DiscoverPage() {
     }
     switch (tab) {
       case "fresh":
-        return [...list].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+        return [...list].sort((a, b) =>
+          sortOrder === "new"
+            ? (b.createdAt ?? 0) - (a.createdAt ?? 0)
+            : (a.createdAt ?? 0) - (b.createdAt ?? 0),
+        );
       case "top":
         return [...list].sort((a, b) => b.marketCapEth - a.marketCapEth);
       default:
         return list;
     }
-  }, [activeRows, query, tab, isAncientTab]);
+  }, [activeRows, query, tab, isAncientTab, sortOrder]);
 
   if (!isDeployed) {
     return <NotDeployed chainId={chainId} />;
@@ -156,12 +162,31 @@ export default function DiscoverPage() {
           </button>
         ))}
       </div>
-      <div className="mb-7 flex justify-center">
-        <Link href="/create" className="btn-primary px-5">
-          <Sprout className="h-4 w-4" />
-          Plant a Coin
-        </Link>
-      </div>
+
+      {tab === "fresh" && (
+        <div className="mb-6 flex items-center justify-center gap-1.5 text-xs">
+          <span className="text-neutral-500">Sort</span>
+          {(
+            [
+              ["new", "Newest"],
+              ["old", "Oldest"],
+            ] as const
+          ).map(([val, lbl]) => (
+            <button
+              key={val}
+              type="button"
+              onClick={() => setSortOrder(val)}
+              className={`rounded-full border px-3 py-1 font-medium transition-colors ${
+                sortOrder === val
+                  ? "border-amber-500/50 bg-amber-500/10 text-amber-300"
+                  : "border-neutral-800 bg-neutral-900/50 text-neutral-400 hover:text-neutral-200"
+              }`}
+            >
+              {lbl}
+            </button>
+          ))}
+        </div>
+      )}
 
       {isAncientTab && (
         <div className="mx-auto mb-5 max-w-xl rounded-xl border border-amber-600/20 bg-amber-500/5 px-4 py-3 text-center text-xs text-neutral-400">
@@ -170,9 +195,9 @@ export default function DiscoverPage() {
             What&apos;s an Ancient? 🏛️
           </p>
           <p className="mt-1">
-            A token that launched on <span className="text-neutral-200">Noxa</span> and ran with a
-            community — a pre-existing Robinhood runner. We honor the originals here: view and trade
-            them, but they can&apos;t be planted on PotatoPad.
+            A token that launched on <span className="text-neutral-200">Noxa</span>{" "}
+            and ran with a community. A pre-existing Robinhood runner. We honor the originals here:
+            view and trade them, but they can&apos;t be planted on PotatoPad.
           </p>
         </div>
       )}

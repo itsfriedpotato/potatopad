@@ -72,7 +72,7 @@ export function DisclaimerGate() {
           <p>
             Potato Pad is{" "}
             <strong className="text-neutral-100">unaudited, open-source demo software</strong>.
-            Tokens here are created by third parties — we don&apos;t vet, audit, or endorse any of
+            Tokens here are created by third parties. We don&apos;t vet, audit, or endorse any of
             them.
           </p>
           <p>

@@ -29,8 +29,15 @@ export function StatsCard({
   const rows: Array<{ label: string; value: string; sub?: string }> = [
     {
       label: "Price",
-      value: priceWeth > 0 ? `${formatFloatPrice(priceWeth)} ETH` : "…",
-      sub: priceUsd !== null ? formatUsdPrice(priceUsd) : undefined,
+      // USD headline; fall back to the ETH price if the feed is down.
+      value:
+        priceWeth <= 0
+          ? "…"
+          : priceUsd !== null
+            ? formatUsdPrice(priceUsd)
+            : `${formatFloatPrice(priceWeth)} ETH`,
+      sub:
+        priceUsd !== null && priceWeth > 0 ? `${formatFloatPrice(priceWeth)} ETH` : undefined,
     },
     {
       label: "Market Cap",

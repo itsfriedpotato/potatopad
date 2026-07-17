@@ -1,31 +1,44 @@
-import { NextRequest, NextResponse } from "next/server";
-import { robinhoodChain, WETH_ADDRESSES } from "@/lib/config";
+import { NextResponse } from "next/server";
 
 /**
- * "Ancient" tokens: pre-existing Robinhood runners (Noxa etc.) that were NOT
- * launched on PotatoPad. We surface them read-only in an Ancient section. Data
- * comes from CoinGecko's on-chain (GeckoTerminal) pools API — top pools by
- * volume/liquidity — and is cached server-side so the CoinGecko key stays hidden
- * and every visitor gets a small pre-built list.
+ * "Ancient" tokens: hand-vetted pre-existing Robinhood runners (Noxa etc.) that
+ * were NOT launched on PotatoPad. We surface them read-only in an Ancient
+ * section. Auto-discovery pulled in copycats/junk, so the list is a curated
+ * allowlist below — add or remove addresses here. Market data (image, FDV,
+ * volume, best WETH pool) comes from CoinGecko's on-chain (GeckoTerminal) API,
+ * cached server-side so the key stays hidden and everyone gets a pre-built list.
  */
 
 export const runtime = "nodejs";
 
 const NETWORK = "robinhood";
-const WETH = (WETH_ADDRESSES[robinhoodChain.id] ?? "").toLowerCase();
-// Tokens that are the QUOTE side of a pair, never the "runner" we want to list.
-const QUOTE_SYMBOLS = new Set(["WETH", "ETH", "USDG", "USDC", "USDT", "DAI", "USDC.E"]);
-const QUOTE_ADDRS = new Set([WETH]);
-const PAGES = 3;
-const MAX_TOKENS = 60;
+
+// Robinhood Chain RPC + the launchpad token template's on-chain logo() selector.
+// Noxa/Pons tokens store their logo (an ipfs:// or https URI) ON-CHAIN, so we read
+// it straight from each token contract. That's authoritative and independent of
+// any third-party image host (CoinGecko is missing some, e.g. DFV).
+const ROBINHOOD_RPC = process.env.ROBINHOOD_RPC_URL || "https://rpc.mainnet.chain.robinhood.com";
+const SEL_LOGO = "0xfb7f21eb"; // keccak256("logo()")[:4]
+
+// Curated allowlist of ancient Noxa/Robinhood runners. ONLY these appear.
+const ANCIENT_ADDRESSES: string[] = [
+  "0x020bfC650A365f8BB26819deAAbF3E21291018b4", // CASHCAT
+  "0x45242320DBB855EeA8Fd36804C6487E10E97FCF9", // TENDIES
+  "0xD7321801CAae694090694Ff55A9323139F043B88", // JUGGERNAUT
+  "0x2103faA9D1762e27a716C61718b3aCf3Ec1F9bf1", // FOX
+  "0x77581054581B9c525E7dd7a0155DE43867532d03", // WISHBONE
+  "0xbf72347bacEfE747Eaf48b8A66E38BABad3020A0", // STONKS
+  "0x9538676ef48f2da173c20b9259bdc86695fd5eb3", // DFV
+  "0x75C8258eAa6d0f94b82951194191cA3efB0bCBe2", // meow
+  "0x7e86381A763F0Ecca2bDF27C54eAC403ddD48123", // GME
+];
 
 export interface AncientTokenDto {
   address: string;
   name: string;
   symbol: string;
-  /** Highest-liquidity WETH pool, for in-app trading (ZERO if none). */
+  imageUrl: string;
   tradePool: string;
-  /** Fee tier (bps) of `tradePool`, for the swap/quote. */
   feeTier: number;
   fdvUsd: number;
   volume24Usd: number;
@@ -52,143 +65,128 @@ function feeFromName(name: string | undefined): number {
   return Math.round(parseFloat(m[1]) * 10_000);
 }
 
+/** Decode an ABI-encoded `string` return (offset, length, then utf-8 bytes). */
+function decodeAbiString(hex: string | null | undefined): string {
+  if (!hex || hex === "0x") return "";
+  const s = hex.replace(/^0x/, "");
+  if (s.length < 128) return "";
+  const len = parseInt(s.slice(64, 128), 16);
+  if (!len || Number.isNaN(len)) return "";
+  try {
+    return Buffer.from(s.slice(128, 128 + len * 2), "hex")
+      .toString("utf8")
+      .replace(/\0+$/, "")
+      .trim();
+  } catch {
+    return "";
+  }
+}
+
+/** Read one token's on-chain logo() (ipfs:// or https URI); "" if it reverts. */
+async function readLogo(address: string): Promise<string> {
+  try {
+    const res = await fetch(ROBINHOOD_RPC, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "eth_call",
+        params: [{ to: address, data: SEL_LOGO }, "latest"],
+      }),
+      signal: AbortSignal.timeout(8000),
+      cache: "no-store",
+    });
+    if (!res.ok) return "";
+    const j = (await res.json()) as { result?: string };
+    return decodeAbiString(j.result);
+  } catch {
+    return "";
+  }
+}
+
+/** On-chain logo() for every address, keyed lowercase; best-effort (never throws). */
+async function readLogos(addresses: string[]): Promise<Map<string, string>> {
+  const entries = await Promise.all(
+    addresses.map(async (a) => [a.toLowerCase(), await readLogo(a)] as const),
+  );
+  return new Map(entries);
+}
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
-async function fetchPools(page: number): Promise<{ data: any[]; included: any[] }> {
+async function fetchTokens(): Promise<{ data: any[]; included: any[] }> {
   const key = process.env.COINGECKO_API_KEY;
-  const qs = `include=base_token,quote_token&page=${page}`;
+  const addrs = ANCIENT_ADDRESSES.join(",");
+  const qs = "include=top_pools";
   const url = key
-    ? `https://pro-api.coingecko.com/api/v3/onchain/networks/${NETWORK}/pools?${qs}`
-    : `https://api.geckoterminal.com/api/v2/networks/${NETWORK}/pools?${qs}`;
+    ? `https://pro-api.coingecko.com/api/v3/onchain/networks/${NETWORK}/tokens/multi/${addrs}?${qs}`
+    : `https://api.geckoterminal.com/api/v2/networks/${NETWORK}/tokens/multi/${addrs}?${qs}`;
   const res = await fetch(url, {
     headers: key
       ? { "x-cg-pro-api-key": key, accept: "application/json" }
       : { accept: "application/json" },
     cache: "no-store",
   });
-  if (!res.ok) throw new Error(`pools ${res.status}`);
+  if (!res.ok) throw new Error(`tokens ${res.status}`);
   const j = await res.json();
   return { data: j.data ?? [], included: j.included ?? [] };
 }
 
-async function padTokenSet(req: NextRequest): Promise<Set<string>> {
-  // Exclude PotatoPad launches — they're "ours", not ancient.
-  try {
-    const res = await fetch(new URL("/api/tokens", req.url), { cache: "no-store" });
-    if (!res.ok) return new Set();
-    const j = (await res.json()) as { creations?: Array<{ token?: string }> };
-    return new Set((j.creations ?? []).map((c) => (c.token ?? "").toLowerCase()).filter(Boolean));
-  } catch {
-    return new Set();
-  }
-}
+async function build(): Promise<Payload> {
+  const [{ data, included }, logos] = await Promise.all([
+    fetchTokens(),
+    readLogos(ANCIENT_ADDRESSES),
+  ]);
+  const poolsById: Record<string, any> = {};
+  for (const inc of included) if (inc?.type === "pool") poolsById[inc.id] = inc.attributes ?? {};
 
-type Agg = {
-  address: string;
-  name: string;
-  symbol: string;
-  fdvUsd: number;
-  volume24Usd: number;
-  liquidityUsd: number; // of the best (highest-liq) pool overall
-  bestPoolLiq: number;
-  tradePool: string;
-  feeTier: number;
-  bestWethLiq: number; // highest-liq WETH pool seen
-};
+  const list: AncientTokenDto[] = [];
+  for (const t of data) {
+    const a = t.attributes ?? {};
+    const address = (a.address ?? "").toLowerCase();
+    if (!address) continue;
 
-async function build(req: NextRequest): Promise<Payload> {
-  const excluded = await padTokenSet(req);
-  const tokens = new Map<string, any>(); // id -> token attributes
-  const pools: any[] = [];
-  for (let p = 1; p <= PAGES; p++) {
-    try {
-      const { data, included } = await fetchPools(p);
-      for (const t of included) if (t?.type === "token") tokens.set(t.id, t.attributes ?? {});
-      pools.push(...data);
-    } catch {
-      if (p === 1) throw new Error("no data");
-      break; // partial pages are fine
+    // From the token's top pools, aggregate liquidity/volume and pick the deepest
+    // WETH pool (for in-app trading, which is WETH-based).
+    const topPoolIds: string[] = (t.relationships?.top_pools?.data ?? []).map((p: any) => p.id);
+    let tradePool = ZERO;
+    let feeTier = 10_000;
+    let bestWethLiq = -1;
+    let liqSum = 0;
+    let volSum = 0;
+    for (const pid of topPoolIds) {
+      const pa = poolsById[pid];
+      if (!pa) continue;
+      const liq = Number(pa.reserve_in_usd) || 0;
+      liqSum += liq;
+      volSum += Number(pa.volume_usd?.h24) || 0;
+      if (/weth/i.test(pa.name ?? "") && liq > bestWethLiq) {
+        bestWethLiq = liq;
+        tradePool = stripPrefix(pid);
+        feeTier = feeFromName(pa.name);
+      }
     }
-  }
 
-  const isQuote = (attr: any): boolean => {
-    const addr = (attr?.address ?? "").toLowerCase();
-    const sym = (attr?.symbol ?? "").toUpperCase();
-    return QUOTE_ADDRS.has(addr) || QUOTE_SYMBOLS.has(sym);
-  };
+    // Prefer the authoritative on-chain logo (fills gaps CoinGecko has, e.g. DFV),
+    // fall back to CoinGecko's image.
+    const onChainLogo = logos.get(address) ?? "";
+    const cgImage = a.image_url && a.image_url !== "missing.png" ? a.image_url : "";
 
-  const agg = new Map<string, Agg>();
-  for (const pool of pools) {
-    const a = pool.attributes ?? {};
-    const baseId = pool.relationships?.base_token?.data?.id;
-    const quoteId = pool.relationships?.quote_token?.data?.id;
-    const base = tokens.get(baseId);
-    const quote = tokens.get(quoteId);
-    if (!base || !quote) continue;
-
-    // The "ancient token" is the non-quote side; skip stable/WETH-only pairs.
-    let tok = base;
-    let other = quote;
-    if (isQuote(base) && !isQuote(quote)) {
-      tok = quote;
-      other = base;
-    } else if (isQuote(base) && isQuote(quote)) {
-      continue;
-    }
-    const address = (tok.address ?? "").toLowerCase();
-    if (!address || excluded.has(address)) continue;
-
-    const poolAddr = stripPrefix(pool.id);
-    const fee = feeFromName(a.name);
-    const liq = Number(a.reserve_in_usd) || 0;
-    const vol = Number(a.volume_usd?.h24) || 0;
-    const fdv = Number(a.fdv_usd) || Number(a.market_cap_usd) || 0;
-    const otherIsWeth = (other.address ?? "").toLowerCase() === WETH;
-
-    const prev = agg.get(address);
-    const cur: Agg = prev ?? {
+    list.push({
       address,
-      name: tok.name ?? tok.symbol ?? "",
-      symbol: tok.symbol ?? "",
-      fdvUsd: 0,
-      volume24Usd: 0,
-      liquidityUsd: 0,
-      bestPoolLiq: -1,
-      tradePool: ZERO,
-      feeTier: 10_000,
-      bestWethLiq: -1,
-    };
-    // Headline stats come from the deepest pool overall.
-    if (liq > cur.bestPoolLiq) {
-      cur.bestPoolLiq = liq;
-      cur.liquidityUsd = liq;
-      cur.fdvUsd = fdv || cur.fdvUsd;
-    }
-    cur.volume24Usd += vol; // aggregate volume across the token's pools
-    if (fdv > cur.fdvUsd) cur.fdvUsd = fdv;
-    // Trading needs a WETH pool; pick the deepest one.
-    if (otherIsWeth && liq > cur.bestWethLiq) {
-      cur.bestWethLiq = liq;
-      cur.tradePool = poolAddr;
-      cur.feeTier = fee;
-    }
-    agg.set(address, cur);
+      name: a.name ?? a.symbol ?? "",
+      symbol: a.symbol ?? "",
+      imageUrl: onChainLogo || cgImage,
+      tradePool,
+      feeTier,
+      fdvUsd: Number(a.fdv_usd) || Number(a.market_cap_usd) || 0,
+      volume24Usd: volSum || Number(a.volume_usd?.h24) || 0,
+      liquidityUsd: Number(a.total_reserve_in_usd) || liqSum || 0,
+      hasWethPool: bestWethLiq >= 0,
+    });
   }
 
-  const list: AncientTokenDto[] = [...agg.values()]
-    .map((a) => ({
-      address: a.address,
-      name: a.name,
-      symbol: a.symbol,
-      tradePool: a.tradePool,
-      feeTier: a.feeTier,
-      fdvUsd: a.fdvUsd,
-      volume24Usd: a.volume24Usd,
-      liquidityUsd: a.liquidityUsd,
-      hasWethPool: a.bestWethLiq >= 0,
-    }))
-    .sort((x, y) => y.liquidityUsd - x.liquidityUsd)
-    .slice(0, MAX_TOKENS);
-
+  list.sort((x, y) => y.fdvUsd - x.fdvUsd);
   return { tokens: list, unavailable: false };
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */
@@ -196,7 +194,7 @@ async function build(req: NextRequest): Promise<Payload> {
 let cache: { payload: Payload; expiresAt: number } | null = null;
 const TTL_MS = 5 * 60_000;
 
-export async function GET(req: NextRequest) {
+export async function GET() {
   const now = Date.now();
   if (cache && cache.expiresAt > now) {
     return NextResponse.json(cache.payload, {
@@ -204,7 +202,7 @@ export async function GET(req: NextRequest) {
     });
   }
   try {
-    const payload = await build(req);
+    const payload = await build();
     cache = { payload, expiresAt: now + TTL_MS };
     return NextResponse.json(payload, {
       headers: { "Cache-Control": "public, s-maxage=120, stale-while-revalidate=300" },

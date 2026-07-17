@@ -27,8 +27,8 @@ export async function generateMetadata({
     ? `${name}${symbol ? ` ($${symbol})` : ""} · PotatoPad`
     : "Token · PotatoPad";
   const description = name
-    ? `Trade ${name}${symbol ? ` ($${symbol})` : ""} on PotatoPad — launched direct-to-Uniswap V3, single-sided liquidity locked forever.`
-    : "A token launched on PotatoPad — direct-to-Uniswap V3, with single-sided liquidity locked forever.";
+    ? `Trade ${name}${symbol ? ` ($${symbol})` : ""} on PotatoPad. Launched direct-to-Uniswap V3, single-sided liquidity locked forever.`
+    : "A token launched on PotatoPad, direct-to-Uniswap V3, with single-sided liquidity locked forever.";
 
   return {
     title,

@@ -23,6 +23,7 @@ export function TokenHeaderCard({
   creator,
   chainId,
   ancient = false,
+  imageURI,
 }: {
   token: Address;
   name: string;
@@ -31,6 +32,8 @@ export function TokenHeaderCard({
   chainId: number;
   /** Pre-existing Robinhood token (not a PotatoPad launch): Ancient badge, no creator. */
   ancient?: boolean;
+  /** Explicit logo (ancient tokens have no launch event to read imageURI from). */
+  imageURI?: string;
 }) {
   const { creationByToken } = useLaunchActivity();
   const meta = creationByToken.get(token.toLowerCase());
@@ -50,27 +53,17 @@ export function TokenHeaderCard({
   return (
     <div className="card p-5">
       <div className="flex flex-wrap items-start gap-4">
-        <TokenAvatar address={token} symbol={symbol} imageURI={meta?.imageURI} size="lg" />
+        <TokenAvatar address={token} symbol={symbol} imageURI={imageURI ?? meta?.imageURI} size="lg" />
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
             <h1 className="text-xl font-bold text-neutral-100">{name}</h1>
             <span className="font-mono text-lg text-amber-500">${symbol}</span>
-            <span className="rounded-full border border-neutral-800 bg-neutral-900 px-2 py-0.5 text-xs text-neutral-400">
-              {chainName(chainId)}
-            </span>
-            {ancient ? (
+            {ancient && (
               <span
                 className="rounded-full border border-amber-700/40 bg-amber-900/25 px-2 py-0.5 text-xs font-semibold text-amber-500/90"
-                title="Pre-existing Robinhood token — not a PotatoPad launch"
+                title="Pre-existing Robinhood token, not a PotatoPad launch"
               >
                 Ancient
-              </span>
-            ) : (
-              <span
-                className="rounded-full border border-green-500/30 bg-green-500/10 px-2 py-0.5 text-xs font-semibold text-green-500"
-                title="Live on Uniswap V3 since launch"
-              >
-                Live on Uniswap V3
               </span>
             )}
           </div>

@@ -41,7 +41,12 @@ export function TokenCard({ row }: { row: TokenRow }) {
         className="card block p-5 transition-colors hover:border-amber-600/50"
       >
         <div className="flex items-center gap-3">
-          <TokenAvatar address={row.address} symbol={row.symbol} size="md" />
+          <TokenAvatar
+            address={row.address}
+            symbol={row.symbol}
+            imageURI={row.imageURI}
+            size="md"
+          />
           <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
             <h3 className="truncate font-bold text-neutral-100">{row.name || row.symbol}</h3>
             <span className="shrink-0 font-mono text-xs text-neutral-500">${row.symbol}</span>
@@ -83,14 +88,8 @@ export function TokenCard({ row }: { row: TokenRow }) {
     ethUsd !== null && row.marketCapEth > 0 ? formatUsd(row.marketCapEth * ethUsd) : mcapEthLabel;
 
   // Range climb: how far price has walked from the open (~3 ETH FDV) toward the
-  // top (~525 ETH FDV). NOT a bonding curve — the token is live from block one.
+  // top (~525 ETH FDV). Not a bonding curve; the token is live from block one.
   const progress = Math.max(0, Math.min(100, Number(fdvProgressBps(row.marketCapEth, range)) / 100));
-  const stage =
-    progress < 12
-      ? { label: "Seed", emoji: "🥔", cls: "border-amber-700/40 bg-amber-900/25 text-amber-500/90" }
-      : progress < 90
-        ? { label: "Growing", emoji: "🌱", cls: "border-emerald-500/30 bg-emerald-500/10 text-emerald-400" }
-        : { label: "Harvested", emoji: "🌻", cls: "border-amber-500/40 bg-amber-500/15 text-amber-300" };
 
   return (
     <Link
@@ -109,12 +108,6 @@ export function TokenCard({ row }: { row: TokenRow }) {
           <h3 className="truncate font-bold text-neutral-100">{row.name}</h3>
           <span className="shrink-0 font-mono text-xs text-neutral-500">${row.symbol}</span>
         </div>
-        <span
-          className={`inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold ${stage.cls}`}
-        >
-          <span aria-hidden>{stage.emoji}</span>
-          {stage.label}
-        </span>
       </div>
 
       <p className="mt-2.5 flex items-center gap-1.5 truncate text-xs text-neutral-500">

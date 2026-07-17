@@ -13,6 +13,8 @@ export interface AncientToken {
   address: Address;
   name: string;
   symbol: string;
+  /** Token logo URL from CoinGecko/GeckoTerminal ("" if none). */
+  imageUrl: string;
   /** Deepest WETH pool, for in-app trading (ZERO_ADDRESS if none exists). */
   tradePool: Address;
   /** Fee tier (bps) of `tradePool`, for the swap/quote. */
