@@ -105,13 +105,153 @@ export function formatUsdPrice(n: number): string {
   return `$${n.toPrecision(2)}`;
 }
 
-/** Resolve an image URI for use in `<img src>`: rewrites ipfs:// to a public
- *  gateway, passes http(s)/data through, and drops anything else (safety). */
-export function resolveImageUri(uri: string | undefined): string | undefined {
-  if (!uri) return undefined;
+/**
+ * Public IPFS gateways tried in order for launch images.
+ *
+ * Pinata is first: `/api/upload` pins via Pinata, and `ipfs.io` is often slow
+ * or blocked for browsers. Remaining gateways are fallbacks for CIDs pinned
+ * elsewhere (or when Pinata is temporarily unreachable).
+ */
+const IPFS_GATEWAYS = [
+  "https://gateway.pinata.cloud/ipfs/",
+  "https://ipfs.io/ipfs/",
+  "https://dweb.link/ipfs/",
+] as const;
+
+/**
+ * CIDv0: Base58btc, case-sensitive (must not allow I/O/l via /i fold).
+ * CIDv1: multibase `b` + base32 (lowercase a-z / 2-7), e.g. bafy… / bafk… / bafz…
+ */
+const CID_V0_RE = /^Qm[1-9A-HJ-NP-Za-km-z]{44}$/;
+const CID_V1_RE = /^baf[a-z2-7]{20,}$/;
+
+function isCid(seg: string): boolean {
+  return CID_V0_RE.test(seg) || CID_V1_RE.test(seg);
+}
+
+/** Strip query/fragment so they never become path bytes. */
+function stripQueryFragment(s: string): string {
+  const q = s.search(/[?#]/);
+  return q === -1 ? s : s.slice(0, q);
+}
+
+/**
+ * Fully decode a path segment (bounded) and reject dot-segments or any
+ * decoded path separator. Nested encodings like `%252e%252e` are unwrapped
+ * until stable; `%2e%2e%2fadmin` expands to `../admin` and is rejected.
+ */
+function isSafePathSegment(seg: string): boolean {
+  if (!seg || seg === "." || seg === "..") return false;
+  if (/[\u0000-\u001f\u007f\\]/.test(seg)) return false;
+
+  let cur = seg;
+  for (let i = 0; i < 4; i++) {
+    let next: string;
+    try {
+      next = decodeURIComponent(cur);
+    } catch {
+      return false;
+    }
+    if (
+      next === "." ||
+      next === ".." ||
+      next.includes("/") ||
+      next.includes("\\") ||
+      /[\u0000-\u001f\u007f]/.test(next)
+    ) {
+      return false;
+    }
+    if (next === cur) return true; // fully decoded and clean
+    cur = next;
+  }
+  // Still changing after the decode budget → reject.
+  return false;
+}
+
+/**
+ * Sanitize an IPFS content path: first segment must be a CID; reject dot
+ * segments, separators, and control characters so rebuilt gateway URLs stay
+ * under `/ipfs/<cid>/…`. Path kept as-is (no whole-path decode) so remounts
+ * preserve encoding on alternate gateways.
+ */
+function sanitizeIpfsPath(path: string): string | undefined {
+  const cleaned = stripQueryFragment(path).replace(/^\/+/, "");
+  if (!cleaned) return undefined;
+
+  // Reject control chars and backslash before splitting.
+  if (/[\u0000-\u001f\u007f\\]/.test(cleaned)) return undefined;
+
+  const segments = cleaned.split("/");
+  if (!isCid(segments[0])) return undefined;
+
+  for (let i = 1; i < segments.length; i++) {
+    if (!isSafePathSegment(segments[i])) return undefined;
+  }
+
+  return cleaned;
+}
+
+/**
+ * Extract an IPFS content path (CID + optional subpath) from common URI forms.
+ * Returns undefined when the input is not a safe IPFS path.
+ */
+function extractIpfsPath(uri: string): string | undefined {
   const t = uri.trim();
   if (!t) return undefined;
-  if (t.startsWith("ipfs://")) return `https://ipfs.io/ipfs/${t.slice("ipfs://".length)}`;
-  if (/^(https?:|data:image\/)/i.test(t)) return t;
-  return undefined;
+
+  // Schemes are case-insensitive (IPFS://CID is valid).
+  if (/^ipfs:\/\//i.test(t)) {
+    // ipfs://CID… | ipfs:///ipfs/CID… | ipfs://ipfs/CID…
+    // Drop query/fragment before path validation.
+    let path = stripQueryFragment(t.replace(/^ipfs:\/\//i, "")).replace(/^\/+/, "");
+    if (path.toLowerCase().startsWith("ipfs/")) path = path.slice(5);
+    return sanitizeIpfsPath(path);
+  }
+
+  // Already on a gateway: https://<host>/ipfs/<path>[?query][#frag]
+  const gateway = t.match(/^https?:\/\/[^/]+\/ipfs\/(.+)$/i);
+  if (gateway?.[1]) return sanitizeIpfsPath(gateway[1]);
+
+  // Bare CID or CID/subpath (query/fragment stripped inside sanitize).
+  return sanitizeIpfsPath(t);
+}
+
+/**
+ * Ordered list of browser-loadable image URLs for a launch `imageURI`.
+ * Callers that only need one URL should use {@link resolveImageUri}.
+ * Avatars that want resilience can walk the list on `<img onError>`.
+ */
+export function imageUriCandidates(uri: string | undefined | null): string[] {
+  if (uri == null) return [];
+  const t = uri.trim();
+  if (!t) return [];
+
+  // data: only for images — never data:text/html etc.
+  if (/^data:image\//i.test(t)) return [t];
+
+  const ipfsPath = extractIpfsPath(t);
+  if (ipfsPath) {
+    const out: string[] = [];
+    // Prefer the original https gateway URL first if the creator already pinned
+    // a full URL (keeps working mirrors / private gateways they chose).
+    if (/^https?:\/\//i.test(t)) out.push(t);
+    for (const base of IPFS_GATEWAYS) {
+      const candidate = `${base}${ipfsPath}`;
+      if (!out.includes(candidate)) out.push(candidate);
+    }
+    return out;
+  }
+
+  // Plain http(s) image URLs (and non-image pages that will fail → fallback tile).
+  if (/^https?:\/\//i.test(t)) return [t];
+
+  // Drop javascript:, data:text/*, bare junk, etc.
+  return [];
+}
+
+/** Resolve an image URI for use in `<img src>`: rewrites ipfs:// (and bare
+ *  CIDs / gateway URLs) to a public gateway, passes http(s)/data:image through,
+ *  and drops anything else (safety). */
+export function resolveImageUri(uri: string | undefined | null): string | undefined {
+  return imageUriCandidates(uri)[0];
 }
