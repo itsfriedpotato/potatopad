@@ -109,9 +109,19 @@ export function formatUsdPrice(n: number): string {
  *  gateway, passes http(s)/data through, and drops anything else (safety). */
 export function resolveImageUri(uri: string | undefined): string | undefined {
   if (!uri) return undefined;
+
   const t = uri.trim();
   if (!t) return undefined;
-  if (t.startsWith("ipfs://")) return `https://ipfs.io/ipfs/${t.slice("ipfs://".length)}`;
-  if (/^(https?:|data:image\/)/i.test(t)) return t;
+
+  const ipfsMatch = t.match(/^ipfs:\/\/(?:ipfs\/)?(.*?)$/i);
+  if (ipfsMatch && ipfsMatch[1]) {
+    const cidPath = ipfsMatch[1].replace(/^\/+/, '');
+    return `https://ipfs.io/ipfs/${cidPath}`;
+  }
+
+  if (/^(https?:|data:)/i.test(t)) {
+    return t;
+  }
+
   return undefined;
 }
