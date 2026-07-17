@@ -1,4 +1,4 @@
-import { defineChain, type Address } from "viem";
+import { defineChain, type Address, type Chain } from "viem";
 import { baseSepolia, hardhat } from "wagmi/chains";
 
 /**
@@ -25,20 +25,95 @@ function envAddress(value: string | undefined): Address {
     : ZERO_ADDRESS;
 }
 
+/** A single PotatoPad deployment: its address and the block to scan logs from. */
+export interface PadDeployment {
+  address: Address;
+  startBlock: bigint;
+}
+
+/**
+ * Everything the frontend needs to know about ONE chain, in one place. Adding a
+ * chain means adding a single entry to {CHAINS} below — every per-chain lookup
+ * map exported from this file is DERIVED from these entries, so there is exactly
+ * one edit site. See docs/ADDING_A_CHAIN.md for the end-to-end process.
+ */
+export interface ChainConfig {
+  /** The viem/wagmi chain object (id, RPC, explorer). */
+  chain: Chain;
+  /**
+   * The primary (write) PotatoPad address, read from a public env var so the
+   * same build can target different deployments. Zero/undefined = not deployed.
+   */
+  padAddress?: string;
+  /** Canonical WETH the single-sided LP pairs against (locker pays fees in WETH). */
+  weth: Address;
+  /** Uniswap SwapRouter02 for in-app buy/sell. Omit to disable the in-app router. */
+  swapRouter?: Address;
+  /** Uniswap QuoterV2 for accurate buy/sell estimates. Omit to disable in-app quotes. */
+  quoter?: Address;
+  /** Block to start scanning pad event logs from (the pad's deploy block). */
+  padStartBlock: bigint;
+  /** Read-only pads from EARLIER deploys that still custody launched tokens. */
+  legacyPads?: PadDeployment[];
+  /** Uniswap interface chain slug, for the "Trade on Uniswap" link. */
+  uniswapSlug?: string;
+  /** GeckoTerminal network slug, for the embedded pool chart (only GT-indexed chains). */
+  geckoTerminalNetwork?: string;
+}
+
+/**
+ * SINGLE SOURCE OF TRUTH for supported chains. To add a chain, append one entry
+ * here (and deploy the pad + wire contracts/ — see docs/ADDING_A_CHAIN.md). The
+ * derived maps below need no edits.
+ */
+export const CHAINS: ChainConfig[] = [
+  {
+    chain: robinhoodChain,
+    padAddress: process.env.NEXT_PUBLIC_PAD_ADDRESS_ROBINHOOD,
+    // Verified on-chain (a live Uniswap pool's token0) and in Robinhood's docs.
+    weth: "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+    // Only Robinhood is wired for in-app trading (router + quoter present).
+    swapRouter: "0xcaf681a66d020601342297493863e78c959e5cb2",
+    quoter: "0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7",
+    padStartBlock: 11_555_000n, // deploy block of the CREATE2 pad 0x12A0…D91F
+    legacyPads: [
+      // v2 pad (pre-CREATE2 fix). Still holds CHIP + anything launched on it.
+      { address: "0xc12723c251dABcBe10c4F44060A6AE6b5E96a79d", startBlock: 11_481_181n },
+    ],
+    uniswapSlug: "robinhood",
+    geckoTerminalNetwork: "robinhood",
+  },
+  {
+    chain: baseSepolia,
+    padAddress: process.env.NEXT_PUBLIC_PAD_ADDRESS_BASE_SEPOLIA,
+    weth: "0x4200000000000000000000000000000000000006",
+    padStartBlock: 0n,
+    uniswapSlug: "base_sepolia",
+    // NB: base-sepolia is NOT indexed by GeckoTerminal (404s), so no chart network.
+  },
+  {
+    chain: hardhat,
+    padAddress: process.env.NEXT_PUBLIC_PAD_ADDRESS_LOCALHOST,
+    weth: envAddress(process.env.NEXT_PUBLIC_WETH_ADDRESS_LOCALHOST),
+    padStartBlock: 0n, // fresh local chain scans from genesis
+  },
+];
+
+/** Look up a chain's config by id (undefined for unsupported chains). */
+function configFor(chainId: number): ChainConfig | undefined {
+  return CHAINS.find((c) => c.chain.id === chainId);
+}
+
+/** Build a `Record<chainId, T>` from each chain's config in one place. */
+function byChain<T>(pick: (c: ChainConfig) => T): Record<number, T> {
+  return Object.fromEntries(CHAINS.map((c) => [c.chain.id, pick(c)]));
+}
+
 /** PotatoPad contract address per chain (zero address = not deployed). */
-export const PAD_ADDRESSES: Record<number, Address> = {
-  [baseSepolia.id]: envAddress(process.env.NEXT_PUBLIC_PAD_ADDRESS_BASE_SEPOLIA),
-  [hardhat.id]: envAddress(process.env.NEXT_PUBLIC_PAD_ADDRESS_LOCALHOST),
-  [robinhoodChain.id]: envAddress(process.env.NEXT_PUBLIC_PAD_ADDRESS_ROBINHOOD),
-};
+export const PAD_ADDRESSES: Record<number, Address> = byChain((c) => envAddress(c.padAddress));
 
 /** Canonical WETH per chain (single-sided LP pairs token/WETH; locker pays fees in WETH). */
-export const WETH_ADDRESSES: Record<number, Address> = {
-  [baseSepolia.id]: "0x4200000000000000000000000000000000000006",
-  [hardhat.id]: envAddress(process.env.NEXT_PUBLIC_WETH_ADDRESS_LOCALHOST),
-  // Verified on-chain (a live Uniswap pool's token0) and in Robinhood's docs.
-  [robinhoodChain.id]: "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
-};
+export const WETH_ADDRESSES: Record<number, Address> = byChain((c) => c.weth);
 
 /**
  * Uniswap V3 1% fee tier — the tier every PotatoPad pool is launched into.
@@ -51,18 +126,14 @@ export const POOL_FEE_TIER = 10_000;
  * for in-app trading; other chains are `undefined`, which disables the router
  * path and falls back to the "Trade on Uniswap" link.
  */
-export const SWAP_ROUTER_ADDRESSES: Record<number, Address | undefined> = {
-  [robinhoodChain.id]: "0xcaf681a66d020601342297493863e78c959e5cb2",
-};
+export const SWAP_ROUTER_ADDRESSES: Record<number, Address | undefined> = byChain((c) => c.swapRouter);
 
 /**
  * Uniswap QuoterV2 per chain, for accurate buy/sell output estimates that
  * account for the single-sided pool's price impact. Optional — a missing quote
  * disables the in-app trade button (the Uniswap link still works).
  */
-export const QUOTER_ADDRESSES: Record<number, Address | undefined> = {
-  [robinhoodChain.id]: "0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7",
-};
+export const QUOTER_ADDRESSES: Record<number, Address | undefined> = byChain((c) => c.quoter);
 
 /**
  * Block to start scanning pad event logs from, per chain. Live RPCs cap
@@ -70,29 +141,14 @@ export const QUOTER_ADDRESSES: Record<number, Address | undefined> = {
  * pad's deploy block forward in chunks rather than from genesis. 0 = genesis
  * (fine for a fresh local chain). UPDATE the live value when you redeploy the pad.
  */
-export const PAD_START_BLOCK: Record<number, bigint> = {
-  [robinhoodChain.id]: 11_555_000n, // deploy block of the CREATE2 pad 0x12A0…D91F
-  [baseSepolia.id]: 0n,
-  [hardhat.id]: 0n,
-};
-
-/** A single PotatoPad deployment: its address and the block to scan logs from. */
-export interface PadDeployment {
-  address: Address;
-  startBlock: bigint;
-}
+export const PAD_START_BLOCK: Record<number, bigint> = byChain((c) => c.padStartBlock);
 
 /**
  * Read-only pads from EARLIER deploys that still custody launched tokens. The
  * primary (write) pad lives in {PAD_ADDRESSES} via env; these are historical,
  * hard-coded address constants so their tokens keep showing after a repoint.
  */
-export const LEGACY_PADS: Record<number, PadDeployment[]> = {
-  [robinhoodChain.id]: [
-    // v2 pad (pre-CREATE2 fix). Still holds CHIP + anything launched on it.
-    { address: "0xc12723c251dABcBe10c4F44060A6AE6b5E96a79d", startBlock: 11_481_181n },
-  ],
-};
+export const LEGACY_PADS: Record<number, PadDeployment[]> = byChain((c) => c.legacyPads ?? []);
 
 /**
  * Every pad to READ for a chain when discovering / resolving tokens: the primary
@@ -116,19 +172,15 @@ export function padDeployments(chainId: number): PadDeployment[] {
   return out;
 }
 
-export const SUPPORTED_CHAINS = [robinhoodChain, baseSepolia, hardhat] as const;
+export const SUPPORTED_CHAINS = CHAINS.map((c) => c.chain);
 
 export function chainName(chainId: number): string {
-  const chain = SUPPORTED_CHAINS.find((c) => c.id === chainId);
-  return chain?.name ?? `chain ${chainId}`;
+  return configFor(chainId)?.chain.name ?? `chain ${chainId}`;
 }
 
 /** Block-explorer base URL for a chain, if it has one (local Hardhat does not). */
 export function explorerBaseUrl(chainId: number): string | undefined {
-  const chain = SUPPORTED_CHAINS.find((c) => c.id === chainId);
-  return chain && "blockExplorers" in chain
-    ? chain.blockExplorers?.default?.url
-    : undefined;
+  return configFor(chainId)?.chain.blockExplorers?.default?.url;
 }
 
 export function txUrl(chainId: number, hash: string): string | undefined {
@@ -141,11 +193,13 @@ export function addressUrl(chainId: number, address: string): string | undefined
   return base ? `${base}/address/${address}` : undefined;
 }
 
-/** Uniswap interface chain slugs, for the "Trade on Uniswap" link. */
+/**
+ * Uniswap interface chain slugs, for the "Trade on Uniswap" link. Derived from
+ * {CHAINS}, plus a few extra live networks a token could be bridged/traded on.
+ */
 const UNISWAP_CHAIN_SLUGS: Record<number, string> = {
-  4663: "robinhood",
-  8453: "base",
-  84532: "base_sepolia",
+  8453: "base", // base mainnet — not a launch chain, but a valid Uniswap target
+  ...byChain((c) => c.uniswapSlug),
 };
 
 export function uniswapSwapUrl(token: string, chainId?: number): string {
@@ -158,6 +212,7 @@ export function uniswapSwapUrl(token: string, chainId?: number): string {
  * v2 token is live on Uniswap V3 from launch, so its pool is charted directly.
  * Only live, GT-indexed networks belong here — testnets and local chains 404
  * (verified: `base-sepolia` is not indexed) and fall back to a placeholder.
+ * Derived from {CHAINS}, plus common L1/L2s a bridged token could chart on.
  * Full slug list: GET api.geckoterminal.com/api/v2/networks
  */
 export const GECKOTERMINAL_NETWORKS: Record<number, string> = {
@@ -165,7 +220,7 @@ export const GECKOTERMINAL_NETWORKS: Record<number, string> = {
   10: "optimism",
   8453: "base",
   42161: "arbitrum",
-  4663: "robinhood",
+  ...byChain((c) => c.geckoTerminalNetwork),
 };
 
 export function geckoTerminalPoolUrl(chainId: number, pool: string): string | undefined {
