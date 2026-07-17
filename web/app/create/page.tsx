@@ -156,7 +156,7 @@ export default function CreatePage() {
             </div>
 
             <div>
-              <label htmlFor="image" className="label">
+              <label className="label">
                 Image <span className="text-amber-500">*</span>
               </label>
               <div className="flex items-center gap-3">
@@ -179,13 +179,6 @@ export default function CreatePage() {
                   </div>
                 )}
                 <div className="min-w-0 flex-1 space-y-2">
-                  <input
-                    id="image"
-                    className="input"
-                    placeholder="Paste https:// or ipfs://, or upload →"
-                    value={image}
-                    onChange={(e) => setImage(e.target.value)}
-                  />
                   <div className="flex items-center gap-2">
                     <label className="btn-secondary cursor-pointer px-3 py-1.5 text-xs">
                       {uploading ? "Uploading…" : "Upload image"}
@@ -205,8 +198,7 @@ export default function CreatePage() {
               </div>
               {uploadErr && <p className="mt-1.5 text-xs text-red-400">{uploadErr}</p>}
               <p className="mt-1.5 text-xs text-neutral-500">
-                Required — upload a logo (pinned to IPFS) or paste a URL. Saved in the launch
-                event on-chain.
+                Required — upload a logo. Pinned to IPFS and saved in the launch event on-chain.
               </p>
             </div>
 
