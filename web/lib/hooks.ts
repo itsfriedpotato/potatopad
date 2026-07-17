@@ -1,7 +1,7 @@
 "use client";
 
 import { useQueryClient } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Address } from "viem";
 import {
   useChainId,
@@ -37,6 +37,17 @@ function padFee(value: bigint): bigint {
   return (value * FEE_BUFFER_BPS) / BPS;
 }
 
+function hasExplicitFeeOverride(params: Record<string, unknown> | null | undefined): boolean {
+  if (!params || typeof params !== "object") return false;
+  // Only treat as an intentional override when a value is actually supplied.
+  // `maxFeePerGas: undefined` (optional spread) must still get the buffer.
+  return (
+    params.maxFeePerGas != null ||
+    params.maxPriorityFeePerGas != null ||
+    params.gasPrice != null
+  );
+}
+
 /**
  * Write + wait-for-receipt in one hook. Invalidates all react-query caches
  * once a transaction confirms so on-chain reads refresh automatically.
@@ -46,19 +57,24 @@ function padFee(value: bigint): bigint {
  */
 export function useTx() {
   const queryClient = useQueryClient();
-  const publicClient = usePublicClient();
+  const chainId = useChainId();
+  const publicClient = usePublicClient({ chainId });
   const {
-    writeContract: rawWriteContract,
+    writeContractAsync: rawWriteContractAsync,
     data: hash,
     isPending,
     error: writeError,
-    reset,
+    reset: rawReset,
   } = useWriteContract();
   const {
     data: receipt,
     isLoading: isConfirming,
     error: receiptError,
   } = useWaitForTransactionReceipt({ hash });
+
+  /** Sync reentrancy lock — closes the gap while async fee estimate runs. */
+  const inFlightRef = useRef(false);
+  const [preparing, setPreparing] = useState(false);
 
   const confirmed = receipt?.status === "success";
   const reverted = receipt?.status === "reverted";
@@ -67,6 +83,20 @@ export function useTx() {
     if (confirmed) queryClient.invalidateQueries();
   }, [confirmed, queryClient]);
 
+  // Release the reentrancy lock once the mutation is fully idle again
+  // (wallet reject, error, or confirmation finished).
+  useEffect(() => {
+    if (!preparing && !isPending && !isConfirming) {
+      inFlightRef.current = false;
+    }
+  }, [preparing, isPending, isConfirming]);
+
+  const reset = useCallback(() => {
+    inFlightRef.current = false;
+    setPreparing(false);
+    rawReset();
+  }, [rawReset]);
+
   // Wrap writeContract so every dapp write inherits the fee buffer without
   // touching HarvestCard / TradeWidget / create call sites individually.
   // Implementation is deliberately untyped; the exported surface is re-cast to
@@ -74,62 +104,86 @@ export function useTx() {
   const writeContractBuffered = useCallback(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (params: any, options?: any) => {
-      // Fire-and-forget async: estimate fees, then submit. Errors from the
-      // estimate path are swallowed so a flaky eth_feeHistory still lets the
-      // wallet's own estimate through; write errors still surface via the hook.
+      // Synchronous reentrancy guard — must flip before any await so rapid
+      // clicks cannot launch two fee estimates / two payable mutations.
+      if (inFlightRef.current) return;
+      inFlightRef.current = true;
+      setPreparing(true);
+
       void (async () => {
-        // Caller already chose fees — don't second-guess.
-        if (
-          params &&
-          typeof params === "object" &&
-          ("maxFeePerGas" in params ||
-            "maxPriorityFeePerGas" in params ||
-            "gasPrice" in params)
-        ) {
-          rawWriteContract(params, options);
-          return;
-        }
-
-        let feeOverrides: {
-          maxFeePerGas?: bigint;
-          maxPriorityFeePerGas?: bigint;
-          gasPrice?: bigint;
-        } = {};
-
         try {
-          if (publicClient) {
-            const fees = await publicClient.estimateFeesPerGas();
-            if (fees.maxFeePerGas != null && fees.maxPriorityFeePerGas != null) {
-              feeOverrides = {
-                maxFeePerGas: padFee(fees.maxFeePerGas),
-                maxPriorityFeePerGas: padFee(fees.maxPriorityFeePerGas),
-              };
-            } else if (fees.gasPrice != null) {
-              feeOverrides = { gasPrice: padFee(fees.gasPrice) };
+          const effectiveChainId: number =
+            typeof params?.chainId === "number" ? params.chainId : chainId;
+
+          // Abort if the wallet chain drifted while we were preparing — better
+          // to no-op than submit old-chain addresses with new-chain fees.
+          if (effectiveChainId !== chainId) {
+            return;
+          }
+
+          let submitParams = { ...params, chainId: effectiveChainId };
+
+          if (!hasExplicitFeeOverride(params)) {
+            try {
+              if (publicClient) {
+                // Detect fee market from the latest block so legacy chains get
+                // a gasPrice pad (estimateFeesPerGas() EIP-1559 default throws
+                // on legacy and would otherwise skip the buffer entirely).
+                const block = await publicClient.getBlock({ blockTag: "latest" });
+
+                // Re-check chain after the await.
+                if (effectiveChainId !== chainId) return;
+
+                if (block.baseFeePerGas != null) {
+                  const fees = await publicClient.estimateFeesPerGas({ type: "eip1559" });
+                  if (fees.maxFeePerGas != null && fees.maxPriorityFeePerGas != null) {
+                    submitParams = {
+                      ...submitParams,
+                      maxFeePerGas: padFee(fees.maxFeePerGas),
+                      maxPriorityFeePerGas: padFee(fees.maxPriorityFeePerGas),
+                    };
+                  }
+                } else {
+                  const fees = await publicClient.estimateFeesPerGas({ type: "legacy" });
+                  if (fees.gasPrice != null) {
+                    submitParams = {
+                      ...submitParams,
+                      gasPrice: padFee(fees.gasPrice),
+                    };
+                  }
+                }
+              }
+            } catch {
+              // leave fee fields empty → wallet / middleware estimate
             }
           }
-        } catch {
-          // leave feeOverrides empty → wallet / middleware estimate
-        }
 
-        rawWriteContract({ ...params, ...feeOverrides }, options);
+          // Final chain check before the wallet prompt.
+          if (effectiveChainId !== chainId) return;
+
+          await rawWriteContractAsync(submitParams, options);
+        } catch {
+          // write errors still surface via the hook's `error` state
+        } finally {
+          setPreparing(false);
+        }
       })();
     },
-    [publicClient, rawWriteContract],
+    [chainId, publicClient, rawWriteContractAsync],
   );
 
   return {
-    writeContract: writeContractBuffered as typeof rawWriteContract,
+    writeContract: writeContractBuffered as typeof rawWriteContractAsync,
     hash,
     receipt,
-    /** waiting for the wallet signature */
-    isPending,
+    /** waiting for fee estimate and/or wallet signature */
+    isPending: preparing || isPending,
     /** signed, waiting for inclusion */
     isConfirming,
     confirmed,
     reverted,
     error: writeError ?? receiptError ?? null,
-    busy: isPending || isConfirming,
+    busy: preparing || isPending || isConfirming,
     reset,
   };
 }
