@@ -46,9 +46,29 @@ const BLOCKED_METHODS = new Set([
 // Coarse per-IP sliding-window limiter (in-memory; nodejs runtime keeps it warm).
 // Sized for the app's own read bursts (multi-pad log scans + multicalls) while
 // still capping outright abuse.
+//
+// NOTE: the per-IP key comes from `x-forwarded-for` / `x-real-ip`, which are
+// client-settable. Unless a fixed upstream proxy (Railway/Cloudflare) is
+// guaranteed to overwrite them, a caller can rotate the header per request and
+// evade the per-IP cap entirely. So the per-IP limit is only a soft signal; the
+// GLOBAL backstop below is the unspoofable ceiling that actually protects the
+// shared Alchemy key from being drained by header rotation.
 const WINDOW_MS = 10_000;
 const MAX_PER_WINDOW = 500;
 const hits = new Map<string, number[]>();
+
+// Global backstop across ALL callers — independent of the (spoofable) IP key.
+// Generous enough for real concurrent traffic (~10x a single heavy client) but
+// a hard cap on outright abuse. Tune via env for multi-instance deploys.
+const MAX_GLOBAL_PER_WINDOW = Number(process.env.RPC_MAX_GLOBAL_PER_WINDOW) || 5_000;
+let globalHits: number[] = [];
+
+function globalRateLimited(): boolean {
+  const now = Date.now();
+  globalHits = globalHits.filter((t) => now - t < WINDOW_MS);
+  globalHits.push(now);
+  return globalHits.length > MAX_GLOBAL_PER_WINDOW;
+}
 
 function rateLimited(ip: string): boolean {
   const now = Date.now();
@@ -99,7 +119,8 @@ export async function POST(req: NextRequest) {
     req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
     req.headers.get("x-real-ip") ||
     "unknown";
-  if (rateLimited(ip)) {
+  // Global backstop first (unspoofable), then the soft per-IP cap.
+  if (globalRateLimited() || rateLimited(ip)) {
     return NextResponse.json({ error: "rate limited" }, { status: 429 });
   }
 
