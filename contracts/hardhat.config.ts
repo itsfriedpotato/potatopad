@@ -30,6 +30,13 @@ const config: HardhatUserConfig = {
       chainId: 4663,
       accounts: process.env.DEPLOYER_PRIVATE_KEY ? [process.env.DEPLOYER_PRIVATE_KEY] : [],
     },
+    // Robinhood Chain TESTNET (chainId 46630). No canonical Uniswap V3 here, so
+    // the setup script self-deploys one (WETH + factory + NPM + router).
+    robinhoodTestnet: {
+      url: process.env.ROBINHOOD_TESTNET_RPC_URL || "https://rpc.testnet.chain.robinhood.com",
+      chainId: 46630,
+      accounts: process.env.DEPLOYER_PRIVATE_KEY ? [process.env.DEPLOYER_PRIVATE_KEY] : [],
+    },
   },
   etherscan: {
     // Blockscout accepts any non-empty key. Robinhood's explorer is Blockscout.

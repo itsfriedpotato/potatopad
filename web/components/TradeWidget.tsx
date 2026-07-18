@@ -46,12 +46,18 @@ export function TradeWidget({
   symbol,
   pool,
   feeTier = POOL_FEE_TIER,
+  isCurve = false,
+  bonded = false,
 }: {
   token: Address;
   symbol: string;
   pool: Address;
   /** Uniswap pool fee tier (bps). Defaults to PotatoPad's 1% tier; ancient tokens pass their own. */
   feeTier?: number;
+  /** True when the token launched on the bonding-curve pad. */
+  isCurve?: boolean;
+  /** True once a curve token has bonded (its position locked into the fee locker). */
+  bonded?: boolean;
 }) {
   const { address: user } = useAccount();
   const { chainId, weth } = usePad();
@@ -61,6 +67,11 @@ export function TradeWidget({
 
   const router = SWAP_ROUTER_ADDRESSES[chainId];
   const quoter = QUOTER_ADDRESSES[chainId];
+  // Every token — curve (pre- and post-migration), direct, ancient — trades
+  // through Uniswap: the single-sided-v3 curve is a live Uniswap pool from
+  // block one. Curve buys just walk the price up the range.
+  const onCurve = isCurve && !bonded; // pre-bond curve phase (copy only)
+  const spender = router ?? ZERO_ADDRESS; // sells approve the router
   const inApp = !!router && weth !== ZERO_ADDRESS;
 
   const [mode, setMode] = useState<"buy" | "sell">("buy");
@@ -83,8 +94,8 @@ export function TradeWidget({
     address: token,
     abi: potatoTokenAbi,
     functionName: "allowance",
-    args: [user ?? ZERO_ADDRESS, router ?? ZERO_ADDRESS],
-    query: { enabled: !!user && !!router },
+    args: [user ?? ZERO_ADDRESS, spender],
+    query: { enabled: !!user && spender !== ZERO_ADDRESS },
   });
 
   const exceedsBalance =
@@ -93,7 +104,7 @@ export function TradeWidget({
       ? tokenBalance !== undefined && amount > tokenBalance
       : ethBalance !== undefined && amount > ethBalance.value);
 
-  // Accurate quote from QuoterV2 (accounts for the single-sided pool's impact).
+  // Accurate quote from QuoterV2 (accounts for the pool's impact).
   const { data: quote, isFetching: quoting } = useReadContract({
     address: quoter ?? ZERO_ADDRESS,
     abi: quoterV2Abi,
@@ -190,17 +201,19 @@ export function TradeWidget({
   }
 
   function onApprove() {
-    if (amount === undefined || !router) return;
+    // Sells approve the Uniswap router as spender.
+    if (amount === undefined || spender === ZERO_ADDRESS) return;
     approveTx.writeContract({
       address: token,
       abi: potatoTokenAbi,
       functionName: "approve",
-      args: [router, amount],
+      args: [spender, amount],
     });
   }
 
   function onSell() {
-    if (amount === undefined || !user || minOut === 0n || !router || exceedsBalance) return;
+    if (amount === undefined || !user || minOut === 0n || exceedsBalance) return;
+    if (!router) return;
     const swapData = encodeFunctionData({
       abi: swapRouter02Abi,
       functionName: "exactInputSingle",
@@ -453,12 +466,16 @@ export function TradeWidget({
         )}
 
         <div className="mt-3 flex items-center justify-between text-[11px] text-neutral-600">
-          <span>Swaps route through Uniswap V3 ({feeTier / 10_000}% fee).</span>
+          <span>
+            {onCurve
+              ? `Bonding curve — every buy walks the price up until it fills, then migrates. Routes through Uniswap V3 (${feeTier / 10_000}% fee).`
+              : `Swaps route through Uniswap V3 (${feeTier / 10_000}% fee).`}
+          </span>
           <a
             href={uniswapSwapUrl(token, chainId)}
             target="_blank"
             rel="noreferrer"
-            className="inline-flex items-center gap-1 text-neutral-500 hover:text-amber-400"
+            className="inline-flex shrink-0 items-center gap-1 text-neutral-500 hover:text-amber-400"
           >
             Uniswap
             <ExternalLink className="h-3 w-3" />

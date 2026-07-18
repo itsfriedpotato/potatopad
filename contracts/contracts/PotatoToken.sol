@@ -40,7 +40,7 @@ contract PotatoToken is ERC20 {
     /// @param positionManager_ Uniswap NonfungiblePositionManager (exempt).
     /// @param locker_ the fee locker that holds the LP NFT (exempt).
     /// @param maxWallet_ max non-exempt balance during the anti-snipe window.
-    /// @param antiSnipeBlocks_ length of the window in blocks (0 disables it).
+    /// @param antiSnipeBlocks_ number of blocks AFTER the launch block that stay capped.
     constructor(
         string memory name_,
         string memory symbol_,

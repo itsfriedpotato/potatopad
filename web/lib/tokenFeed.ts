@@ -1,5 +1,5 @@
 import { createPublicClient, http, parseAbiItem, type Address } from "viem";
-import { padDeployments, robinhoodChain, ZERO_ADDRESS } from "@/lib/config";
+import { allPadDeployments, robinhoodChain, ZERO_ADDRESS, type PadKind } from "@/lib/config";
 
 /**
  * Server-side, cached Discover feed — the single source the `/api/tokens` route,
@@ -54,6 +54,8 @@ export interface CreationDTO {
   pad: Address;
   /** 24h USD volume from GeckoTerminal (0 if unindexed) — drives "Recent buys". */
   volume24Usd: number;
+  /** Which pad kind launched it: "curve" (bonding curve) or "direct" (legacy). */
+  kind: PadKind;
 }
 export interface FeedPayload {
   creations: CreationDTO[];
@@ -164,7 +166,7 @@ async function fetchVolumes(addresses: Address[]): Promise<Map<string, number>> 
 let legacyTagged: PadTag[] | null = null;
 
 async function scan(): Promise<FeedPayload> {
-  const pads = padDeployments(robinhoodChain.id);
+  const pads = allPadDeployments(robinhoodChain.id);
   if (pads.length === 0) return { creations: [], unavailable: false };
 
   const latest = await client.getBlockNumber();
@@ -225,6 +227,7 @@ async function scan(): Promise<FeedPayload> {
   }
 
   // A token belongs to exactly one pad; dedupe by token address.
+  const kindByPad = new Map(pads.map((p) => [p.address.toLowerCase(), p.kind ?? "direct"] as const));
   const byToken = new Map<string, CreationDTO>();
   for (const { log, pad } of tagged) {
     const token = log.args.token;
@@ -246,6 +249,7 @@ async function scan(): Promise<FeedPayload> {
       blockNumber: bn !== null ? bn.toString() : "0",
       pad,
       volume24Usd: 0,
+      kind: kindByPad.get(pad.toLowerCase()) ?? "direct",
     });
   }
   // Enrich with 24h volume (best-effort) so the client can offer a "Recent buys" sort.

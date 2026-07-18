@@ -11,16 +11,36 @@ import {
   useWaitForTransactionReceipt,
   useWriteContract,
 } from "wagmi";
-import { potatoPadAbi } from "@/lib/abi";
-import { PAD_ADDRESSES, WETH_ADDRESSES, ZERO_ADDRESS, padDeployments } from "@/lib/config";
+import { potatoCurvePadAbi, potatoPadAbi } from "@/lib/abi";
+import {
+  CURVE_PAD_ADDRESSES,
+  PAD_ADDRESSES,
+  WETH_ADDRESSES,
+  ZERO_ADDRESS,
+  allPadDeployments,
+} from "@/lib/config";
 import { wagmiConfig } from "@/lib/wagmi";
 
-/** Resolve PotatoPad + WETH addresses for the active chain. */
+/**
+ * Resolve the active chain's pads + WETH. `curvePad` is the PRIMARY (write) pad
+ * for all new launches; `directPad` is the read-only legacy direct-to-Uniswap
+ * pad (its tokens still resolve/trade, but nothing new launches there).
+ *   - canLaunch: the curve pad is deployed → the create form is usable.
+ *   - isDeployed: either pad exists → the chain has something to show.
+ */
 export function usePad() {
   const chainId = useChainId();
-  const pad = PAD_ADDRESSES[chainId] ?? ZERO_ADDRESS;
+  const curvePad = CURVE_PAD_ADDRESSES[chainId] ?? ZERO_ADDRESS;
+  const directPad = PAD_ADDRESSES[chainId] ?? ZERO_ADDRESS;
   const weth = WETH_ADDRESSES[chainId] ?? ZERO_ADDRESS;
-  return { chainId, pad, weth, isDeployed: pad !== ZERO_ADDRESS };
+  return {
+    chainId,
+    weth,
+    curvePad,
+    directPad,
+    canLaunch: curvePad !== ZERO_ADDRESS,
+    isDeployed: curvePad !== ZERO_ADDRESS || directPad !== ZERO_ADDRESS,
+  };
 }
 
 /**
@@ -211,46 +231,71 @@ export function useTx() {
 
 export type TxState = ReturnType<typeof useTx>;
 
+/** How a resolved token was launched. `curve` = single-sided-v3 bonding-curve pad
+ *  (trades on Uniswap; pre-migration shows curve UI); `direct` = legacy direct
+ *  launch or any migrated curve token, live on Uniswap. */
+export type TokenKind = "curve" | "direct" | "unknown";
+
 export interface ResolvedToken {
-  /** The pad (primary or legacy) that launched this token. */
+  kind: TokenKind;
+  /** The pad (curve or direct/legacy) that launched this token. */
   pad: Address;
   creator: Address;
+  /** The Uniswap pool — non-zero from creation for both curve and direct tokens
+   *  (the single-sided-v3 curve trades on Uniswap from block one). */
   pool: Address;
+  /** The locked position id — 0 until the curve bonds; direct/legacy: the locked LP id. */
   lpTokenId: bigint;
+  /** Curve tokens flip true once bonded (position locked into the fee locker);
+   *  direct and legacy tokens are always true. */
+  bonded: boolean;
+  /** Still in the pre-bond bonding-curve phase (a curve token, not yet bonded).
+   *  It still trades on Uniswap — this only drives curve UI (progress + bond). */
+  onCurve: boolean;
+  /** Tradeable on the Uniswap SwapRouter now. True for every resolved token. */
+  onUniswap: boolean;
   /** True once some pad claimed the token (non-zero creator). */
   resolved: boolean;
   isLoading: boolean;
 }
 
 /**
- * Resolves which pad — primary or a legacy one — a token was launched on, and
- * returns that token's on-chain info from the owning pad. Reads `tokens(token)`
- * from every {padDeployments} entry; the one with a non-zero creator wins. This
- * is what lets a token from an earlier pad keep working after a repoint. Falls
- * back to the primary pad (unresolved) while loading or if nothing matches.
+ * Resolves which pad — the curve pad or a direct/legacy one — a token launched
+ * on, and its on-chain state. Reads `curves(token)` on the curve pad and
+ * `tokens(token)` on each direct pad (via {allPadDeployments}, curve first);
+ * the first with a non-zero creator wins. Lets curve tokens, legacy direct
+ * tokens, and graduated curve tokens all keep working. Falls back to the curve
+ * pad (unresolved) while loading or if nothing matches.
  */
 export function useTokenPad(token: Address | undefined): ResolvedToken {
   const chainId = useChainId();
-  const pads = useMemo(() => padDeployments(chainId), [chainId]);
-  const primary = PAD_ADDRESSES[chainId] ?? ZERO_ADDRESS;
+  const pads = useMemo(() => allPadDeployments(chainId), [chainId]);
+  const curvePad = CURVE_PAD_ADDRESSES[chainId] ?? ZERO_ADDRESS;
 
   const { data, isLoading } = useReadContracts({
     allowFailure: true,
-    contracts: pads.map((p) => ({
-      address: p.address,
-      abi: potatoPadAbi,
-      functionName: "tokens" as const,
-      args: [token ?? ZERO_ADDRESS],
-    })),
+    // Heterogeneous ABIs (curve `curves()` vs direct `tokens()`); wagmi's array
+    // inference wants one ABI, so the contract list is built untyped and each
+    // result is decoded by its pad kind below.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    contracts: pads.map((p): any =>
+      p.kind === "curve"
+        ? { address: p.address, abi: potatoCurvePadAbi, functionName: "curves", args: [token ?? ZERO_ADDRESS] }
+        : { address: p.address, abi: potatoPadAbi, functionName: "tokens", args: [token ?? ZERO_ADDRESS] },
+    ),
     query: { enabled: !!token && pads.length > 0 },
   });
 
   return useMemo(() => {
     const fallback: ResolvedToken = {
-      pad: primary,
+      kind: "unknown",
+      pad: curvePad,
       creator: ZERO_ADDRESS,
       pool: ZERO_ADDRESS,
       lpTokenId: 0n,
+      bonded: false,
+      onCurve: false,
+      onUniswap: false,
       resolved: false,
       isLoading,
     };
@@ -258,18 +303,44 @@ export function useTokenPad(token: Address | undefined): ResolvedToken {
     for (let i = 0; i < pads.length; i++) {
       const res = data[i];
       if (res?.status !== "success") continue;
-      const info = res.result as readonly [Address, Address, bigint];
-      if (info[0] && info[0] !== ZERO_ADDRESS) {
-        return {
-          pad: pads[i].address,
-          creator: info[0],
-          pool: info[1],
-          lpTokenId: info[2],
-          resolved: true,
-          isLoading,
-        };
+      if (pads[i].kind === "curve") {
+        // curves() => (creator, pool, positionId, bonded)
+        const c = res.result as readonly [Address, Address, bigint, boolean];
+        if (c[0] && c[0] !== ZERO_ADDRESS) {
+          const bonded = c[3];
+          return {
+            kind: "curve",
+            pad: pads[i].address,
+            creator: c[0],
+            pool: c[1],
+            // The locker owns (and can collect on) the position from launch.
+            lpTokenId: c[2],
+            bonded,
+            onCurve: !bonded,
+            onUniswap: true, // curve tokens trade on Uniswap from block one
+            resolved: true,
+            isLoading,
+          };
+        }
+      } else {
+        // tokens() => (creator, pool, lpTokenId)
+        const info = res.result as readonly [Address, Address, bigint];
+        if (info[0] && info[0] !== ZERO_ADDRESS) {
+          return {
+            kind: "direct",
+            pad: pads[i].address,
+            creator: info[0],
+            pool: info[1],
+            lpTokenId: info[2],
+            bonded: true,
+            onCurve: false,
+            onUniswap: true,
+            resolved: true,
+            isLoading,
+          };
+        }
       }
     }
     return fallback;
-  }, [data, pads, primary, isLoading]);
+  }, [data, pads, curvePad, isLoading]);
 }

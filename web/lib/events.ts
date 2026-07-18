@@ -9,7 +9,9 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo } from "react";
 import type { Address } from "viem";
-import { isHiddenToken, padDeployments } from "@/lib/config";
+import { useWatchContractEvent } from "wagmi";
+import { potatoCurvePadAbi, potatoPadAbi } from "@/lib/abi";
+import { allPadDeployments, isHiddenToken, ZERO_ADDRESS, type PadKind } from "@/lib/config";
 import { usePad } from "@/lib/hooks";
 
 // ---------------------------------------------------------------------------
@@ -18,7 +20,9 @@ import { usePad } from "@/lib/hooks";
 // revalidates in the background instead of re-scanning cold every time.
 // ---------------------------------------------------------------------------
 
-const LAUNCH_CACHE_PREFIX = "potatopad:launch:v2:";
+// v3: CreationEvent gained a `kind` field (curve vs direct); bump so stale v2
+// caches (which lack it) are ignored rather than painting kind-less rows.
+const LAUNCH_CACHE_PREFIX = "potatopad:launch:v3:";
 
 // JSON can't hold bigint; tag them as {__b} so token names/symbols that happen to
 // look numeric are never mistaken for one.
@@ -78,6 +82,7 @@ export interface CreationEvent {
   creator: Address;
   name: string;
   symbol: string;
+  /** The token's Uniswap pool — non-zero from creation for both curve and direct tokens. */
   pool: Address;
   imageURI: string;
   website: string;
@@ -85,10 +90,12 @@ export interface CreationEvent {
   telegram: string;
   timestamp: number;
   blockNumber: bigint;
-  /** The pad (primary or legacy) that launched this token. */
+  /** The pad (curve, direct, or legacy) that launched this token. */
   pad: Address;
   /** 24h USD volume (from the server feed); 0 if unindexed. */
   volume24Usd: number;
+  /** "curve" (bonding curve) or "direct" (legacy direct-to-Uniswap). */
+  kind: PadKind;
 }
 
 interface LaunchActivity {
@@ -99,9 +106,9 @@ interface LaunchActivity {
 const EMPTY_LAUNCH: LaunchActivity = { creations: [], unavailable: false };
 
 export function useLaunchActivity() {
-  const { chainId, isDeployed } = usePad();
+  const { curvePad, directPad, chainId, isDeployed } = usePad();
   const queryClient = useQueryClient();
-  const pads = useMemo(() => padDeployments(chainId), [chainId]);
+  const pads = useMemo(() => allPadDeployments(chainId), [chainId]);
   const queryKey = useMemo(
     () => ["launch-activity", chainId, pads.map((p) => p.address).join(",")],
     [chainId, pads],
@@ -143,6 +150,7 @@ export function useLaunchActivity() {
           blockNumber: BigInt(c.blockNumber),
           pad: c.pad,
           volume24Usd: c.volume24Usd ?? 0,
+          kind: c.kind ?? "direct", // backward-compat for any kind-less payload
         }));
         const result: LaunchActivity = { creations, unavailable: !!json.unavailable };
         writeLaunchCache(cacheKey, result);
@@ -166,6 +174,23 @@ export function useLaunchActivity() {
       { updatedAt: cached.updatedAt },
     );
   }, [cacheKey, queryClient, queryKey]);
+
+  // Live updates: watch the curve pad (primary, all new launches) and the direct
+  // pad (legacy but harmless). Each watch is enabled only when its address is set.
+  useWatchContractEvent({
+    address: curvePad,
+    abi: potatoCurvePadAbi,
+    eventName: "TokenCreated",
+    enabled: curvePad !== ZERO_ADDRESS,
+    onLogs: () => queryClient.invalidateQueries({ queryKey }),
+  });
+  useWatchContractEvent({
+    address: directPad,
+    abi: potatoPadAbi,
+    eventName: "TokenCreated",
+    enabled: directPad !== ZERO_ADDRESS,
+    onLogs: () => queryClient.invalidateQueries({ queryKey }),
+  });
 
   const data = query.data ?? EMPTY_LAUNCH;
   // creationByToken keeps the FULL set so a hidden token's own page/trade still

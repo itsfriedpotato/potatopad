@@ -3,8 +3,9 @@
 import { Loader2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent } from "react";
-import { bytesToHex, decodeEventLog, parseEther } from "viem";
-import { potatoPadAbi } from "@/lib/abi";
+import { bytesToHex, decodeEventLog } from "viem";
+import { useReadContracts } from "wagmi";
+import { potatoCurvePadAbi } from "@/lib/abi";
 import { usePad, useTx } from "@/lib/hooks";
 import { useAncientTokens } from "@/lib/ancient";
 import { formatEth, resolveImageUri, tryParseEther } from "@/lib/format";
@@ -12,22 +13,49 @@ import { ConnectGate } from "@/components/ConnectGate";
 import { NotDeployed } from "@/components/NotDeployed";
 import { TxStatus } from "@/components/TxStatus";
 
-/**
- * Anti-snipe cap: during the launch window a dev-buy is limited to MAX_WALLET
- * (2% of supply). At the ~3 ETH open FDV that's ~0.06 ETH; a larger attached ETH
- * value would make createToken revert, so block it in the UI.
- */
-const MAX_DEV_BUY_WEI = parseEther("0.06");
-
 const inputCls =
   "w-full rounded-lg border border-neutral-800 bg-black px-3 py-2.5 text-sm text-neutral-100 placeholder-neutral-700 outline-none transition-colors focus:border-neutral-600";
 const labelCls = "text-[10px] font-bold uppercase tracking-wider text-neutral-500";
 
 export default function CreatePage() {
   const router = useRouter();
-  const { pad, chainId, isDeployed } = usePad();
+  const { curvePad, chainId, canLaunch } = usePad();
   const tx = useTx();
   const { tokens: ancientTokens } = useAncientTokens();
+
+  // Dev-buy cap. The atomic creator buy runs in the launch block (anti-snipe
+  // active) and the creator is NOT exempt, so buying > MAX_WALLET (5% = 50M)
+  // reverts the launch with DevBuyExceedsCap. We estimate the ETH that buys 50M
+  // tokens off the single-sided-v3 curve (starting at the opening price) so the
+  // form can warn before submitting. Read the per-deployment start FDV on-chain.
+  const { data: curveConsts } = useReadContracts({
+    allowFailure: true,
+    contracts: [{ address: curvePad, abi: potatoCurvePadAbi, functionName: "actualStartFdv" }],
+    query: { enabled: canLaunch },
+  });
+  const maxDevBuyWei = useMemo<bigint | undefined>(() => {
+    const startFdv = curveConsts?.[0]?.result as bigint | undefined;
+    if (startFdv === undefined || startFdv === 0n) return undefined;
+    // Whole-token curve math (floats are fine for a UI bound). The FULL 1B supply
+    // is single-sided liquidity L over [p_floor, p_top] (p_top = 256x the start FDV
+    // for the 80/20 split); buying M tokens from the floor costs L·(√p1 − √p_floor)
+    // where 1/√p1 = 1/√p_floor − M/L.
+    const SUPPLY = 1e9,
+      M = 5e7; // MAX_WALLET, 5% of supply
+    const startEth = Number(startFdv) / 1e18;
+    const pFloor = startEth / SUPPLY;
+    const pTop = (startEth * 256) / SUPPLY; // outer FDV = 256x start
+    const sf = Math.sqrt(pFloor),
+      st = Math.sqrt(pTop);
+    const L = SUPPLY / (1 / sf - 1 / st);
+    const inv1 = 1 / sf - M / L;
+    if (!(inv1 > 0)) return undefined; // M exceeds capacity (shouldn't happen)
+    const wethMax = L * (1 / inv1 - sf); // ETH to buy exactly M tokens
+    if (!(wethMax > 0) || !Number.isFinite(wethMax)) return undefined;
+    // Gross up 1% fee, then a small haircut so the buy stays under the strict cap.
+    const capEth = wethMax * 1.01 * 0.98;
+    return BigInt(Math.floor(capEth * 1e18));
+  }, [curveConsts]);
 
   const [name, setName] = useState("");
   const [symbol, setSymbol] = useState("");
@@ -60,7 +88,12 @@ export default function CreatePage() {
   }
 
   const devBuyWei = devBuy.trim() === "" ? 0n : tryParseEther(devBuy);
-  const devBuyTooLarge = devBuyWei !== undefined && devBuyWei > MAX_DEV_BUY_WEI;
+  // A requested dev-buy is "too large" if it exceeds the cap — or if the cap
+  // hasn't loaded yet (fail closed so a race can't submit an over-cap buy).
+  const devBuyTooLarge =
+    devBuyWei !== undefined &&
+    devBuyWei > 0n &&
+    (maxDevBuyWei === undefined || devBuyWei > maxDevBuyWei);
 
   // Anti-vampire shield: block names/tickers of every curated ancient (matches the
   // on-chain seed) plus a few blue-chips, so copycats can't vamp the originals.
@@ -92,7 +125,7 @@ export default function CreatePage() {
     for (const log of tx.receipt.logs) {
       try {
         const event = decodeEventLog({
-          abi: potatoPadAbi,
+          abi: potatoCurvePadAbi,
           eventName: "TokenCreated",
           data: log.data,
           topics: log.topics,
@@ -100,14 +133,14 @@ export default function CreatePage() {
         target = `/token/${event.args.token}`;
         break;
       } catch {
-        // not a TokenCreated log — keep scanning
+        // not a TokenCreated log (e.g. a dev-buy's Buy log) — keep scanning
       }
     }
     const timer = setTimeout(() => router.push(target), 800);
     return () => clearTimeout(timer);
   }, [tx.confirmed, tx.receipt, router]);
 
-  if (!isDeployed) {
+  if (!canLaunch) {
     return <NotDeployed chainId={chainId} />;
   }
 
@@ -118,8 +151,8 @@ export default function CreatePage() {
     // can't pre-initialize its Uniswap pool to brick the launch.
     const salt = bytesToHex(crypto.getRandomValues(new Uint8Array(32)));
     tx.writeContract({
-      address: pad,
-      abi: potatoPadAbi,
+      address: curvePad,
+      abi: potatoCurvePadAbi,
       functionName: "createToken",
       args: [
         name.trim(),
@@ -264,7 +297,9 @@ export default function CreatePage() {
                   <label htmlFor="devbuy" className={labelCls}>
                     Initial dev buy (ETH)
                   </label>
-                  <span className="text-[9px] text-neutral-600">Max {formatEth(MAX_DEV_BUY_WEI)} ETH</span>
+                  <span className="text-[9px] text-neutral-600">
+                    Max {maxDevBuyWei !== undefined ? formatEth(maxDevBuyWei) : "…"} ETH
+                  </span>
                 </div>
                 <input
                   id="devbuy"
@@ -279,8 +314,9 @@ export default function CreatePage() {
                 )}
                 {devBuyTooLarge && (
                   <p className="text-xs text-rose-400">
-                    Capped at {formatEth(MAX_DEV_BUY_WEI)} ETH (5% of supply) during the anti-snipe
-                    window.
+                    {maxDevBuyWei !== undefined
+                      ? `Capped at ${formatEth(maxDevBuyWei)} ETH (5% of supply) during the anti-snipe window.`
+                      : "Loading the dev-buy cap…"}
                   </p>
                 )}
               </div>

@@ -7,9 +7,9 @@
 import { useMemo } from "react";
 import type { Address } from "viem";
 import { useQuery } from "@tanstack/react-query";
-import { usePublicClient, useReadContract, useReadContracts } from "wagmi";
-import { potatoPadAbi } from "@/lib/abi";
-import { ZERO_ADDRESS } from "@/lib/config";
+import { useChainId, usePublicClient, useReadContract, useReadContracts } from "wagmi";
+import { potatoCurvePadAbi, potatoPadAbi } from "@/lib/abi";
+import { CURVE_PAD_ADDRESSES, ZERO_ADDRESS } from "@/lib/config";
 import { usePad } from "@/lib/hooks";
 
 /** Fixed launch supply: 1 billion whole tokens (18 decimals). */
@@ -264,16 +264,18 @@ export interface FdvRange {
 
 const WEI = 1e18;
 
-/** Reads the pad's actual open/top FDV (in wei) and returns them as ETH floats. */
+/** Reads the DIRECT pad's actual open/top FDV (in wei) and returns them as ETH
+ *  floats. Only the direct-to-Uniswap pad exposes an FDV range; curve tokens use
+ *  {useCurveStats} progress instead. */
 export function useFdvRange(): FdvRange {
-  const { pad, isDeployed } = usePad();
+  const { directPad } = usePad();
   const { data } = useReadContracts({
     allowFailure: true,
     contracts: [
-      { address: pad, abi: potatoPadAbi, functionName: "actualStartFdv" },
-      { address: pad, abi: potatoPadAbi, functionName: "actualTopFdv" },
+      { address: directPad, abi: potatoPadAbi, functionName: "actualStartFdv" },
+      { address: directPad, abi: potatoPadAbi, functionName: "actualTopFdv" },
     ],
-    query: { enabled: isDeployed },
+    query: { enabled: directPad !== ZERO_ADDRESS },
   });
   const openWei = data?.[0]?.result as bigint | undefined;
   const topWei = data?.[1]?.result as bigint | undefined;
@@ -290,6 +292,89 @@ export function fdvProgressBps(marketCapEth: number, range: FdvRange): bigint {
   const frac = (marketCapEth - openFdvEth) / (topFdvEth - openFdvEth);
   const clamped = Math.max(0, Math.min(1, frac));
   return BigInt(Math.round(clamped * 10000));
+}
+
+// ---------------------------------------------------------------------------
+// Curve stats — price / progress for a PRE-graduation bonding-curve token
+// ---------------------------------------------------------------------------
+
+export interface CurveStats {
+  /** True when the token was launched on the curve pad (creator != 0). */
+  isCurve: boolean;
+  /** True once the curve bonded (position locked into the fee locker). */
+  bonded: boolean;
+  /** True once the price crossed the bond tick and `bond()` can be called. */
+  bondable: boolean;
+  /** The Uniswap pool — non-zero from creation (single-sided-v3 curve). */
+  pool: Address;
+  creator: Address;
+  /** The single-sided position id (the curve AND the LP). */
+  positionId: bigint;
+  /** Progress toward the bond price, 0..10000 bps. */
+  progressBps: bigint;
+  isLoading: boolean;
+  unavailable: boolean;
+}
+
+const ZERO_CURVE_STATS: CurveStats = {
+  isCurve: false,
+  bonded: false,
+  bondable: false,
+  pool: ZERO_ADDRESS,
+  creator: ZERO_ADDRESS,
+  positionId: 0n,
+  progressBps: 0n,
+  isLoading: false,
+  unavailable: true,
+};
+
+/**
+ * Curve metadata for a token: reads curves()/curveProgressBps() off the chain's
+ * curve pad. `isCurve` is false for tokens not on the curve pad (the page then
+ * falls through to pool/ancient paths). Price and liquidity are NOT read here —
+ * the single-sided-v3 curve has a live Uniswap pool from block one, so both come
+ * from {usePoolStats} continuously across migration; this hook only carries the
+ * curve-specific state (migration flag + progress) that drives the curve UI.
+ */
+export function useCurveStats(token: Address | undefined): CurveStats {
+  const chainId = useChainId();
+  const curvePad = CURVE_PAD_ADDRESSES[chainId] ?? ZERO_ADDRESS;
+  const enabled = curvePad !== ZERO_ADDRESS && !!token;
+
+  const { data, isLoading } = useReadContracts({
+    allowFailure: true,
+    contracts: [
+      { address: curvePad, abi: potatoCurvePadAbi, functionName: "curves", args: [token ?? ZERO_ADDRESS] },
+      { address: curvePad, abi: potatoCurvePadAbi, functionName: "curveProgressBps", args: [token ?? ZERO_ADDRESS] },
+      { address: curvePad, abi: potatoCurvePadAbi, functionName: "bondable", args: [token ?? ZERO_ADDRESS] },
+    ],
+    query: { enabled },
+  });
+
+  return useMemo<CurveStats>(() => {
+    if (!enabled) return ZERO_CURVE_STATS;
+    if (isLoading) return { ...ZERO_CURVE_STATS, isLoading: true, unavailable: false };
+    if (!data) return ZERO_CURVE_STATS;
+
+    // curves() => (creator, pool, positionId, bonded)
+    const c = data[0]?.result as readonly [Address, Address, bigint, boolean] | undefined;
+    const progress = data[1]?.result as bigint | undefined;
+    const bondable = data[2]?.result as boolean | undefined;
+
+    if (!c || !c[0] || c[0] === ZERO_ADDRESS) return ZERO_CURVE_STATS;
+
+    return {
+      isCurve: true,
+      bonded: c[3],
+      bondable: bondable ?? false,
+      pool: c[1],
+      creator: c[0],
+      positionId: c[2],
+      progressBps: progress ?? 0n,
+      isLoading: false,
+      unavailable: false,
+    };
+  }, [enabled, isLoading, data]);
 }
 
 // ---------------------------------------------------------------------------
