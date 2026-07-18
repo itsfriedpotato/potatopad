@@ -36,6 +36,11 @@ export function TokenChart({ token, pool }: { token: Address; pool: Address }) {
             title="GeckoTerminal pool chart"
             src={embedUrl}
             className="h-[420px] w-full"
+            // Warm-tint the GeckoTerminal embed so its default palette reads on the
+            // amber/potato theme (dark bg + sepia/hue-shift toward amber).
+            style={{
+              filter: "brightness(1) saturate(0.7) sepia(0.7) contrast(1.6) hue-rotate(-19deg)",
+            }}
             frameBorder="0"
             allow="clipboard-write"
             allowFullScreen

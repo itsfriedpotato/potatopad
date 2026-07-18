@@ -236,7 +236,7 @@ export const GECKOTERMINAL_NETWORKS: Record<number, string> = {
 export function geckoTerminalPoolUrl(chainId: number, pool: string): string | undefined {
   const network = GECKOTERMINAL_NETWORKS[chainId];
   return network
-    ? `https://www.geckoterminal.com/${network}/pools/${pool}?embed=1&info=0&swaps=0&light_chart=0`
+    ? `https://www.geckoterminal.com/${network}/pools/${pool}?embed=1&info=0&swaps=0&light_chart=0&chart_type=market_cap&resolution=1m&bg_color=000000`
     : undefined;
 }
 
