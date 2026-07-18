@@ -20,8 +20,13 @@ export function Header() {
       <div className="mx-auto flex h-16 w-full max-w-6xl items-center gap-4 px-4 sm:px-6">
         <Link href="/" className="flex shrink-0 items-center gap-2">
           <img src="/logo.png" alt="PotatoPad" className="h-11 w-auto" />
-          <span className="text-lg font-bold tracking-tight text-neutral-100">
-            Potato <span className="text-amber-500">Pad</span>
+          <span className="flex flex-col leading-none">
+            <span className="text-lg font-bold tracking-tight text-neutral-100">
+              Potato <span className="text-amber-500">Pad</span>
+            </span>
+            <span className="mt-1 whitespace-nowrap text-[9px] font-semibold uppercase tracking-[0.15em] text-neutral-500">
+              People&apos;s launchpad
+            </span>
           </span>
         </Link>
 
