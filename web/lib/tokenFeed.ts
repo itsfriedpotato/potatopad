@@ -15,8 +15,15 @@ const tokenCreatedEvent = parseAbiItem(
 );
 
 const LOG_CHUNK = 9_000n; // Alchemy on Robinhood caps eth_getLogs at 10k blocks.
-const SCAN_CONCURRENCY = 4; // windows fetched at once — fast without a CU spike.
+const SCAN_CONCURRENCY = 6; // windows fetched at once — fast without a CU spike.
 const CACHE_TTL_MS = 45_000;
+const CHUNK_RETRIES = 3; // a window survives transient RPC blips instead of aborting the scan.
+// If more than this fraction of a pad's windows never succeed, the scan is too
+// incomplete to trust — flag `unavailable` so the client retries (vs. caching a
+// half-empty feed or, worse, flashing "nothing planted").
+const MAX_FAILED_FRACTION = 0.25;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 interface TokenCreatedArgs {
   token: Address;
@@ -60,14 +67,61 @@ const client = createPublicClient({
 
 let cache: { payload: FeedPayload; expiresAt: number } | null = null;
 
-async function fetchCreatedLogs(pad: Address, from: bigint, to: bigint): Promise<CreatedLog[]> {
-  const logs = await client.getLogs({
-    address: pad,
-    event: tokenCreatedEvent,
-    fromBlock: from,
-    toBlock: to,
-  });
-  return logs as unknown as CreatedLog[];
+/** One window, with retries. Returns null only after every attempt fails. */
+async function fetchCreatedLogs(
+  pad: Address,
+  from: bigint,
+  to: bigint,
+): Promise<CreatedLog[] | null> {
+  for (let attempt = 0; attempt < CHUNK_RETRIES; attempt++) {
+    try {
+      const logs = await client.getLogs({
+        address: pad,
+        event: tokenCreatedEvent,
+        fromBlock: from,
+        toBlock: to,
+      });
+      return logs as unknown as CreatedLog[];
+    } catch {
+      if (attempt < CHUNK_RETRIES - 1) await sleep(200 * (attempt + 1));
+    }
+  }
+  return null;
+}
+
+type PadTag = { log: CreatedLog; pad: Address };
+
+/**
+ * Scan one pad's [start, end] block range for TokenCreated logs. Individual
+ * windows that keep failing are tolerated (counted, not thrown) so one bad RPC
+ * response can't sink the whole feed — the crux of the "stuck on skeletons" bug.
+ */
+async function scanPadRange(
+  pad: Address,
+  start: bigint,
+  end: bigint,
+): Promise<{ tagged: PadTag[]; failed: number; total: number }> {
+  const windows: { from: bigint; to: bigint }[] = [];
+  for (let s = start; s <= end; s += LOG_CHUNK + 1n) {
+    const e = s + LOG_CHUNK <= end ? s + LOG_CHUNK : end;
+    windows.push({ from: s, to: e });
+  }
+  const tagged: PadTag[] = [];
+  let failed = 0;
+  for (let i = 0; i < windows.length; i += SCAN_CONCURRENCY) {
+    const batch = windows.slice(i, i + SCAN_CONCURRENCY);
+    const results = await Promise.all(
+      batch.map(async (w) => {
+        const logs = await fetchCreatedLogs(pad, w.from, w.to);
+        return logs === null ? null : logs.map((log) => ({ log, pad }));
+      }),
+    );
+    for (const r of results) {
+      if (r === null) failed++;
+      else tagged.push(...r);
+    }
+  }
+  return { tagged, failed, total: windows.length };
 }
 
 /** Best-effort per-token 24h USD volume from GeckoTerminal (0 if unindexed). */
@@ -88,6 +142,7 @@ async function fetchVolumes(addresses: Address[]): Promise<Map<string, number>> 
       const res = await fetch(`${base}/tokens/multi/${chunk.join(",")}`, {
         headers,
         cache: "no-store",
+        signal: AbortSignal.timeout(6000), // a slow GT call must not stall the feed
       });
       if (!res.ok) continue;
       const j = (await res.json()) as {
@@ -104,39 +159,59 @@ async function fetchVolumes(addresses: Address[]): Promise<Map<string, number>> 
   return out;
 }
 
+// Legacy pads are capped at their repoint endBlock — immutable history. Scanned
+// once and kept for the process lifetime; only the active pad is re-scanned.
+let legacyTagged: PadTag[] | null = null;
+
 async function scan(): Promise<FeedPayload> {
   const pads = padDeployments(robinhoodChain.id);
   if (pads.length === 0) return { creations: [], unavailable: false };
 
   const latest = await client.getBlockNumber();
+  // The active (write) pad has no endBlock; legacy pads carry the repoint block.
+  const legacyPads = pads.filter((p) => p.endBlock !== undefined);
+  const activePads = pads.filter((p) => p.endBlock === undefined);
 
-  // Flatten every (pad, block-window) into one chunk list, then fetch with
-  // bounded concurrency.
-  const chunks: { pad: Address; from: bigint; to: bigint }[] = [];
-  for (const p of pads) {
-    // Legacy pads carry an endBlock (the repoint block): index only up to it so a
-    // superseded, blacklist-less pad keeps showing its EXISTING tokens but not any
-    // post-repoint copycat launched on it. The primary pad has no endBlock (latest).
-    const upTo = p.endBlock !== undefined && p.endBlock < latest ? p.endBlock : latest;
-    for (let s = p.startBlock; s <= upTo; s += LOG_CHUNK + 1n) {
-      const e = s + LOG_CHUNK <= upTo ? s + LOG_CHUNK : upTo;
-      chunks.push({ pad: p.address, from: s, to: e });
+  let unavailable = false;
+
+  // Legacy history: scan once, reuse forever. Lock the cache in only if it came
+  // back near-complete, otherwise use this round's result but retry next time.
+  let legacyRound: PadTag[];
+  if (legacyTagged !== null) {
+    legacyRound = legacyTagged;
+  } else {
+    const acc: PadTag[] = [];
+    let failed = 0;
+    let total = 0;
+    for (const p of legacyPads) {
+      const upTo = p.endBlock! < latest ? p.endBlock! : latest;
+      const r = await scanPadRange(p.address, p.startBlock, upTo);
+      acc.push(...r.tagged);
+      failed += r.failed;
+      total += r.total;
     }
+    legacyRound = acc;
+    if (total === 0 || failed / total <= 0.1) legacyTagged = acc;
+    else unavailable = true; // gappy legacy scan — don't lock it in; retry next round
   }
 
-  const tagged: { log: CreatedLog; pad: Address }[] = [];
-  for (let i = 0; i < chunks.length; i += SCAN_CONCURRENCY) {
-    const batch = chunks.slice(i, i + SCAN_CONCURRENCY);
-    const results = await Promise.all(
-      batch.map(async (c) => {
-        const logs = await fetchCreatedLogs(c.pad, c.from, c.to);
-        return logs.map((log) => ({ log, pad: c.pad }));
-      }),
-    );
-    for (const r of results) tagged.push(...r);
+  // Active pad(s): always fresh.
+  const activeRound: PadTag[] = [];
+  {
+    let failed = 0;
+    let total = 0;
+    for (const p of activePads) {
+      const r = await scanPadRange(p.address, p.startBlock, latest);
+      activeRound.push(...r.tagged);
+      failed += r.failed;
+      total += r.total;
+    }
+    if (total > 0 && failed / total > MAX_FAILED_FRACTION) unavailable = true;
   }
 
-  // Timestamps for the matched blocks (dedupe + batch).
+  const tagged = [...legacyRound, ...activeRound];
+
+  // Timestamps for the matched blocks (dedupe + batch; a block miss just yields 0).
   const blockNums = [
     ...new Set(tagged.map((t) => t.log.blockNumber).filter((b): b is bigint => b !== null)),
   ];
@@ -144,9 +219,9 @@ async function scan(): Promise<FeedPayload> {
   const TS_CHUNK = 20;
   for (let i = 0; i < blockNums.length; i += TS_CHUNK) {
     const blocks = await Promise.all(
-      blockNums.slice(i, i + TS_CHUNK).map((n) => client.getBlock({ blockNumber: n })),
+      blockNums.slice(i, i + TS_CHUNK).map((n) => client.getBlock({ blockNumber: n }).catch(() => null)),
     );
-    for (const b of blocks) tsByBlock.set(b.number, Number(b.timestamp));
+    for (const b of blocks) if (b) tsByBlock.set(b.number, Number(b.timestamp));
   }
 
   // A token belongs to exactly one pad; dedupe by token address.
@@ -181,24 +256,36 @@ async function scan(): Promise<FeedPayload> {
   } catch {
     /* leave volumes at 0 */
   }
-  return { creations, unavailable: false };
+  return { creations, unavailable };
 }
+
+let inFlight: Promise<FeedPayload> | null = null;
 
 /**
  * Cached feed getter. Returns the last good payload on a scan failure (soft
  * degrade) so callers never throw; `unavailable` flags a cold-cache RPC miss.
+ * Concurrent cold-cache callers share ONE scan (in-flight coalescing) so a fresh
+ * process can't fire N parallel full sweeps and hammer the RPC into failure.
  */
 export async function loadFeed(): Promise<FeedPayload> {
   const now = Date.now();
   if (cache && cache.expiresAt > now) return cache.payload;
-  try {
-    const payload = await scan();
-    cache = { payload, expiresAt: now + CACHE_TTL_MS };
-    return payload;
-  } catch {
-    if (cache) return cache.payload;
-    return { creations: [], unavailable: true };
-  }
+  if (inFlight) return inFlight;
+  inFlight = (async () => {
+    try {
+      const payload = await scan();
+      // Never cache a degraded scan — a gappy round would otherwise stick for the
+      // whole TTL and keep the client on skeletons. Cache only trustworthy feeds.
+      if (!payload.unavailable) cache = { payload, expiresAt: Date.now() + CACHE_TTL_MS };
+      return payload;
+    } catch {
+      if (cache) return cache.payload;
+      return { creations: [], unavailable: true };
+    } finally {
+      inFlight = null;
+    }
+  })();
+  return inFlight;
 }
 
 /** One token's creation record (name/symbol/image/pool), by address, from the cached feed. */

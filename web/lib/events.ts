@@ -9,8 +9,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo } from "react";
 import type { Address } from "viem";
-import { useWatchContractEvent } from "wagmi";
-import { potatoPadAbi, potatoTokenAbi } from "@/lib/abi";
 import { padDeployments } from "@/lib/config";
 import { usePad } from "@/lib/hooks";
 
@@ -101,7 +99,7 @@ interface LaunchActivity {
 const EMPTY_LAUNCH: LaunchActivity = { creations: [], unavailable: false };
 
 export function useLaunchActivity() {
-  const { pad, chainId, isDeployed } = usePad();
+  const { chainId, isDeployed } = usePad();
   const queryClient = useQueryClient();
   const pads = useMemo(() => padDeployments(chainId), [chainId]);
   const queryKey = useMemo(
@@ -120,7 +118,9 @@ export function useLaunchActivity() {
     // A soft-degraded scan (unavailable) means "couldn't read right now", not "no
     // tokens" — poll to auto-recover instead of stranding a cold-cache visitor on
     // an empty view until the next focus/refresh.
-    refetchInterval: (q) => (q.state.data?.unavailable ? 4000 : false),
+    // Poll gently for new launches (server feed is cached ~45s) instead of a live
+    // RPC event-watcher. Back off harder while degraded rather than hammering 4s.
+    refetchInterval: (q) => (q.state.data?.unavailable ? 10_000 : 30_000),
     queryFn: async () => {
       try {
         const res = await fetch("/api/tokens");
@@ -167,15 +167,6 @@ export function useLaunchActivity() {
     );
   }, [cacheKey, queryClient, queryKey]);
 
-  // Live updates: watch the primary (write) pad; legacy pads are historical.
-  useWatchContractEvent({
-    address: pad,
-    abi: potatoPadAbi,
-    eventName: "TokenCreated",
-    enabled: isDeployed,
-    onLogs: () => queryClient.invalidateQueries({ queryKey }),
-  });
-
   const data = query.data ?? EMPTY_LAUNCH;
   const creationByToken = useMemo(() => {
     const map = new Map<string, CreationEvent>();
@@ -216,7 +207,6 @@ const EMPTY_HOLDERS: HoldersData = { holders: [], total: 0n, unavailable: false 
  */
 export function useTokenHolders(token: Address | undefined) {
   const { chainId, isDeployed } = usePad();
-  const queryClient = useQueryClient();
   const queryKey = useMemo(
     () => ["token-holders", chainId, token ?? "none"],
     [chainId, token],
@@ -225,7 +215,8 @@ export function useTokenHolders(token: Address | undefined) {
   const query = useQuery<HoldersData>({
     queryKey,
     enabled: isDeployed && !!token,
-    staleTime: 10_000,
+    staleTime: 15_000,
+    refetchInterval: 25_000,
     queryFn: async () => {
       if (!token) return EMPTY_HOLDERS;
       try {
@@ -247,14 +238,6 @@ export function useTokenHolders(token: Address | undefined) {
         return { ...EMPTY_HOLDERS, unavailable: true };
       }
     },
-  });
-
-  useWatchContractEvent({
-    address: token,
-    abi: potatoTokenAbi,
-    eventName: "Transfer",
-    enabled: isDeployed && !!token,
-    onLogs: () => queryClient.invalidateQueries({ queryKey }),
   });
 
   const data = query.data ?? EMPTY_HOLDERS;

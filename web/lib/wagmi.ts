@@ -33,5 +33,9 @@ export const wagmiConfig = getDefaultConfig({
     [hardhat.id]: http("http://127.0.0.1:8545"),
     [robinhoodChain.id]: robinhoodTransport,
   },
+  // Every browser RPC read tunnels through /api/rpc → Alchemy. wagmi's 4s default
+  // block-poll (balances, block number) multiplies that; 15s is plenty fresh for a
+  // launchpad and cuts proxy/Alchemy load ~4x.
+  pollingInterval: 15_000,
   ssr: true,
 });
