@@ -214,6 +214,9 @@ export default function CreatePage() {
                   </label>
                 </div>
                 {uploadErr && <p className="text-xs text-rose-400">{uploadErr}</p>}
+                <p className="text-[11px] text-neutral-600">
+                  PNG, JPG, GIF, WebP or SVG · up to 10 MB · animated GIFs play.
+                </p>
               </div>
 
               <div className="grid grid-cols-2 gap-3">

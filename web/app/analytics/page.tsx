@@ -9,9 +9,11 @@ interface SiteStats {
   activeTokens: number;
   volume24Usd: number;
   volumeAllTimeUsd: number | null;
+  tradesAllTime: number | null;
   marketCapUsd: number;
   liquidityUsd: number;
   traders24: number;
+  trades24: number;
   unavailable: boolean;
   updatedAt: number;
 }
@@ -64,6 +66,17 @@ export default function AnalyticsPage() {
       accent: "text-emerald-400",
     },
     {
+      label: "Trades · all-time",
+      value: data
+        ? data.tradesAllTime != null
+          ? fmtNum(data.tradesAllTime)
+          : "computing…"
+        : "…",
+      hint: "total swaps across all pools",
+      icon: Activity,
+      accent: "text-emerald-400",
+    },
+    {
       label: "Traders · 24h",
       value: data ? fmtNum(data.traders24) : "…",
       hint: "buyers + sellers, all pools",
@@ -84,13 +97,6 @@ export default function AnalyticsPage() {
       icon: Lock,
       accent: "text-fuchsia-400",
     },
-    {
-      label: "Active · 24h",
-      value: data ? fmtNum(data.activeTokens) : "…",
-      hint: "tokens with trades",
-      icon: Activity,
-      accent: "text-emerald-400",
-    },
   ];
 
   return (
@@ -98,8 +104,8 @@ export default function AnalyticsPage() {
       <div>
         <h1 className="text-xl font-bold tracking-tight text-neutral-100">Analytics</h1>
         <p className="mt-1 text-xs text-neutral-500">
-          Live across every token launched on PotatoPad. Volume and trader counts are the last 24
-          hours (data by GeckoTerminal); launches and locked liquidity are on-chain.
+          Live across every token launched on PotatoPad. All-time volume + trades are summed on-chain;
+          24h figures and market data are by GeckoTerminal.
         </p>
       </div>
 
@@ -134,8 +140,8 @@ export default function AnalyticsPage() {
       )}
       <p className="text-[11px] leading-relaxed text-neutral-600">
         All-time volume is summed from each pool&apos;s on-chain daily trade history and refreshes
-        every few minutes; 24h volume, traders, market cap and liquidity update continuously. Data by
-        GeckoTerminal.
+        every few minutes; 24h volume, trades, traders, market cap and liquidity update continuously.
+        Data by GeckoTerminal.
       </p>
     </div>
   );

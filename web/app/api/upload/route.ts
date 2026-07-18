@@ -6,10 +6,11 @@ import { NextRequest, NextResponse } from "next/server";
  * so the image is content-addressed and permanent — no database.
  *
  * Requires a SERVER-ONLY `PINATA_JWT` env var (never exposed to the browser).
- * Guards: image types only, 5 MB cap, and a coarse per-IP rate limit so the
- * endpoint can't be used to burn the Pinata quota.
+ * Guards: image types only, 10 MB cap (roomy enough for animated GIFs/WebP), and
+ * a coarse per-IP rate limit so the endpoint can't be used to burn the Pinata
+ * quota. Files are pinned as-is — GIF/WebP animation is preserved (never flattened).
  */
-const MAX_BYTES = 5 * 1024 * 1024;
+const MAX_BYTES = 10 * 1024 * 1024;
 const ALLOWED_TYPES = new Set([
   "image/png",
   "image/jpeg",
@@ -78,7 +79,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "no file provided" }, { status: 400 });
   }
   if (file.size > MAX_BYTES) {
-    return NextResponse.json({ error: "file too large (max 5 MB)" }, { status: 413 });
+    return NextResponse.json({ error: "file too large (max 10 MB)" }, { status: 413 });
   }
   if (file.type && !ALLOWED_TYPES.has(file.type)) {
     return NextResponse.json({ error: `unsupported image type: ${file.type}` }, { status: 415 });
