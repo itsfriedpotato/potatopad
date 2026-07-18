@@ -79,12 +79,15 @@ export const CHAINS: ChainConfig[] = [
     // Only Robinhood is wired for in-app trading (router + quoter present).
     swapRouter: "0xcaf681a66d020601342297493863e78c959e5cb2",
     quoter: "0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7",
-    padStartBlock: 12_757_281n, // deploy block of the burn+blacklist pad 0x6722…63E8
+    padStartBlock: 13_221_549n, // deploy block of the 2%/redirect/owner() pad 0xe26e…9001
     legacyPads: [
-      // Superseded pads, CAPPED at the new pad's deploy block: their existing
-      // tokens still render, but post-repoint launches on these blacklist-less
-      // pads do NOT surface (closes the copycat side-door). No token is lost —
-      // every pre-repoint launch is below the cap.
+      // Superseded pads, CAPPED at the block their successor took over: existing
+      // tokens still render, but launches after the repoint do not surface. No
+      // token is lost — every pre-repoint launch is below the cap. (The cap on
+      // 0x6722 has a small buffer past 13_221_549 to cover the deploy→repoint
+      // window, so a token launched during it still shows.)
+      // v4 pad 0x6722…63E8 — the burn+blacklist pad, superseded by the redirect pad.
+      { address: "0x67225AC6ba037aA220F68e5aAA2b49Be4B0863E8", startBlock: 12_757_281n, endBlock: 13_230_000n },
       // v3 pad 0x12A0…D91F — held all launches before the burn+blacklist upgrade.
       { address: "0x12A075A946c790F05a23d2DcEa70B207DB23D91F", startBlock: 11_555_000n, endBlock: 12_757_281n },
       // v2 pad (pre-CREATE2 fix) — still holds CHIP + anything launched on it.

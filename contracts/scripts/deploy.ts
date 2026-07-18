@@ -17,7 +17,7 @@ import NPMArtifact from "@uniswap/v3-periphery/artifacts/contracts/NonfungiblePo
  *   TREASURY           fee recipient             (default: PotatoPad treasury)
  *   START_FDV_ETH      launch/open FDV in ETH    (default: 3   ≈ $6k)
  *   TOP_FDV_ETH        range-ceiling FDV in ETH  (default: 530 ≈ $1M)
- *   ANTI_SNIPE_BLOCKS  max-wallet (5%) window    (default: 1200 ≈ 2min at Robinhood's 0.1s blocks)
+ *   ANTI_SNIPE_BLOCKS  max-wallet (2%) window    (default: 1200 ≈ 2min at Robinhood's 0.1s blocks)
  */
 const CANONICAL: Record<string, { factory: string; npm: string; weth: string }> = {
   // https://developers.uniswap.org/contracts/v3/reference/deployments/base-deployments
@@ -75,7 +75,7 @@ async function main() {
   console.log(`treasury:  ${treasury}`);
   console.log(`owner:     ${owner}  (blacklist admin; ${ANCIENT_BANNED.length} words seeded)`);
   console.log(`open FDV:  ${ethers.formatEther(startFdv)} ETH  ->  top FDV: ${ethers.formatEther(topFdv)} ETH`);
-  console.log(`anti-snipe: ${antiSnipeBlocks} blocks (max wallet 5%)\n`);
+  console.log(`anti-snipe: ${antiSnipeBlocks} blocks (max wallet 2%)\n`);
 
   let factory: string, npm: string, weth: string;
   if (CANONICAL[network.name]) {

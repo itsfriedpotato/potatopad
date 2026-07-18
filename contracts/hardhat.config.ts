@@ -32,7 +32,20 @@ const config: HardhatUserConfig = {
     },
   },
   etherscan: {
-    apiKey: process.env.ETHERSCAN_API_KEY || "",
+    // Blockscout accepts any non-empty key. Robinhood's explorer is Blockscout.
+    apiKey: {
+      robinhoodMainnet: process.env.ETHERSCAN_API_KEY || "blockscout",
+    },
+    customChains: [
+      {
+        network: "robinhoodMainnet",
+        chainId: 4663,
+        urls: {
+          apiURL: "https://robinhoodchain.blockscout.com/api",
+          browserURL: "https://robinhoodchain.blockscout.com",
+        },
+      },
+    ],
   },
 };
 

@@ -14,10 +14,10 @@ import { TxStatus } from "@/components/TxStatus";
 
 /**
  * Anti-snipe cap: during the launch window a dev-buy is limited to MAX_WALLET
- * (5% of supply). At the ~3 ETH open FDV that's ~0.15 ETH; a larger attached ETH
+ * (2% of supply). At the ~3 ETH open FDV that's ~0.06 ETH; a larger attached ETH
  * value would make createToken revert, so block it in the UI.
  */
-const MAX_DEV_BUY_WEI = parseEther("0.15");
+const MAX_DEV_BUY_WEI = parseEther("0.06");
 
 const inputCls =
   "w-full rounded-lg border border-neutral-800 bg-black px-3 py-2.5 text-sm text-neutral-100 placeholder-neutral-700 outline-none transition-colors focus:border-neutral-600";

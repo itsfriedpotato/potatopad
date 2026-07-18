@@ -70,8 +70,8 @@ contract PotatoPad is ReentrancyGuard {
     uint256 public constant CREATOR_FEE_SHARE_BPS = 5_000; // creator gets half the LP fees
     uint256 internal constant BPS = 10_000;
 
-    /// @notice Anti-snipe max wallet: 5% of supply during the launch window.
-    uint256 public constant MAX_WALLET = TOTAL_SUPPLY / 20;
+    /// @notice Anti-snipe max wallet: 2% of supply during the launch window.
+    uint256 public constant MAX_WALLET = TOTAL_SUPPLY / 50;
 
     /// @notice How many CREATE2 salts {createToken} will probe to find a token
     ///         address whose Uniswap pool a griefer hasn't already front-run.
@@ -117,10 +117,14 @@ contract PotatoPad is ReentrancyGuard {
     /// @dev Set only for the duration of a dev-buy swap, to authenticate the callback.
     address internal _expectedPoolCallback;
 
-    /// @notice Admin that maintains the name/symbol blacklist. This is the ONE
-    ///         privileged role: it can only block NEW launches by name via
-    ///         {setBanned} — it cannot touch existing tokens, funds, pools, or
-    ///         launches, and holds no keys to any token. Tokens stay ownerless.
+    /// @notice The pad admin — two powers: block NEW launches by name via
+    ///         {setBanned}, and manually reassign any token's FUTURE creator-fee
+    ///         share to a new recipient via the locker's {redirectFees} (fees accrued
+    ///         up to that point are paid out to the prior beneficiary first, so only
+    ///         future fees move). It cannot touch launched tokens, the locked
+    ///         principal, the treasury cut, already-accrued claimable balances, or
+    ///         pools, and holds no keys to any token — tokens stay ownerless.
+    ///         Renouncing to address(0) freezes both powers forever.
     address public owner;
 
     /// @notice Normalized name/symbol hashes that {createToken} rejects — the
@@ -228,7 +232,7 @@ contract PotatoPad is ReentrancyGuard {
     ///         single-sided locked LP, and optionally executes a creator dev-buy
     ///         with the attached ETH.
     /// @dev During the anti-snipe window a dev-buy is capped like any wallet at
-    ///      MAX_WALLET (5%); size the attached ETH so the output stays under it.
+    ///      MAX_WALLET (2%); size the attached ETH so the output stays under it.
     /// @param salt Caller-supplied entropy for the token's CREATE2 address. Pass a
     ///        fresh RANDOM value each call: it makes the token address unpredictable
     ///        so a griefer can't pre-initialize its Uniswap pool at a hostile price

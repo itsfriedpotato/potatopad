@@ -9,7 +9,7 @@ import RouterArtifact from "@uniswap/v3-periphery/artifacts/contracts/SwapRouter
 
 const E18 = 10n ** 18n;
 const TOTAL_SUPPLY = 1_000_000_000n * E18;
-const MAX_WALLET = TOTAL_SUPPLY / 20n; // 5%
+const MAX_WALLET = TOTAL_SUPPLY / 50n; // 2%
 const POOL_FEE = 10_000;
 
 const START_FDV = 3n * E18; // ≈ 3 ETH FDV at the open
@@ -369,7 +369,7 @@ describe("PotatoPad v2 (direct-to-Uniswap single-sided launch)", () => {
 
     it("dev-buy: attached ETH delivers tokens to the creator (under the wallet cap)", async () => {
       const { pad, creator, weth } = await loadFixture(deployFixture);
-      const value = ethers.parseEther("0.005"); // small — stays under the 5% window cap
+      const value = ethers.parseEther("0.005"); // small — stays under the 2% window cap
       const addr = await pad.connect(creator).createToken.staticCall("Dev", "DEV", NO_META, saltFor("Dev"), { value });
       await expect(pad.connect(creator).createToken("Dev", "DEV", NO_META, saltFor("Dev"), { value })).to.emit(pad, "DevBuy");
 
@@ -634,17 +634,92 @@ describe("PotatoPad v2 (direct-to-Uniswap single-sided launch)", () => {
     });
   });
 
+  describe("fee redirect (owner-managed)", () => {
+    // owner = deployer, creator = creator, new recipient = alice, trader = bob
+    async function feesFixture() {
+      const ctx = await createTokenFixture();
+      await mine(ANTI_SNIPE_BLOCKS + 1);
+      await buy(ctx, ctx.bob, ctx.tokenAddr as string, ethers.parseEther("0.5"));
+      return ctx;
+    }
+
+    it("owner redirects a token's future fees immediately; non-owner cannot; renounce disables it", async () => {
+      const ctx = await loadFixture(feesFixture);
+      const { locker, pad, deployer, alice, bob, info } = ctx;
+      const id = info.lpTokenId;
+
+      await expect(
+        locker.connect(bob).redirectFees(id, alice.address)
+      ).to.be.revertedWithCustomError(locker, "OnlyOwner");
+
+      await expect(locker.connect(deployer).redirectFees(id, alice.address))
+        .to.emit(locker, "FeesRedirected")
+        .withArgs(id, alice.address, deployer.address);
+      expect(await locker.beneficiaryOf(id)).to.equal(alice.address);
+
+      // renouncing the pad owner freezes redirect entirely
+      await pad.connect(deployer).transferOwnership(ethers.ZeroAddress);
+      await expect(
+        locker.connect(deployer).redirectFees(id, bob.address)
+      ).to.be.revertedWithCustomError(locker, "OnlyOwner");
+    });
+
+    it("redirect is future-only: accrued crystallizes to the creator, new fees to the target", async () => {
+      const ctx = await loadFixture(feesFixture);
+      const { locker, weth, deployer, creator, alice, bob, info, tokenAddr } = ctx;
+      const id = info.lpTokenId;
+
+      await locker.connect(deployer).redirectFees(id, alice.address); // collect-first pays the creator
+      expect(await locker.claimable(weth.target, creator.address)).to.be.gt(0n);
+      expect(await locker.claimable(weth.target, alice.address)).to.equal(0n);
+
+      await buy(ctx, bob, tokenAddr as string, ethers.parseEther("0.3"));
+      await locker.connect(bob).collect(id);
+      expect(await locker.claimable(weth.target, alice.address)).to.be.gt(0n);
+    });
+
+    it("owner can re-redirect, and address(0) resets to the original creator", async () => {
+      const ctx = await loadFixture(feesFixture);
+      const { locker, deployer, creator, alice, bob, info } = ctx;
+      const id = info.lpTokenId;
+
+      await locker.connect(deployer).redirectFees(id, alice.address);
+      expect(await locker.beneficiaryOf(id)).to.equal(alice.address);
+      await locker.connect(deployer).redirectFees(id, bob.address);
+      expect(await locker.beneficiaryOf(id)).to.equal(bob.address);
+      await locker.connect(deployer).redirectFees(id, ethers.ZeroAddress); // reset to default
+      expect(await locker.beneficiaryOf(id)).to.equal(creator.address);
+    });
+
+    it("redirecting an unknown position reverts", async () => {
+      const { locker, deployer } = await loadFixture(feesFixture);
+      await expect(
+        locker.connect(deployer).redirectFees(999_999, deployer.address)
+      ).to.be.revertedWithCustomError(locker, "UnknownPosition");
+    });
+
+    it("redirect's collect-first still pays the treasury and never parks its cut", async () => {
+      const ctx = await loadFixture(feesFixture);
+      const { locker, weth, treasury, deployer, alice, info } = ctx;
+      const id = info.lpTokenId;
+      const treBefore = await ethers.provider.getBalance(treasury.address);
+      await locker.connect(deployer).redirectFees(id, alice.address);
+      expect((await ethers.provider.getBalance(treasury.address)) - treBefore).to.be.gt(0n);
+      expect(await locker.claimable(weth.target, treasury.address)).to.equal(0n);
+    });
+  });
+
   describe("anti-snipe max-wallet cap", () => {
-    it("enforces the 5% cap during the window and lifts it afterward", async () => {
+    it("enforces the 2% cap during the window and lifts it afterward", async () => {
       const ctx = await loadFixture(createTokenFixture);
       const { token, tokenAddr, alice } = ctx;
 
-      // A buy large enough to exceed 5% (~142M tokens) must revert while open.
+      // A buy large enough to exceed the 2% cap (~20M tokens) must revert while open.
       const bigBuy = ethers.parseEther("0.5");
       await expect(buy(ctx, alice, tokenAddr as string, bigBuy)).to.be.reverted;
 
-      // A small buy that stays under the cap (~16M) is fine.
-      await buy(ctx, alice, tokenAddr as string, ethers.parseEther("0.05"));
+      // A small buy that stays under the cap (~10M) is fine.
+      await buy(ctx, alice, tokenAddr as string, ethers.parseEther("0.03"));
       expect(await token.balanceOf(alice.address)).to.be.gt(0);
       expect(await token.balanceOf(alice.address)).to.be.lte(MAX_WALLET);
 
@@ -664,9 +739,9 @@ describe("PotatoPad v2 (direct-to-Uniswap single-sided launch)", () => {
       expect(await token.antiSnipeExempt(locker.target)).to.equal(true);
       expect(await token.antiSnipeExempt((await pad.tokens(tokenAddr)).pool)).to.equal(true);
 
-      // alice and bob each buy an under-cap chunk (~3% each), together over the 5% cap
-      await buy(ctx, alice, tokenAddr as string, ethers.parseEther("0.1"));
-      await buy(ctx, bob, tokenAddr as string, ethers.parseEther("0.1"));
+      // alice and bob each buy an under-cap chunk (~1.3% each), together over the 2% cap
+      await buy(ctx, alice, tokenAddr as string, ethers.parseEther("0.04"));
+      await buy(ctx, bob, tokenAddr as string, ethers.parseEther("0.04"));
       const aliceBal = await token.balanceOf(alice.address);
       const bobBal = await token.balanceOf(bob.address);
       expect(aliceBal).to.be.lte(MAX_WALLET);
@@ -683,12 +758,17 @@ describe("PotatoPad v2 (direct-to-Uniswap single-sided launch)", () => {
       const ctx = await loadFixture(createTokenFixture);
       const { token, tokenAddr, alice, bob } = ctx;
       await mine(ANTI_SNIPE_BLOCKS + 1);
-      await buy(ctx, alice, tokenAddr as string, ethers.parseEther("2")); // way over 5%
+      await buy(ctx, alice, tokenAddr as string, ethers.parseEther("2")); // way over 2%
       const held = await token.balanceOf(alice.address);
       expect(held).to.be.gt(MAX_WALLET);
-      // a single transfer moving > 5% to one wallet is allowed post-window
+      // a single transfer moving > 2% to one wallet is allowed post-window
       await expect(token.connect(alice).transfer(bob.address, held)).to.not.be.reverted;
       expect(await token.balanceOf(bob.address)).to.equal(held);
+    });
+
+    it("owner() returns address(0) — renounced-by-construction signal for scanners", async () => {
+      const { token } = await loadFixture(createTokenFixture);
+      expect(await token.owner()).to.equal(ethers.ZeroAddress);
     });
 
     it("setPool is one-time and pad-only", async () => {

@@ -58,6 +58,10 @@ contract PotatoToken is ERC20 {
         antiSnipeExempt[pad_] = true;
         antiSnipeExempt[positionManager_] = true;
         antiSnipeExempt[locker_] = true;
+        // Fee-burn sink: the locker sends the launched-token side of swap fees here,
+        // which must never trip the max-wallet cap and revert a permissionless
+        // collect() during the anti-snipe window.
+        antiSnipeExempt[0x000000000000000000000000000000000000dEaD] = true;
 
         _mint(pad_, supply_);
     }
@@ -70,6 +74,14 @@ contract PotatoToken is ERC20 {
         if (pool != address(0)) revert PoolAlreadySet();
         pool = pool_;
         antiSnipeExempt[pool_] = true;
+    }
+
+    /// @notice Always address(0). PotatoToken has no owner, mint, pause, or
+    ///         blacklist — it is renounced by construction (there was never an owner
+    ///         to renounce). Exposed purely so scanners and DEX tools that detect
+    ///         "renounced" via `owner() == address(0)` recognize it as such.
+    function owner() external pure returns (address) {
+        return address(0);
     }
 
     /// @dev Enforces the max-wallet cap on the recipient during the anti-snipe

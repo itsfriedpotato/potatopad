@@ -7,6 +7,13 @@ import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Recei
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {INonfungiblePositionManager, IWETH9} from "./interfaces/IUniswapV3.sol";
 
+/// @dev The launchpad exposes its current admin via `owner()`; the locker reads it
+///      to gate {redirectFees}. Renouncing the pad's owner (to address(0)) disables
+///      redirect too, since no caller can ever equal address(0).
+interface IPotatoPadOwner {
+    function owner() external view returns (address);
+}
+
 /// @title PotatoFeeLocker
 /// @notice Permanent vault for launched Uniswap V3 LP positions.
 ///
@@ -16,8 +23,9 @@ import {INonfungiblePositionManager, IWETH9} from "./interfaces/IUniswapV3.sol";
 ///
 ///         What CAN be taken out is swap fees: anyone may call {collect}, which
 ///         harvests accrued trading fees. The WETH side is split 50/50 between the
-///         token's creator and the protocol treasury; the launched-token side is
-///         burned (sent to a dead address), so token fees are deflationary.
+///         token's creator (or a redirect beneficiary — see {redirectFees}) and the
+///         protocol treasury; the launched-token side is burned (sent to a dead
+///         address), so token fees are deflationary.
 ///
 ///         Fee delivery is asymmetric on purpose:
 ///         - The TREASURY's share is auto-forwarded (pushed) on every {collect}.
@@ -59,6 +67,12 @@ contract PotatoFeeLocker is IERC721Receiver, ReentrancyGuard {
     ///         could not be auto-forwarded (brick-proof fallback).
     mapping(address => mapping(address => uint256)) public claimable;
 
+    /// @notice LP tokenId => address that receives the CREATOR half of future fees.
+    ///         address(0) means "the original creator" (the default). Only the pad
+    ///         owner can change it, via {redirectFees}; it never affects the treasury
+    ///         cut, already-accrued claimable balances, or the locked principal.
+    mapping(uint256 => address) public feeRecipient;
+
     event PositionLocked(uint256 indexed tokenId, address indexed launchedToken, address indexed creator);
     event FeesCollected(
         uint256 indexed tokenId, address indexed caller, uint256 amount0, uint256 amount1
@@ -67,11 +81,13 @@ contract PotatoFeeLocker is IERC721Receiver, ReentrancyGuard {
     event TreasuryPayFailed(address indexed asset, uint256 amount);
     event FeesClaimed(address indexed asset, address indexed beneficiary, uint256 amount);
     event TokenFeesBurned(address indexed asset, uint256 amount);
+    event FeesRedirected(uint256 indexed tokenId, address indexed to, address indexed by);
 
     error OnlyPad();
     error UnknownPosition();
     error NothingToClaim();
     error EthTransferFailed();
+    error OnlyOwner();
 
     constructor(INonfungiblePositionManager positionManager_, IWETH9 weth_, address treasury_) {
         pad = msg.sender;
@@ -93,6 +109,14 @@ contract PotatoFeeLocker is IERC721Receiver, ReentrancyGuard {
     ///         creator's claimable balance, and auto-forwards the treasury's
     ///         share. Permissionless — anyone can crank it.
     function collect(uint256 tokenId) external nonReentrant returns (uint256 amount0, uint256 amount1) {
+        (amount0, amount1) = _collect(tokenId);
+    }
+
+    /// @dev Harvest + distribute one position's fees. Internal so {redirectFees}
+    ///      can crystallize accrued fees to the CURRENT beneficiary before it
+    ///      switches — keeping the redirect strictly future-only. The public entry
+    ///      points ({collect}, {redirectFees}) hold the reentrancy guard.
+    function _collect(uint256 tokenId) internal returns (uint256 amount0, uint256 amount1) {
         LockedPosition memory pos = positions[tokenId];
         if (pos.creator == address(0)) revert UnknownPosition();
 
@@ -105,8 +129,11 @@ contract PotatoFeeLocker is IERC721Receiver, ReentrancyGuard {
             })
         );
 
-        _distribute(pos.token0, pos.creator, amount0);
-        _distribute(pos.token1, pos.creator, amount1);
+        // The creator half goes to the current beneficiary (an owner/creator
+        // override if set, else the creator). Treasury cut + burn are unaffected.
+        address beneficiary = _beneficiaryOf(tokenId, pos.creator);
+        _distribute(pos.token0, beneficiary, amount0);
+        _distribute(pos.token1, beneficiary, amount1);
 
         emit FeesCollected(tokenId, msg.sender, amount0, amount1);
     }
@@ -128,9 +155,10 @@ contract PotatoFeeLocker is IERC721Receiver, ReentrancyGuard {
         emit FeesClaimed(asset, msg.sender, amount);
     }
 
-    /// @dev Splits `amount` of `asset`: creator's half is parked as claimable,
-    ///      treasury's half is auto-forwarded (with a claimable fallback).
-    function _distribute(address asset, address creator, uint256 amount) internal {
+    /// @dev Splits `amount` of `asset`: the creator's half is parked as claimable
+    ///      for `beneficiary`, the treasury's half is auto-forwarded (with a
+    ///      claimable fallback).
+    function _distribute(address asset, address beneficiary, uint256 amount) internal {
         if (amount == 0) return;
         // Launched-token side is burned in full — neither creator nor treasury
         // receives it. Only the WETH side is split 50/50 below.
@@ -141,8 +169,39 @@ contract PotatoFeeLocker is IERC721Receiver, ReentrancyGuard {
         }
         uint256 creatorCut = (amount * CREATOR_FEE_SHARE_BPS) / BPS;
         uint256 treasuryCut = amount - creatorCut;
-        if (creatorCut != 0) claimable[asset][creator] += creatorCut;
+        if (creatorCut != 0) claimable[asset][beneficiary] += creatorCut;
         _payTreasury(asset, treasuryCut);
+    }
+
+    // ------------------------------------------------------- fee redirect --
+
+    /// @notice Manually reassign a token's FUTURE creator-fee share to `to` — a pad
+    ///         owner action, done off-chain judgement (e.g. an abandoned dev). Fees
+    ///         accrued up to this point are first collected out to the CURRENT
+    ///         beneficiary, so only FUTURE fees move; `to == address(0)` resets to
+    ///         the original creator. Never touches the treasury cut, already-accrued
+    ///         claimable balances, or the permanently-locked principal.
+    ///
+    ///         NOTE: this is a genuine owner power over the creator fee STREAM (no
+    ///         inactivity gate, no creator veto). The token, its principal, and the
+    ///         treasury cut remain untouchable; renouncing the pad owner freezes it.
+    function redirectFees(uint256 tokenId, address to) external nonReentrant {
+        if (msg.sender != IPotatoPadOwner(pad).owner()) revert OnlyOwner();
+        if (positions[tokenId].creator == address(0)) revert UnknownPosition();
+        _collect(tokenId); // crystallize accrued to the current beneficiary (future-only)
+        feeRecipient[tokenId] = to;
+        emit FeesRedirected(tokenId, to, msg.sender);
+    }
+
+    /// @notice Address currently receiving the creator half of `tokenId`'s fees
+    ///         (the override if set, else the original creator).
+    function beneficiaryOf(uint256 tokenId) external view returns (address) {
+        return _beneficiaryOf(tokenId, positions[tokenId].creator);
+    }
+
+    function _beneficiaryOf(uint256 tokenId, address creator) internal view returns (address) {
+        address r = feeRecipient[tokenId];
+        return r == address(0) ? creator : r;
     }
 
     /// @dev Pushes the treasury's cut. The transfer can NEVER revert this call:
