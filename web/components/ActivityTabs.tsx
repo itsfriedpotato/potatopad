@@ -29,21 +29,15 @@ export function ActivityTabs({
       return { text: "Uniswap V3 Pool", emoji: "🦄", tone: "pool" as const };
     if (a === creator.toLowerCase())
       return { text: "creator", emoji: "🌱", tone: "creator" as const };
-    return { text: "clean", emoji: "", tone: "clean" as const };
+    return { text: "", emoji: "", tone: "clean" as const };
   }
 
   return (
     <div className="card p-5">
-      <div className="flex items-center justify-between">
-        <h3 className="flex items-center gap-2 font-bold text-neutral-100">
-          <Users className="h-4 w-4 text-amber-500" />
-          Holders
-        </h3>
-        <span className="flex items-center gap-1.5 text-xs font-medium text-amber-500">
-          <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
-          Live
-        </span>
-      </div>
+      <h3 className="flex items-center gap-2 font-bold text-neutral-100">
+        <Users className="h-4 w-4 text-amber-500" />
+        Holders
+      </h3>
 
       {isLoading ? (
         <div className="mt-4 space-y-2">
@@ -82,12 +76,14 @@ export function ActivityTabs({
                     <span className="font-mono text-xs text-neutral-200">
                       {shortAddress(h.address)}
                     </span>
-                    <span
-                      className={`ml-2 inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-semibold ${toneCls}`}
-                    >
-                      {st.emoji && <span aria-hidden>{st.emoji}</span>}
-                      {st.text}
-                    </span>
+                    {st.text && (
+                      <span
+                        className={`ml-2 inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-semibold ${toneCls}`}
+                      >
+                        {st.emoji && <span aria-hidden>{st.emoji}</span>}
+                        {st.text}
+                      </span>
+                    )}
                   </span>
                   <span className="hidden w-24 sm:block">
                     <span className="block h-1.5 w-full overflow-hidden rounded-full bg-neutral-800">

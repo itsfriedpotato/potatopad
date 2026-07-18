@@ -40,20 +40,25 @@ function TokenAvatarImage({ imageURI }: { imageURI?: string }) {
   if (!src) return null;
 
   return (
-    // eslint-disable-next-line @next/next/no-img-element
-    <img
-      key={src}
-      src={src}
-      alt=""
-      className="absolute inset-0 h-full w-full object-cover"
-      loading="lazy"
-      decoding="async"
-      referrerPolicy="no-referrer"
-      onError={() => {
-        // Try the next gateway / candidate; when exhausted, only the tile shows.
-        setSrcIndex((i) => i + 1);
-      }}
-    />
+    <>
+      {/* Solid dark backdrop so a transparent PNG shows on black, not the warm
+          potato tile bleeding through. Removed with the img when all gateways fail. */}
+      <div className="absolute inset-0 bg-black" />
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        key={src}
+        src={src}
+        alt=""
+        className="absolute inset-0 h-full w-full object-cover"
+        loading="lazy"
+        decoding="async"
+        referrerPolicy="no-referrer"
+        onError={() => {
+          // Try the next gateway / candidate; when exhausted, only the tile shows.
+          setSrcIndex((i) => i + 1);
+        }}
+      />
+    </>
   );
 }
 
