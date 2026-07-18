@@ -115,6 +115,14 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Disabled by default: the create flow no longer exposes AI art generation, so
+  // this unauthenticated image-pinner stays OFF (an attacker could otherwise burn
+  // the Gemini/Pinata budget and pin arbitrary imagery). Set ENABLE_ART_GEN=1 to
+  // re-enable, and gate it behind a wallet signature before doing so.
+  if (process.env.ENABLE_ART_GEN !== "1") {
+    return NextResponse.json({ error: "not available" }, { status: 404 });
+  }
+
   const ip =
     req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
     req.headers.get("x-real-ip") ||

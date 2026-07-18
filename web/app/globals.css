@@ -4,7 +4,7 @@
 
 @layer base {
   body {
-    @apply bg-neutral-950 text-neutral-200 antialiased selection:bg-amber-500/30;
+    @apply bg-[#050505] text-neutral-200 antialiased selection:bg-amber-500/30;
   }
 }
 
@@ -54,4 +54,11 @@
 
 .animate-marquee {
   animation: marquee 40s linear infinite;
+}
+
+/* Respect reduced-motion: freeze the ticker for vestibular-sensitive users. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-marquee {
+    animation: none;
+  }
 }

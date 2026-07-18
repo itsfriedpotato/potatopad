@@ -185,6 +185,20 @@ export function padDeployments(chainId: number): PadDeployment[] {
   return out;
 }
 
+/**
+ * Tokens hidden from the browse LISTS (Discover feed + ticker strip) — e.g. a
+ * PotatoPad launch that duplicates a curated Ancient runner, so it should surface
+ * only under Ancients. Hidden from lists ONLY: the token's own page and in-app
+ * trade still resolve by direct link. Compared lowercase.
+ */
+const HIDDEN_TOKENS = new Set<string>([
+  "0x6b1855cca09b826dd9b2b6025ef4f7447de549a5", // duplicates an Ancient entry
+]);
+
+export function isHiddenToken(address: string): boolean {
+  return HIDDEN_TOKENS.has(address.toLowerCase());
+}
+
 export const SUPPORTED_CHAINS = CHAINS.map((c) => c.chain);
 
 export function chainName(chainId: number): string {

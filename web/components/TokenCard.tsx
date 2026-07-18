@@ -44,26 +44,27 @@ export function TokenCard({ row }: { row: TokenRow }) {
     return (
       <Link
         href={`/token/${row.address}`}
-        className="group flex flex-col overflow-hidden rounded-xl border border-neutral-800/50 bg-neutral-900 transition-colors hover:border-amber-500/30"
+        className="group flex flex-col overflow-hidden rounded-xl border border-neutral-800/50 bg-neutral-900 shadow-[0_6px_16px_-4px_rgba(0,0,0,0.5),inset_0_1px_0_rgba(255,255,255,0.02)] transition-all duration-200 hover:-translate-y-0.5 hover:border-[#CCFF00]/30 hover:shadow-[0_14px_28px_-8px_rgba(0,0,0,0.6),0_0_18px_rgba(204,255,0,0.06),inset_0_1px_0_rgba(255,255,255,0.03)]"
       >
         <div className="relative">
           <TokenAvatar address={row.address} symbol={row.symbol} imageURI={row.imageURI} fill />
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-14 bg-gradient-to-t from-neutral-900 via-neutral-900/40 to-transparent" />
           <span className="absolute right-2 top-2 rounded bg-black/60 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-400/90 backdrop-blur-md">
             Ancient
           </span>
         </div>
         <div className="flex flex-1 flex-col justify-between gap-2 p-3">
-          <div className="flex items-baseline justify-between gap-1.5">
+          <div className="space-y-0.5">
             <h3 className="truncate text-sm font-bold text-neutral-100">{row.name || row.symbol}</h3>
-            <span className="shrink-0 font-mono text-[10px] text-neutral-500">${row.symbol}</span>
+            <div className="font-mono text-[11px] text-[#CCFF00]/70">${row.symbol}</div>
           </div>
-          <div className="flex items-baseline justify-between font-mono text-xs">
-            <span className="font-bold text-amber-400">
+          <div className="space-y-1 font-mono text-xs">
+            <p className="font-bold text-neutral-100">
               {mc} <span className="text-[9px] font-normal text-neutral-500">MC</span>
-            </span>
-            <span className="text-neutral-400">
+            </p>
+            <p className="text-neutral-400">
               {vol} <span className="text-[9px] font-normal text-neutral-600">VOL</span>
-            </span>
+            </p>
           </div>
         </div>
       </Link>
@@ -74,10 +75,11 @@ export function TokenCard({ row }: { row: TokenRow }) {
   return (
     <Link
       href={`/token/${row.address}`}
-      className="group flex flex-col overflow-hidden rounded-xl border border-neutral-800/50 bg-neutral-900 transition-colors hover:border-amber-500/40"
+      className="group flex flex-col overflow-hidden rounded-xl border border-neutral-800/50 bg-neutral-900 shadow-[0_6px_16px_-4px_rgba(0,0,0,0.5),inset_0_1px_0_rgba(255,255,255,0.02)] transition-all duration-200 hover:-translate-y-0.5 hover:border-[#CCFF00]/30 hover:shadow-[0_14px_28px_-8px_rgba(0,0,0,0.6),0_0_18px_rgba(204,255,0,0.06),inset_0_1px_0_rgba(255,255,255,0.03)]"
     >
       <div className="relative">
         <TokenAvatar address={row.address} symbol={row.symbol} imageURI={row.imageURI} fill />
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-14 bg-gradient-to-t from-neutral-900 via-neutral-900/40 to-transparent" />
         {row.createdAt !== undefined && row.createdAt > 0 && (
           <span className="absolute right-2 top-2 rounded bg-black/60 px-1.5 py-0.5 font-mono text-[9px] text-neutral-300 backdrop-blur-md">
             {timeAgo(row.createdAt)}
@@ -85,17 +87,17 @@ export function TokenCard({ row }: { row: TokenRow }) {
         )}
       </div>
       <div className="flex flex-1 flex-col justify-between gap-2.5 p-3">
-        <div>
-          <div className="flex items-baseline justify-between gap-1.5">
-            <h3 className="truncate text-sm font-bold text-neutral-100">{row.name}</h3>
-            <span className="shrink-0 font-mono text-[10px] text-neutral-500">${row.symbol}</span>
-          </div>
-          <p className="mt-1.5 font-mono text-xs font-bold text-neutral-200">
+        <div className="space-y-0.5">
+          <h3 className="truncate text-sm font-bold text-neutral-100">{row.name}</h3>
+          <div className="font-mono text-[11px] text-[#CCFF00]/70">${row.symbol}</div>
+        </div>
+        <div className="space-y-1">
+          <p className="font-mono text-sm font-bold text-neutral-100">
             {mc} <span className="text-[10px] font-normal text-neutral-500">MC</span>
           </p>
-        </div>
-        <div className="truncate font-mono text-[9px] text-neutral-600">
-          {shortAddress(row.address)}
+          <div className="truncate font-mono text-[9px] text-neutral-600">
+            {shortAddress(row.address)}
+          </div>
         </div>
       </div>
     </Link>

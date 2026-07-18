@@ -81,8 +81,10 @@ export async function POST(req: NextRequest) {
   if (file.size > MAX_BYTES) {
     return NextResponse.json({ error: "file too large (max 10 MB)" }, { status: 413 });
   }
-  if (file.type && !ALLOWED_TYPES.has(file.type)) {
-    return NextResponse.json({ error: `unsupported image type: ${file.type}` }, { status: 415 });
+  // Reject a MISSING type too — an empty Content-Type would otherwise slip any
+  // blob (HTML/JS/SVG) past the allowlist and pin it to IPFS on our Pinata quota.
+  if (!file.type || !ALLOWED_TYPES.has(file.type)) {
+    return NextResponse.json({ error: "unsupported or missing image type" }, { status: 415 });
   }
 
   const pinataForm = new FormData();
@@ -100,8 +102,9 @@ export async function POST(req: NextRequest) {
   }
 
   if (!res.ok) {
-    const text = await res.text();
-    return NextResponse.json({ error: `pinata error: ${text.slice(0, 200)}` }, { status: 502 });
+    // Log the upstream detail server-side; don't leak provider/plan messages.
+    console.error("pinata upload failed:", res.status, (await res.text()).slice(0, 300));
+    return NextResponse.json({ error: "image pinning failed" }, { status: 502 });
   }
 
   const data = (await res.json()) as { IpfsHash?: string };

@@ -35,6 +35,7 @@ export function Header() {
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-600" />
           <input
             type="search"
+            aria-label="Search coins by name or symbol"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search coins by name or symbol…"
@@ -108,7 +109,7 @@ export function Header() {
                     <button
                       type="button"
                       onClick={openAccountModal}
-                      className="inline-flex items-center gap-2 rounded-lg bg-amber-500 px-3 py-2 font-mono text-xs font-semibold text-neutral-900 transition-colors hover:bg-amber-400"
+                      className="inline-flex items-center gap-2 rounded-lg border border-[#CCFF00]/40 bg-[#CCFF00]/10 px-3 py-2 font-mono text-xs font-semibold text-[#CCFF00] shadow-[0_0_12px_rgba(204,255,0,0.15)] transition-colors hover:bg-[#CCFF00]/15"
                     >
                       <Wallet className="h-3.5 w-3.5" />
                       {account.displayName}

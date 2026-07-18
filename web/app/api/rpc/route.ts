@@ -63,17 +63,22 @@ const hits = new Map<string, number[]>();
 const MAX_GLOBAL_PER_WINDOW = Number(process.env.RPC_MAX_GLOBAL_PER_WINDOW) || 5_000;
 let globalHits: number[] = [];
 
-function globalRateLimited(): boolean {
+// One request can't smuggle thousands of expensive reads: cap the batch size and
+// the body, and charge the limiter PER JSON-RPC CALL below (not per HTTP request).
+const MAX_BATCH = 100;
+const MAX_BODY_BYTES = 512 * 1024;
+
+function globalRateLimited(cost: number): boolean {
   const now = Date.now();
   globalHits = globalHits.filter((t) => now - t < WINDOW_MS);
-  globalHits.push(now);
+  for (let i = 0; i < cost; i++) globalHits.push(now);
   return globalHits.length > MAX_GLOBAL_PER_WINDOW;
 }
 
-function rateLimited(ip: string): boolean {
+function rateLimited(ip: string, cost: number): boolean {
   const now = Date.now();
   const recent = (hits.get(ip) ?? []).filter((t) => now - t < WINDOW_MS);
-  recent.push(now);
+  for (let i = 0; i < cost; i++) recent.push(now);
   hits.set(ip, recent);
   if (hits.size > 5000) {
     for (const [k, v] of hits) {
@@ -119,9 +124,10 @@ export async function POST(req: NextRequest) {
     req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
     req.headers.get("x-real-ip") ||
     "unknown";
-  // Global backstop first (unspoofable), then the soft per-IP cap.
-  if (globalRateLimited() || rateLimited(ip)) {
-    return NextResponse.json({ error: "rate limited" }, { status: 429 });
+
+  // Reject oversized bodies before reading them — a huge batch is the drain vector.
+  if (Number(req.headers.get("content-length") || 0) > MAX_BODY_BYTES) {
+    return NextResponse.json({ error: "request too large" }, { status: 413 });
   }
 
   let body: unknown;
@@ -132,13 +138,20 @@ export async function POST(req: NextRequest) {
   }
 
   const calls = Array.isArray(body) ? body : [body];
+  if (calls.length > MAX_BATCH) {
+    return NextResponse.json({ error: `batch too large (max ${MAX_BATCH})` }, { status: 413 });
+  }
+
+  // Charge PER JSON-RPC call, so a batch can't multiply cost past the cap.
+  const cost = calls.length || 1;
+  if (globalRateLimited(cost) || rateLimited(ip, cost)) {
+    return NextResponse.json({ error: "rate limited" }, { status: 429 });
+  }
+
   for (const c of calls) {
     const method = (c as { method?: unknown })?.method;
     if (typeof method === "string" && BLOCKED_METHODS.has(method)) {
-      return NextResponse.json(
-        { error: `method not allowed: ${method}` },
-        { status: 403 },
-      );
+      return NextResponse.json({ error: `method not allowed: ${method}` }, { status: 403 });
     }
   }
 

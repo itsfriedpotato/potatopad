@@ -9,7 +9,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo } from "react";
 import type { Address } from "viem";
-import { padDeployments } from "@/lib/config";
+import { isHiddenToken, padDeployments } from "@/lib/config";
 import { usePad } from "@/lib/hooks";
 
 // ---------------------------------------------------------------------------
@@ -168,14 +168,20 @@ export function useLaunchActivity() {
   }, [cacheKey, queryClient, queryKey]);
 
   const data = query.data ?? EMPTY_LAUNCH;
+  // creationByToken keeps the FULL set so a hidden token's own page/trade still
+  // resolves by direct link; only the browse LISTS below drop hidden tokens.
   const creationByToken = useMemo(() => {
     const map = new Map<string, CreationEvent>();
     for (const c of data.creations) map.set(c.token.toLowerCase(), c);
     return map;
   }, [data.creations]);
+  const creations = useMemo(
+    () => data.creations.filter((c) => !isHiddenToken(c.token)),
+    [data.creations],
+  );
 
   return {
-    creations: data.creations,
+    creations,
     creationByToken,
     unavailable: data.unavailable,
     isLoading: query.isLoading,

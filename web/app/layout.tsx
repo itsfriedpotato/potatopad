@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
 import Script from "next/script";
 import "./globals.css";
@@ -18,6 +18,10 @@ export const metadata: Metadata = {
     "Single-sided token launchpad: plant a coin and it launches straight into a locked Uniswap V3 position, live and tradable from the first block. Open-source MVP, demo only.",
 };
 
+export const viewport: Viewport = {
+  themeColor: "#0a0a0a",
+};
+
 export default function RootLayout({ children }: { children: ReactNode }) {
   // GA4 id is read from env (kept out of the public source) and inlined into the
   // client at build. Prod-only so localhost / dev traffic never hits analytics.
@@ -25,6 +29,12 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
       <body>
+        {/* Ambient screen-glow: a single faint, neutral top light for terminal
+            depth. No warm tint — brand color is reserved for accents. */}
+        <div
+          aria-hidden
+          className="pointer-events-none fixed inset-0 -z-10 bg-[radial-gradient(ellipse_70%_45%_at_50%_-8%,rgba(255,255,255,0.03),transparent_70%)]"
+        />
         {process.env.NODE_ENV === "production" && gaId && (
           <>
             <Script

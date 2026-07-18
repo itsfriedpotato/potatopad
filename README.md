@@ -32,7 +32,7 @@ This README is written to be vibecoded: if you can run a few terminal commands a
 
 A launch is a single atomic transaction — no curve, no graduation, no waiting.
 
-1. **Launch.** Anyone calls `createToken(name, symbol, meta, salt)`. It deploys a fixed-supply ERC-20 (1,000,000,000 tokens) with no owner, no mint, no pause, no transfer hooks — nothing a rug could hide in. `meta` carries the token's image + socials; it's emitted in the `TokenCreated` event and indexed off-chain, so nothing extra is stored on-chain.
+1. **Launch.** Anyone calls `createToken(name, symbol, meta, salt)`. It deploys a fixed-supply ERC-20 (1,000,000,000 tokens) with no owner, no mint, no pause, no blacklist — nothing a rug could hide in (the only transfer-time logic is a time-boxed anti-snipe max-wallet cap that becomes a complete no-op after the launch window). `meta` carries the token's image + socials; it's emitted in the `TokenCreated` event and indexed off-chain, so nothing extra is stored on-chain.
 
 2. **Single-sided liquidity.** The pad creates and initializes the token's Uniswap V3 pool (the 1% fee tier) at the open price, then mints the **entire supply as single-sided liquidity — token only, zero ETH** — across a fixed price range: it opens around a **3 ETH fully-diluted valuation** and the range tops out around **525 ETH FDV**. That position's NFT is minted straight into the immutable `PotatoFeeLocker`, which has no transfer and no withdraw path, so the principal is **locked forever (unruggable)**.
 
@@ -42,7 +42,7 @@ A launch is a single atomic transaction — no curve, no graduation, no waiting.
 
 **Why the token address is random.** The token is deployed with `CREATE2` off a caller-supplied **random** salt, so the address is unpredictable until the transaction is public. That stops a griefer from pre-creating and mis-initializing the token's Uniswap pool to break the single-sided mint. If a candidate address is somehow already taken, the pad walks to the next one and self-heals — no launch can be permanently bricked.
 
-**Anti-snipe.** For a short window after launch (a fixed number of blocks) no non-exempt wallet may end a transfer holding more than 5% of supply, throttling bots from vacuuming the opening liquidity. After the window it becomes a complete no-op, so normal trading is never affected.
+**Anti-snipe.** For a short window after launch (a fixed number of blocks) no non-exempt wallet may end a transfer holding more than 2% of supply, throttling bots from vacuuming the opening liquidity. After the window it becomes a complete no-op, so normal trading is never affected.
 
 **Who funds the liquidity?** Nobody up front — the creator only pays gas. The whole supply *is* the liquidity, seeded single-sided, and buyers' WETH is what walks the price up. That's the entire trick behind a "zero-capital" launch.
 
@@ -56,7 +56,7 @@ potatopad/
     contracts/PotatoToken.sol         minimal fixed-supply ERC-20 (+ time-boxed anti-snipe)
     contracts/libraries/TickMath.sol  Uniswap tick math, ported to 0.8.24
     contracts/interfaces/             minimal Uniswap V3 interfaces
-    test/potatopad.test.ts            23 tests vs real Uniswap V3 bytecode
+    test/potatopad.test.ts            32 tests vs real Uniswap V3 bytecode
     scripts/demo.ts                   narrated launch showcase
     scripts/deploy.ts                 local / Base Sepolia / Robinhood deployment
     scripts/seed-demo.ts              fill a local chain for the frontend
@@ -96,7 +96,7 @@ This gets you the contracts, the demo, and the website running against a local c
 ```bash
 cd contracts
 npm install
-npx hardhat test                    # 23 tests, all green
+npx hardhat test                    # 32 tests, all green
 npx hardhat run scripts/demo.ts     # the whole story, narrated in your terminal
 ```
 
@@ -162,7 +162,7 @@ BASE_SEPOLIA_RPC_URL=https://sepolia.base.org
 # TREASURY=0x...            # where fees go (defaults to the address below)
 # START_FDV_ETH=3           # launch/open fully-diluted valuation, in ETH
 # TOP_FDV_ETH=530           # range-ceiling FDV, in ETH
-# ANTI_SNIPE_BLOCKS=1200    # length of the 5% max-wallet window, in blocks
+# ANTI_SNIPE_BLOCKS=1200    # length of the 2% max-wallet window, in blocks
 ```
 
 Deploy:
@@ -171,7 +171,7 @@ Deploy:
 npx hardhat run scripts/deploy.ts --network baseSepolia
 ```
 
-It deploys the pad and its `PotatoFeeLocker`, prints both addresses, and writes `deployments.baseSepolia.json`. The `PotatoPad` constructor takes `(treasury, startFdvWei, topFdvWei, antiSnipeBlocks, factory, positionManager, weth)`; the deploy script fills in the Uniswap addresses per network and the FDV/anti-snipe values from the env above.
+It deploys the pad and its `PotatoFeeLocker`, prints both addresses, and writes `deployments.baseSepolia.json`. The `PotatoPad` constructor takes `(treasury, startFdvWei, topFdvWei, antiSnipeBlocks, factory, positionManager, weth, owner, initialBannedWords)`; the deploy script fills in the Uniswap addresses per network, the FDV/anti-snipe values from the env above, the `owner` (blacklist admin + fee-redirect authority — defaults to the treasury), and the seed blacklist. Note `owner == address(0)` reverts (`InvalidConfig`), so both trailing args are mandatory.
 
 To target a different chain, follow the end-to-end guide in **[docs/ADDING_A_CHAIN.md](docs/ADDING_A_CHAIN.md)**: it's three small edits (a `hardhat.config.ts` network entry, a `CANONICAL` entry in `scripts/deploy.ts`, and one entry in the frontend's `CHAINS` config). **Robinhood Chain mainnet (chainId 4663)** is already wired this way, and is where the live demo runs.
 
@@ -208,9 +208,9 @@ Notes:
 | Treasury | `0xd3358b1F39A6a71911c6e33717D185F99d43e80d` | constructor arg (`scripts/deploy.ts`) |
 | Total supply | 1,000,000,000 | `PotatoPad.sol` |
 | Launch (open) FDV | ~3 ETH | constructor arg (`START_FDV_ETH`) |
-| Range-ceiling FDV | ~525 ETH | constructor arg (`TOP_FDV_ETH`) |
+| Range-ceiling FDV | ~530 ETH | constructor arg (`TOP_FDV_ETH`) |
 | Liquidity | entire supply, single-sided (token only) | `PotatoPad.sol` |
-| Anti-snipe | 5% max wallet for `ANTI_SNIPE_BLOCKS` blocks | `PotatoToken.sol` |
+| Anti-snipe | 2% max wallet for `ANTI_SNIPE_BLOCKS` blocks | `PotatoToken.sol` |
 
 The launch supply is seeded single-sided across a tick-aligned range, so the aligned open/top FDVs land within a percent or two of the `START_FDV_ETH` / `TOP_FDV_ETH` targets (the pad exposes the exact values as `actualStartFdv()` / `actualTopFdv()`). Because the token holds no ETH at launch, the opening price is deterministic and there is no curve to front-run.
 
@@ -221,7 +221,8 @@ These are intentional scope cuts for an MVP, documented so you know what to hard
 - **Read the price from the pool.** There is no curve; a token's price and market cap come from its Uniswap V3 pool, not the pad.
 - **Feed staleness.** The Discover feed is cached ~45s server-side (`/api/tokens`), so a brand-new launch appears within that window rather than instantly.
 - **No full indexer.** The frontend reads chain state over RPC plus the cached feed route. That is great for a demo and for self-hosting with near-zero backend, but at scale you would add an indexer (for example Ponder) over the `TokenCreated` event and serve token pages from it too.
-- **Anti-snipe is blunt.** The 5% max-wallet window throttles the most obvious sniping; it is not full MEV protection.
+- **Anti-snipe is blunt.** The 2% max-wallet window throttles the most obvious sniping; it is not full MEV protection.
+- **Owner can redirect creator fees.** The pad owner can call `redirectFees(tokenId, to)` to reassign a token's FUTURE creator-fee share to any address — a manual, off-chain-judgement power (e.g. an abandoned dev). It cannot touch the locked principal, the treasury cut, or already-accrued balances, and renouncing the owner to `address(0)` freezes it.
 - **Griefing is bounded, not eliminated.** A determined attacker can force a specific launch attempt to revert (the creator retries with a fresh random salt and lands on a clean address), but cannot permanently brick the launchpad.
 
 ## Charts

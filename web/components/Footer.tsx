@@ -22,6 +22,13 @@ export function Footer() {
             </Link>
             {" · "}
             <Link
+              href="/privacy"
+              className="underline decoration-neutral-700 underline-offset-2 transition-colors hover:text-neutral-200"
+            >
+              Privacy
+            </Link>
+            {" · "}
+            <Link
               href="/terms"
               className="underline decoration-neutral-700 underline-offset-2 transition-colors hover:text-neutral-200"
             >

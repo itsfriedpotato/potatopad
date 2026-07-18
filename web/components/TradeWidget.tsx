@@ -88,7 +88,10 @@ export function TradeWidget({
   });
 
   const exceedsBalance =
-    mode === "sell" && hasAmount && tokenBalance !== undefined && amount > tokenBalance;
+    hasAmount &&
+    (mode === "sell"
+      ? tokenBalance !== undefined && amount > tokenBalance
+      : ethBalance !== undefined && amount > ethBalance.value);
 
   // Accurate quote from QuoterV2 (accounts for the single-sided pool's impact).
   const { data: quote, isFetching: quoting } = useReadContract({
@@ -100,7 +103,7 @@ export function TradeWidget({
         tokenIn: mode === "buy" ? weth : token,
         tokenOut: mode === "buy" ? token : weth,
         amountIn: amount ?? 0n,
-        fee: POOL_FEE_TIER,
+        fee: feeTier,
         sqrtPriceLimitX96: 0n,
       },
     ],
@@ -160,7 +163,7 @@ export function TradeWidget({
   }
 
   function onBuy() {
-    if (amount === undefined || !user || minOut === 0n || !router) return;
+    if (amount === undefined || !user || minOut === 0n || !router || exceedsBalance) return;
     const swapData = encodeFunctionData({
       abi: swapRouter02Abi,
       functionName: "exactInputSingle",
@@ -399,7 +402,7 @@ export function TradeWidget({
           <button
             type="button"
             className="btn-primary mt-4 w-full"
-            disabled={!hasAmount || quoting || minOut === 0n || buyTx.busy}
+            disabled={!hasAmount || quoting || minOut === 0n || exceedsBalance || buyTx.busy}
             onClick={onBuy}
           >
             {buyTx.isPending

@@ -44,6 +44,29 @@ const CACHE_HEADERS = {
   "Cache-Control": "public, s-maxage=30, stale-while-revalidate=60",
 };
 
+// Rate limit the SCAN path only (cache hits are free): an attacker looping
+// arbitrary token addresses would otherwise force an unbounded full-history
+// eth_getLogs scan per address against the shared RPC key.
+const RL_WINDOW_MS = 60_000;
+const RL_MAX_PER_IP = 30;
+const RL_MAX_GLOBAL = Number(process.env.HOLDERS_MAX_GLOBAL_PER_WINDOW) || 120;
+const ipHits = new Map<string, number[]>();
+let globalHits: number[] = [];
+
+function scanRateLimited(ip: string): boolean {
+  const now = Date.now();
+  globalHits = globalHits.filter((t) => now - t < RL_WINDOW_MS);
+  globalHits.push(now);
+  if (globalHits.length > RL_MAX_GLOBAL) return true; // unspoofable global ceiling
+  const recent = (ipHits.get(ip) ?? []).filter((t) => now - t < RL_WINDOW_MS);
+  recent.push(now);
+  ipHits.set(ip, recent);
+  if (ipHits.size > 5000) {
+    for (const [k, v] of ipHits) if (v.every((t) => now - t >= RL_WINDOW_MS)) ipHits.delete(k);
+  }
+  return recent.length > RL_MAX_PER_IP;
+}
+
 const client = createPublicClient({
   chain: robinhoodChain,
   transport: http(process.env.ROBINHOOD_RPC_URL || "https://rpc.mainnet.chain.robinhood.com"),
@@ -126,6 +149,17 @@ export async function GET(req: Request) {
   const hit = cache.get(key);
   if (hit && hit.expiresAt > now) {
     return NextResponse.json(hit.payload, { headers: CACHE_HEADERS });
+  }
+
+  // Cache miss → a full-history scan. Gate it (arbitrary addresses can't force
+  // unbounded scans). Serve stale on limit if we have it.
+  const ip =
+    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    req.headers.get("x-real-ip") ||
+    "unknown";
+  if (scanRateLimited(ip)) {
+    if (hit) return NextResponse.json(hit.payload, { headers: CACHE_HEADERS });
+    return NextResponse.json({ error: "rate limited" }, { status: 429 });
   }
 
   try {

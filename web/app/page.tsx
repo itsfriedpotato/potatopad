@@ -1,6 +1,6 @@
 "use client";
 
-import { Hourglass, Sprout } from "lucide-react";
+import { Hourglass, Search, Sprout } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useReadContracts } from "wagmi";
@@ -48,7 +48,7 @@ function CardSkeleton() {
 
 export default function DiscoverPage() {
   const { weth, chainId, isDeployed } = usePad();
-  const { query } = useSearch();
+  const { query, setQuery } = useSearch();
   const [tab, setTab] = useState<TabId>("growing");
   const [sort, setSort] = useState<SortId>("recent");
   const isAncientTab = tab === "ancient";
@@ -212,6 +212,9 @@ export default function DiscoverPage() {
                     sort === s.id ? "bg-neutral-800 text-white" : "text-neutral-500 hover:text-neutral-300"
                   }`}
                 >
+                  {s.id === "recent" && (
+                    <span className="mr-1 inline-block h-1 w-1 rounded-full bg-[#CCFF00] align-middle shadow-[0_0_6px_#CCFF00] animate-pulse" />
+                  )}
                   {s.label}
                 </button>
               ))}
@@ -220,10 +223,25 @@ export default function DiscoverPage() {
         </div>
       </div>
 
+      {/* Mobile search — the header search bar is desktop-only (md:block). */}
+      <div className="relative md:hidden">
+        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-600" />
+        <input
+          type="search"
+          aria-label="Search coins by name or symbol"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search coins…"
+          className="w-full rounded-xl border border-neutral-800 bg-neutral-950 py-2.5 pl-9 pr-3 text-sm text-neutral-200 placeholder-neutral-600 outline-none focus:border-amber-500/60"
+        />
+      </div>
+
       {/* Container panel: amber accent for Growing, stone-gray for Ancients */}
       <div
-        className={`rounded-2xl border bg-neutral-950 p-4 sm:p-5 ${
-          isAncientTab ? "border-neutral-700/50" : "border-amber-500/20"
+        className={`rounded-2xl border bg-neutral-950 p-5 sm:p-6 ${
+          isAncientTab
+            ? "border-neutral-700/40 shadow-[0_0_60px_-30px_rgba(255,255,255,0.08),inset_0_1px_0_rgba(255,255,255,0.03)]"
+            : "border-amber-500/25 shadow-[0_0_70px_-28px_rgba(245,158,11,0.35),inset_0_1px_0_rgba(255,255,255,0.04)]"
         }`}
       >
         {loading ? (
