@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Address } from "viem";
 import { useAccount, useReadContract } from "wagmi";
 import { potatoFeeLockerAbi, potatoPadAbi } from "@/lib/abi";
-import { ZERO_ADDRESS } from "@/lib/config";
+import { PAD_ADDRESSES, ZERO_ADDRESS } from "@/lib/config";
 import { usePad, useTx } from "@/lib/hooks";
 import { formatEth, formatTokens } from "@/lib/format";
 import { useAccruedFees } from "@/lib/pool";
@@ -381,6 +381,9 @@ export function HarvestCard({
   // fees sit uncollected in the position.
   const creatorWeth = claimableWeth + (accrued.wethAmount ?? 0n) / 2n;
   const creatorToken = claimableToken + (accrued.tokenAmount ?? 0n) / 2n;
+  // The current pad burns the launched-token side of fees, so its creators realize
+  // WETH only. Legacy-pad tokens still split the token side — keep the old copy there.
+  const isBurnPad = pad.toLowerCase() === (PAD_ADDRESSES[chainId] ?? ZERO_ADDRESS).toLowerCase();
 
   return (
     <div className="card p-5">
@@ -389,7 +392,9 @@ export function HarvestCard({
         Creator fees
       </h3>
       <p className="mt-1 text-xs text-neutral-500">
-        Your 50% of swap fees. Principal is locked forever and unruggable.
+        {isBurnPad
+          ? "Your 50% of WETH swap fees. Principal is locked forever and unruggable."
+          : "Your 50% of swap fees. Principal is locked forever and unruggable."}
       </p>
 
       <div className="mt-4 rounded-lg border border-neutral-800 bg-neutral-950 p-3">
@@ -398,7 +403,9 @@ export function HarvestCard({
             <p className="text-xs text-neutral-500">Claimable (your 50%)</p>
             <p className="mt-0.5 font-mono text-sm font-semibold text-neutral-100">
               {claimablesKnown
-                ? `${formatEth(creatorWeth)} WETH + ${formatTokens(creatorToken)} ${symbol}`
+                ? isBurnPad
+                  ? `${formatEth(creatorWeth)} WETH`
+                  : `${formatEth(creatorWeth)} WETH + ${formatTokens(creatorToken)} ${symbol}`
                 : "…"}
             </p>
           </div>
@@ -414,8 +421,9 @@ export function HarvestCard({
         </div>
 
         <p className="mt-2.5 text-[11px] text-neutral-600">
-          Fees accrue as people trade (WETH and {symbol}). One click collects them into
-          the locker and claims your share; the treasury auto-takes its 50%.
+          {isBurnPad
+            ? `Fees accrue as people trade. Collecting splits the WETH 50/50 with the treasury; the ${symbol} side is burned 🔥.`
+            : `Fees accrue as people trade (WETH and ${symbol}). One click collects them into the locker and claims your share; the treasury auto-takes its 50%.`}
         </p>
         {isConnected && !isCreator && (
           <p className="mt-1 text-[11px] text-neutral-600">

@@ -64,11 +64,11 @@ export default function CreatePage() {
     const s = new Set<string>([
       "doge", "pepe", "shib", "bonk", "wif", "trump", "eth", "weth", "usdc", "usdt", "usdg",
     ]);
+    // Block EVERY curated ancient (matches the on-chain seed on the new pad, so
+    // the form never lets through a name that would revert Banned on submit).
     for (const t of ancientTokens) {
-      if (t.fdvUsd >= 1_000_000) {
-        if (t.symbol) s.add(t.symbol.trim().toLowerCase());
-        if (t.name) s.add(t.name.trim().toLowerCase());
-      }
+      if (t.symbol) s.add(t.symbol.trim().toLowerCase());
+      if (t.name) s.add(t.name.trim().toLowerCase());
     }
     return s;
   }, [ancientTokens]);

@@ -78,8 +78,12 @@ async function scan(): Promise<FeedPayload> {
   // bounded concurrency.
   const chunks: { pad: Address; from: bigint; to: bigint }[] = [];
   for (const p of pads) {
-    for (let s = p.startBlock; s <= latest; s += LOG_CHUNK + 1n) {
-      const e = s + LOG_CHUNK <= latest ? s + LOG_CHUNK : latest;
+    // Legacy pads carry an endBlock (the repoint block): index only up to it so a
+    // superseded, blacklist-less pad keeps showing its EXISTING tokens but not any
+    // post-repoint copycat launched on it. The primary pad has no endBlock (latest).
+    const upTo = p.endBlock !== undefined && p.endBlock < latest ? p.endBlock : latest;
+    for (let s = p.startBlock; s <= upTo; s += LOG_CHUNK + 1n) {
+      const e = s + LOG_CHUNK <= upTo ? s + LOG_CHUNK : upTo;
       chunks.push({ pad: p.address, from: s, to: e });
     }
   }

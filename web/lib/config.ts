@@ -29,6 +29,10 @@ function envAddress(value: string | undefined): Address {
 export interface PadDeployment {
   address: Address;
   startBlock: bigint;
+  /** Optional last block to index. Legacy pads are capped at the repoint block so
+   *  their EXISTING tokens still render, but post-repoint launches on a superseded
+   *  (blacklist-less) pad don't surface. Omit = scan to latest. */
+  endBlock?: bigint;
 }
 
 /**
@@ -75,10 +79,16 @@ export const CHAINS: ChainConfig[] = [
     // Only Robinhood is wired for in-app trading (router + quoter present).
     swapRouter: "0xcaf681a66d020601342297493863e78c959e5cb2",
     quoter: "0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7",
-    padStartBlock: 11_555_000n, // deploy block of the CREATE2 pad 0x12A0…D91F
+    padStartBlock: 12_757_281n, // deploy block of the burn+blacklist pad 0x6722…63E8
     legacyPads: [
-      // v2 pad (pre-CREATE2 fix). Still holds CHIP + anything launched on it.
-      { address: "0xc12723c251dABcBe10c4F44060A6AE6b5E96a79d", startBlock: 11_481_181n },
+      // Superseded pads, CAPPED at the new pad's deploy block: their existing
+      // tokens still render, but post-repoint launches on these blacklist-less
+      // pads do NOT surface (closes the copycat side-door). No token is lost —
+      // every pre-repoint launch is below the cap.
+      // v3 pad 0x12A0…D91F — held all launches before the burn+blacklist upgrade.
+      { address: "0x12A075A946c790F05a23d2DcEa70B207DB23D91F", startBlock: 11_555_000n, endBlock: 12_757_281n },
+      // v2 pad (pre-CREATE2 fix) — still holds CHIP + anything launched on it.
+      { address: "0xc12723c251dABcBe10c4F44060A6AE6b5E96a79d", startBlock: 11_481_181n, endBlock: 12_757_281n },
     ],
     uniswapSlug: "robinhood",
     geckoTerminalNetwork: "robinhood",
