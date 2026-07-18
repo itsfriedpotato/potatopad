@@ -37,9 +37,14 @@ export default function DiscoverPage() {
   const isAncientTab = tab === "ancient";
 
   // PotatoPad launches — span ALL pads (primary + legacy).
-  const { creations, isLoading: launchLoading } = useLaunchActivity();
+  const { creations, unavailable: launchUnavailable, isLoading: launchLoading } =
+    useLaunchActivity();
   // Pre-existing Robinhood "ancient" runners (Noxa etc.), served by /api/ancient.
-  const { tokens: ancientTokens, isLoading: ancientLoading } = useAncientTokens();
+  const {
+    tokens: ancientTokens,
+    unavailable: ancientUnavailable,
+    isLoading: ancientLoading,
+  } = useAncientTokens();
 
   // Price each PotatoPad token from its pool's slot0, index-aligned to `creations`.
   const poolContracts = useMemo(
@@ -138,9 +143,11 @@ export default function DiscoverPage() {
     return <NotDeployed chainId={chainId} />;
   }
 
+  // Treat a soft-degraded scan (unavailable) as "still loading", not "empty", so a
+  // transient RPC / cold-cache blip never flashes the "nothing planted" empty state.
   const loading = isAncientTab
-    ? ancientLoading && ancientTokens.length === 0
-    : launchLoading && creations.length === 0;
+    ? (ancientLoading || ancientUnavailable) && ancientTokens.length === 0
+    : (launchLoading || launchUnavailable) && creations.length === 0;
 
   return (
     <div>

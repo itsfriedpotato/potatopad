@@ -42,31 +42,45 @@ function safeAddr(a: string): Address {
   }
 }
 
+interface AncientResult {
+  tokens: AncientToken[];
+  unavailable: boolean;
+}
+
 export function useAncientTokens() {
-  const query = useQuery<AncientToken[]>({
+  const query = useQuery<AncientResult>({
     queryKey: ["ancient-tokens"],
     staleTime: 120_000,
     gcTime: 30 * 60_000,
+    // Poll to auto-recover while the feed is soft-degraded, so a transient blip
+    // doesn't strand the gallery on an empty view until the next focus/refresh.
+    refetchInterval: (q) => (q.state.data?.unavailable ? 5000 : false),
     queryFn: async () => {
-      const res = await fetch("/api/ancient");
-      if (!res.ok) return EMPTY;
-      const json = (await res.json()) as AncientResponse;
-      return (json.tokens ?? []).map((t) => ({
-        ...t,
-        address: safeAddr(t.address),
-        tradePool: safeAddr(t.tradePool),
-      }));
+      try {
+        const res = await fetch("/api/ancient");
+        if (!res.ok) return { tokens: EMPTY, unavailable: true };
+        const json = (await res.json()) as AncientResponse;
+        const tokens = (json.tokens ?? []).map((t) => ({
+          ...t,
+          address: safeAddr(t.address),
+          tradePool: safeAddr(t.tradePool),
+        }));
+        return { tokens, unavailable: !!json.unavailable };
+      } catch {
+        return { tokens: EMPTY, unavailable: true };
+      }
     },
   });
 
-  const tokens = query.data ?? EMPTY;
+  const tokens = query.data?.tokens ?? EMPTY;
+  const unavailable = query.data?.unavailable ?? false;
   const byAddress = useMemo(() => {
     const m = new Map<string, AncientToken>();
     for (const t of tokens) m.set(t.address.toLowerCase(), t);
     return m;
   }, [tokens]);
 
-  return { tokens, byAddress, isLoading: query.isLoading };
+  return { tokens, byAddress, unavailable, isLoading: query.isLoading };
 }
 
 /** Look up one token in the ancient list (drives the ancient token-page variant). */

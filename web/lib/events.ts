@@ -115,6 +115,10 @@ export function useLaunchActivity() {
     // pays the multi-pad getLogs cost anymore.
     staleTime: 60_000,
     gcTime: 24 * 60 * 60 * 1000,
+    // A soft-degraded scan (unavailable) means "couldn't read right now", not "no
+    // tokens" — poll to auto-recover instead of stranding a cold-cache visitor on
+    // an empty view until the next focus/refresh.
+    refetchInterval: (q) => (q.state.data?.unavailable ? 4000 : false),
     queryFn: async () => {
       try {
         const res = await fetch("/api/tokens");
