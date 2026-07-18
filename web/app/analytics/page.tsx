@@ -1,13 +1,14 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { Activity, Coins, Lock, Rocket, TrendingUp, Users } from "lucide-react";
+import { Activity, BarChart3, Coins, Lock, Rocket, TrendingUp, Users } from "lucide-react";
 import { formatUsd } from "@/lib/format";
 
 interface SiteStats {
   tokensLaunched: number;
   activeTokens: number;
   volume24Usd: number;
+  volumeAllTimeUsd: number | null;
   marketCapUsd: number;
   liquidityUsd: number;
   traders24: number;
@@ -37,6 +38,17 @@ export default function AnalyticsPage() {
     icon: typeof Rocket;
     accent: string;
   }[] = [
+    {
+      label: "Volume · all-time",
+      value: data
+        ? data.volumeAllTimeUsd != null
+          ? fmtUsd(data.volumeAllTimeUsd)
+          : "computing…"
+        : "…",
+      hint: "cumulative since launch",
+      icon: BarChart3,
+      accent: "text-amber-400",
+    },
     {
       label: "Tokens launched",
       value: data ? fmtNum(data.tokensLaunched) : "…",
@@ -121,9 +133,9 @@ export default function AnalyticsPage() {
         </p>
       )}
       <p className="text-[11px] leading-relaxed text-neutral-600">
-        All-time cumulative volume isn&apos;t shown yet — computing it accurately needs a dedicated
-        indexer. These figures cover total launches, permanently locked liquidity, and the last 24
-        hours of trading.
+        All-time volume is summed from each pool&apos;s on-chain daily trade history and refreshes
+        every few minutes; 24h volume, traders, market cap and liquidity update continuously. Data by
+        GeckoTerminal.
       </p>
     </div>
   );
