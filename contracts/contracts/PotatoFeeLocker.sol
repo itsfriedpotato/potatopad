@@ -15,8 +15,9 @@ import {INonfungiblePositionManager, IWETH9} from "./interfaces/IUniswapV3.sol";
 ///         `decreaseLiquidity`, so the principal is locked forever ("unruggable").
 ///
 ///         What CAN be taken out is swap fees: anyone may call {collect}, which
-///         harvests accrued trading fees from the position and splits them
-///         50/50 between the token's creator and the protocol treasury.
+///         harvests accrued trading fees. The WETH side is split 50/50 between the
+///         token's creator and the protocol treasury; the launched-token side is
+///         burned (sent to a dead address), so token fees are deflationary.
 ///
 ///         Fee delivery is asymmetric on purpose:
 ///         - The TREASURY's share is auto-forwarded (pushed) on every {collect}.
@@ -40,6 +41,10 @@ contract PotatoFeeLocker is IERC721Receiver, ReentrancyGuard {
     uint256 public constant CREATOR_FEE_SHARE_BPS = 5_000; // 50% of collected fees
     uint256 internal constant BPS = 10_000;
 
+    /// @notice Burn sink for the launched-token side of fees. Must be a normal
+    ///         (unspendable) address — OZ ERC20 reverts on transfers to address(0).
+    address internal constant DEAD = 0x000000000000000000000000000000000000dEaD;
+
     /// @notice The launchpad that mints positions into this locker.
     address public immutable pad;
     INonfungiblePositionManager public immutable positionManager;
@@ -61,6 +66,7 @@ contract PotatoFeeLocker is IERC721Receiver, ReentrancyGuard {
     event TreasuryPaid(address indexed asset, uint256 amount);
     event TreasuryPayFailed(address indexed asset, uint256 amount);
     event FeesClaimed(address indexed asset, address indexed beneficiary, uint256 amount);
+    event TokenFeesBurned(address indexed asset, uint256 amount);
 
     error OnlyPad();
     error UnknownPosition();
@@ -126,6 +132,13 @@ contract PotatoFeeLocker is IERC721Receiver, ReentrancyGuard {
     ///      treasury's half is auto-forwarded (with a claimable fallback).
     function _distribute(address asset, address creator, uint256 amount) internal {
         if (amount == 0) return;
+        // Launched-token side is burned in full — neither creator nor treasury
+        // receives it. Only the WETH side is split 50/50 below.
+        if (asset != address(weth)) {
+            IERC20(asset).safeTransfer(DEAD, amount);
+            emit TokenFeesBurned(asset, amount);
+            return;
+        }
         uint256 creatorCut = (amount * CREATOR_FEE_SHARE_BPS) / BPS;
         uint256 treasuryCut = amount - creatorCut;
         if (creatorCut != 0) claimable[asset][creator] += creatorCut;

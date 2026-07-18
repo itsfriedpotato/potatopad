@@ -117,6 +117,16 @@ contract PotatoPad is ReentrancyGuard {
     /// @dev Set only for the duration of a dev-buy swap, to authenticate the callback.
     address internal _expectedPoolCallback;
 
+    /// @notice Admin that maintains the name/symbol blacklist. This is the ONE
+    ///         privileged role: it can only block NEW launches by name via
+    ///         {setBanned} — it cannot touch existing tokens, funds, pools, or
+    ///         launches, and holds no keys to any token. Tokens stay ownerless.
+    address public owner;
+
+    /// @notice Normalized name/symbol hashes that {createToken} rejects — the
+    ///         on-chain anti-vampire shield for curated "ancient" runners.
+    mapping(bytes32 => bool) public banned;
+
     // --------------------------------------------------------------- events --
 
     event TokenCreated(
@@ -138,6 +148,8 @@ contract PotatoPad is ReentrancyGuard {
         uint256 tokenSeeded
     );
     event DevBuy(address indexed token, address indexed creator, uint256 ethIn, uint256 tokensOut);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event BannedSet(bytes32 indexed wordHash, bool banned);
 
     // --------------------------------------------------------------- errors --
 
@@ -148,6 +160,15 @@ contract PotatoPad is ReentrancyGuard {
     error SeedFailed();
     error TickRangeInvalid();
     error LaunchGriefed();
+    error Banned();
+    error OnlyOwner();
+
+    // ------------------------------------------------------------- modifiers --
+
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert OnlyOwner();
+        _;
+    }
 
     // ---------------------------------------------------------- constructor --
 
@@ -158,12 +179,14 @@ contract PotatoPad is ReentrancyGuard {
         uint256 antiSnipeBlocks_,
         IUniswapV3Factory v3Factory_,
         INonfungiblePositionManager positionManager_,
-        IWETH9 weth_
+        IWETH9 weth_,
+        address owner_,
+        string[] memory initialBannedWords_
     ) {
         if (
-            treasury_ == address(0) || startFdvWei_ == 0 || topFdvWei_ == 0 || topFdvWei_ <= startFdvWei_
-                || address(v3Factory_) == address(0) || address(positionManager_) == address(0)
-                || address(weth_) == address(0)
+            treasury_ == address(0) || owner_ == address(0) || startFdvWei_ == 0 || topFdvWei_ == 0
+                || topFdvWei_ <= startFdvWei_ || address(v3Factory_) == address(0)
+                || address(positionManager_) == address(0) || address(weth_) == address(0)
         ) revert InvalidConfig();
 
         treasury = treasury_;
@@ -190,6 +213,12 @@ contract PotatoPad is ReentrancyGuard {
         actualTopFdv = _fdvFromSqrtPriceX96(TickMath.getSqrtRatioAtTick(ceil_));
 
         locker = new PotatoFeeLocker(positionManager_, weth_, treasury_);
+
+        owner = owner_;
+        emit OwnershipTransferred(address(0), owner_);
+        for (uint256 i; i < initialBannedWords_.length; ++i) {
+            banned[_normHash(bytes(initialBannedWords_[i]))] = true;
+        }
     }
 
     // -------------------------------------------------------------- actions --
@@ -211,6 +240,10 @@ contract PotatoPad is ReentrancyGuard {
         TokenMeta calldata meta,
         bytes32 salt
     ) external payable nonReentrant returns (address token) {
+        // Anti-vampire shield: reject blacklisted names/symbols (normalized to
+        // match the client's trim().toLowerCase()) before doing any work.
+        if (banned[_normHash(bytes(name))] || banned[_normHash(bytes(symbol))]) revert Banned();
+
         // 1. Deploy the fixed-supply token with CREATE2, at an address that has NO
         //    pre-existing Uniswap pool and NO code.
         //
@@ -322,6 +355,43 @@ contract PotatoPad is ReentrancyGuard {
         if (msg.value > 0) {
             _devBuy(token, pool, tokenIs0, tickLower, tickUpper, msg.value);
         }
+    }
+
+    // ---------------------------------------------------------------- admin --
+
+    /// @notice Add/remove a name or symbol from the launch blacklist. Owner-only.
+    ///         The word is normalized (trim + ASCII-lowercase) before hashing, so
+    ///         it matches however a creator capitalizes/pads it.
+    function setBanned(string calldata word, bool isBanned) external onlyOwner {
+        bytes32 h = _normHash(bytes(word));
+        banned[h] = isBanned;
+        emit BannedSet(h, isBanned);
+    }
+
+    /// @notice Hand blacklist admin to a new address (e.g. a multisig), or to
+    ///         address(0) to renounce and freeze the list forever.
+    function transferOwnership(address newOwner) external onlyOwner {
+        emit OwnershipTransferred(owner, newOwner);
+        owner = newOwner;
+    }
+
+    /// @dev keccak of a name/symbol normalized to match the client's
+    ///      trim().toLowerCase(): strips surrounding ASCII spaces and lowercases
+    ///      ASCII A-Z. ASCII-only — Unicode look-alikes and non-exact variants
+    ///      (e.g. "CASHCAT2") are NOT caught, same limitation as the client check.
+    function _normHash(bytes memory b) internal pure returns (bytes32) {
+        uint256 len = b.length;
+        uint256 start = 0;
+        while (start < len && b[start] == 0x20) ++start;
+        uint256 end = len;
+        while (end > start && b[end - 1] == 0x20) --end;
+        bytes memory out = new bytes(end - start);
+        for (uint256 i = start; i < end; ++i) {
+            bytes1 c = b[i];
+            if (c >= 0x41 && c <= 0x5A) c = bytes1(uint8(c) + 32); // A-Z -> a-z
+            out[i - start] = c;
+        }
+        return keccak256(out);
     }
 
     // ---------------------------------------------------------- LP seeding --

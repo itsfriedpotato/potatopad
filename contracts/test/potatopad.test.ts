@@ -18,6 +18,10 @@ const ANTI_SNIPE_BLOCKS = 10;
 
 const NO_META = { imageURI: "", website: "", twitter: "", telegram: "" };
 
+// Sample blacklist seed for tests: a symbol-style + a name-style entry.
+const BANNED_SEED = ["CASHCAT", "GameStop"];
+const DEAD = "0x000000000000000000000000000000000000dead";
+
 /** Deterministic per-token CREATE2 salt (real launches pass a random one). */
 const saltFor = (s: string) => ethers.id(s);
 
@@ -87,7 +91,10 @@ async function deployFixture() {
 
   const pad = await (
     await ethers.getContractFactory("PotatoPad")
-  ).deploy(treasury.address, START_FDV, TOP_FDV, ANTI_SNIPE_BLOCKS, v3Factory.target, npm.target, weth.target);
+  ).deploy(
+    treasury.address, START_FDV, TOP_FDV, ANTI_SNIPE_BLOCKS,
+    v3Factory.target, npm.target, weth.target, deployer.address, BANNED_SEED
+  );
   const locker = await ethers.getContractAt("PotatoFeeLocker", await pad.locker());
 
   return { deployer, treasury, creator, alice, bob, weth, v3Factory, npm, router, pad, locker };
@@ -156,22 +163,68 @@ describe("PotatoPad v2 (direct-to-Uniswap single-sided launch)", () => {
     });
 
     it("rejects bad config", async () => {
-      const { treasury, v3Factory, npm, weth } = await loadFixture(deployFixture);
+      const { deployer, treasury, v3Factory, npm, weth } = await loadFixture(deployFixture);
       const F = await ethers.getContractFactory("PotatoPad");
+      const tail = [v3Factory.target, npm.target, weth.target, deployer.address, BANNED_SEED];
       await expect(
-        F.deploy(ethers.ZeroAddress, START_FDV, TOP_FDV, ANTI_SNIPE_BLOCKS, v3Factory.target, npm.target, weth.target)
+        F.deploy(ethers.ZeroAddress, START_FDV, TOP_FDV, ANTI_SNIPE_BLOCKS, ...tail)
       ).to.be.revertedWithCustomError(F, "InvalidConfig");
       await expect(
-        F.deploy(treasury.address, 0, TOP_FDV, ANTI_SNIPE_BLOCKS, v3Factory.target, npm.target, weth.target)
+        F.deploy(treasury.address, 0, TOP_FDV, ANTI_SNIPE_BLOCKS, ...tail)
       ).to.be.revertedWithCustomError(F, "InvalidConfig");
       // top must exceed start
       await expect(
-        F.deploy(treasury.address, TOP_FDV, START_FDV, ANTI_SNIPE_BLOCKS, v3Factory.target, npm.target, weth.target)
+        F.deploy(treasury.address, TOP_FDV, START_FDV, ANTI_SNIPE_BLOCKS, ...tail)
+      ).to.be.revertedWithCustomError(F, "InvalidConfig");
+      // owner must be non-zero
+      await expect(
+        F.deploy(treasury.address, START_FDV, TOP_FDV, ANTI_SNIPE_BLOCKS, v3Factory.target, npm.target, weth.target, ethers.ZeroAddress, BANNED_SEED)
       ).to.be.revertedWithCustomError(F, "InvalidConfig");
     });
   });
 
   describe("createToken", () => {
+    it("rejects a blacklisted name or symbol (case/space-insensitive)", async () => {
+      const { pad, creator } = await loadFixture(deployFixture);
+      // seeded: "CASHCAT" (symbol-style) and "GameStop" (name-style)
+      const cases: [string, string][] = [
+        ["CASHCAT", "SPUD"], // banned name (exact)
+        ["cashcat", "SPUD"], // banned name (lowercased)
+        [" CASHCAT ", "SPUD"], // banned name (space-padded)
+        ["Spud", "CASHCAT"], // banned symbol
+        ["GameStop", "GME2"], // banned name (mixed-case seed)
+      ];
+      for (const [name, symbol] of cases) {
+        await expect(
+          pad.connect(creator).createToken(name, symbol, NO_META, saltFor(name + symbol))
+        ).to.be.revertedWithCustomError(pad, "Banned");
+      }
+      // a clean name/symbol still launches
+      await expect(
+        pad.connect(creator).createToken("Spud", "SPUD", NO_META, saltFor("clean"))
+      ).to.not.be.reverted;
+    });
+
+    it("owner can update the blacklist; non-owner cannot", async () => {
+      const { pad, deployer, creator, alice } = await loadFixture(deployFixture);
+      await expect(pad.connect(alice).setBanned("Fresh", true)).to.be.revertedWithCustomError(
+        pad,
+        "OnlyOwner"
+      );
+      // launches fine before it's banned
+      await expect(pad.connect(creator).createToken("Fresh", "FRSH", NO_META, saltFor("f1"))).to.not
+        .be.reverted;
+      // owner bans it (normalized) -> now rejected
+      await pad.connect(deployer).setBanned("fresh", true);
+      await expect(
+        pad.connect(creator).createToken("FRESH", "FRSH2", NO_META, saltFor("f2"))
+      ).to.be.revertedWithCustomError(pad, "Banned");
+      // owner un-bans -> launches again
+      await pad.connect(deployer).setBanned("fresh", false);
+      await expect(pad.connect(creator).createToken("Fresh", "FRSH3", NO_META, saltFor("f3"))).to.not
+        .be.reverted;
+    });
+
     it("deploys the fixed 1B supply and seeds it into the pool (pad keeps ~nothing)", async () => {
       const { pad, token, tokenAddr, info, creator } = await loadFixture(createTokenFixture);
       expect(await token.totalSupply()).to.equal(TOTAL_SUPPLY);
@@ -498,14 +551,49 @@ describe("PotatoPad v2 (direct-to-Uniswap single-sided launch)", () => {
       expect(treasuryDelta + creatorClaim).to.be.closeTo(expectedFee, expectedFee / 50n);
     });
 
+    it("BURNS the launched-token side of fees (to dEaD, not creator/treasury)", async () => {
+      const { locker, weth, treasury, creator, bob, router, token, tokenAddr, info } =
+        await loadFixture(feesFixture); // already did a WETH->token buy
+
+      // Bob sells some tokens back -> this swap charges its 1% fee in the TOKEN.
+      const sellAmount = (await token.balanceOf(bob.address)) / 4n;
+      await token.connect(bob).approve(router.target, sellAmount);
+      const deadline = (await ethers.provider.getBlock("latest"))!.timestamp + 600;
+      await router.connect(bob).exactInputSingle({
+        tokenIn: tokenAddr,
+        tokenOut: weth.target,
+        fee: POOL_FEE,
+        recipient: bob.address,
+        deadline,
+        amountIn: sellAmount,
+        amountOutMinimum: 0,
+        sqrtPriceLimitX96: 0,
+      });
+
+      const deadBefore = await token.balanceOf(DEAD);
+      await expect(locker.connect(bob).collect(info.lpTokenId)).to.emit(locker, "TokenFeesBurned");
+      const deadAfter = await token.balanceOf(DEAD);
+
+      // token-side fee was burned to dEaD, NOT distributed to creator/treasury
+      expect(deadAfter - deadBefore).to.be.gt(0n);
+      expect(await locker.claimable(tokenAddr, creator.address)).to.equal(0n);
+      expect(await locker.claimable(tokenAddr, treasury.address)).to.equal(0n);
+      expect(await token.balanceOf(treasury.address)).to.equal(0n);
+      // WETH side still split (creator has a claimable WETH balance)
+      expect(await locker.claimable(weth.target, creator.address)).to.be.gt(0n);
+    });
+
     it("collect() is permissionless but does not brick on a reverting treasury (anti-brick)", async () => {
       // Deploy a whole stack whose treasury is a contract that reverts on receive.
-      const [, , creator, bob] = await ethers.getSigners();
+      const [deployer, , creator, bob] = await ethers.getSigners();
       const { weth, v3Factory, npm, router } = await deployRealUniswap();
       const revTreasury = await (await ethers.getContractFactory("RevertingTreasury")).deploy();
       const pad = await (
         await ethers.getContractFactory("PotatoPad")
-      ).deploy(revTreasury.target, START_FDV, TOP_FDV, ANTI_SNIPE_BLOCKS, v3Factory.target, npm.target, weth.target);
+      ).deploy(
+        revTreasury.target, START_FDV, TOP_FDV, ANTI_SNIPE_BLOCKS,
+        v3Factory.target, npm.target, weth.target, deployer.address, BANNED_SEED
+      );
       const locker = await ethers.getContractAt("PotatoFeeLocker", await pad.locker());
 
       const tokenAddr = await pad.connect(creator).createToken.staticCall("Rev", "REV", NO_META, saltFor("Rev"));

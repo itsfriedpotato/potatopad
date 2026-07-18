@@ -42,9 +42,26 @@ const CANONICAL: Record<string, { factory: string; npm: string; weth: string }> 
 
 const DEFAULT_TREASURY = "0xd3358b1F39A6a71911c6e33717D185F99d43e80d";
 
+// Seed the on-chain anti-vampire blacklist with the curated "ancient" runners'
+// names AND symbols (they differ). Owner-updatable post-deploy via setBanned().
+const ANCIENT_BANNED = [
+  "CASHCAT", "Cash Cat",
+  "TENDIES",
+  "JUGGERNAUT", "The Juggernaut",
+  "FOX", "Robin Hood",
+  "WISHBONE",
+  "STONKS",
+  "DFV", "DeepFuckingValue",
+  "meow",
+  "GME", "GameStop",
+];
+
 async function main() {
   const [deployer] = await ethers.getSigners();
   const treasury = process.env.TREASURY || DEFAULT_TREASURY;
+  // Blacklist admin. Defaults to the treasury; can only block new launches by
+  // name — never touches existing tokens/funds. Consider a multisig in prod.
+  const owner = process.env.OWNER || treasury;
 
   const isLocal = network.name === "hardhat" || network.name === "localhost";
   // Direct-to-Uniswap-V3 single-sided launch: tokens open at START_FDV and the
@@ -56,6 +73,7 @@ async function main() {
   console.log(`network:   ${network.name}`);
   console.log(`deployer:  ${deployer.address}`);
   console.log(`treasury:  ${treasury}`);
+  console.log(`owner:     ${owner}  (blacklist admin; ${ANCIENT_BANNED.length} words seeded)`);
   console.log(`open FDV:  ${ethers.formatEther(startFdv)} ETH  ->  top FDV: ${ethers.formatEther(topFdv)} ETH`);
   console.log(`anti-snipe: ${antiSnipeBlocks} blocks (max wallet 5%)\n`);
 
@@ -78,7 +96,7 @@ async function main() {
 
   const pad = await (
     await ethers.getContractFactory("PotatoPad")
-  ).deploy(treasury, startFdv, topFdv, antiSnipeBlocks, factory, npm, weth);
+  ).deploy(treasury, startFdv, topFdv, antiSnipeBlocks, factory, npm, weth, owner, ANCIENT_BANNED);
   await pad.waitForDeployment();
   const locker = await pad.locker();
   const [actualStart, actualTop] = await Promise.all([pad.actualStartFdv(), pad.actualTopFdv()]);
@@ -94,6 +112,8 @@ async function main() {
     pad: pad.target,
     locker,
     treasury,
+    owner,
+    bannedSeed: ANCIENT_BANNED,
     startFdv: startFdv.toString(),
     topFdv: topFdv.toString(),
     antiSnipeBlocks: antiSnipeBlocks.toString(),
