@@ -89,6 +89,8 @@ export interface CreationEvent {
   blockNumber: bigint;
   /** The pad (primary or legacy) that launched this token. */
   pad: Address;
+  /** 24h USD volume (from the server feed); 0 if unindexed. */
+  volume24Usd: number;
 }
 
 interface LaunchActivity {
@@ -140,6 +142,7 @@ export function useLaunchActivity() {
           timestamp: c.timestamp,
           blockNumber: BigInt(c.blockNumber),
           pad: c.pad,
+          volume24Usd: c.volume24Usd ?? 0,
         }));
         const result: LaunchActivity = { creations, unavailable: !!json.unavailable };
         writeLaunchCache(cacheKey, result);

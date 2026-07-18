@@ -1,11 +1,9 @@
 "use client";
 
-import { Hourglass } from "lucide-react";
 import Link from "next/link";
 import type { Address } from "viem";
-import { formatUsd, formatUsdPrice, shortAddress, timeAgo } from "@/lib/format";
+import { formatUsd, shortAddress, timeAgo } from "@/lib/format";
 import { useEthUsdPrice } from "@/lib/price";
-import { fdvProgressBps, useFdvRange } from "@/lib/pool";
 import { TokenAvatar } from "@/components/TokenAvatar";
 
 export interface TokenRow {
@@ -32,123 +30,72 @@ export interface TokenRow {
 
 export function TokenCard({ row }: { row: TokenRow }) {
   const { usd: ethUsd } = useEthUsdPrice();
-  const range = useFdvRange();
 
+  const mcapUsd = row.ancient
+    ? (row.marketCapUsd ?? 0)
+    : ethUsd !== null && row.marketCapEth > 0
+      ? row.marketCapEth * ethUsd
+      : 0;
+  const mc = mcapUsd > 0 ? formatUsd(mcapUsd) : "—";
+
+  // ── Ancient card: image, name, MC + 24h VOL, Ancient tag ──
   if (row.ancient) {
+    const vol = row.volume24Usd && row.volume24Usd > 0 ? formatUsd(row.volume24Usd) : "—";
     return (
       <Link
         href={`/token/${row.address}`}
-        className="card block p-5 transition-colors hover:border-amber-600/50"
+        className="group flex flex-col overflow-hidden rounded-xl border border-neutral-800/50 bg-neutral-900 transition-colors hover:border-amber-500/30"
       >
-        <div className="flex items-center gap-3">
-          <TokenAvatar
-            address={row.address}
-            symbol={row.symbol}
-            imageURI={row.imageURI}
-            size="md"
-          />
-          <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
-            <h3 className="truncate font-bold text-neutral-100">{row.name || row.symbol}</h3>
-            <span className="shrink-0 font-mono text-xs text-neutral-500">${row.symbol}</span>
-          </div>
-          <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-amber-700/40 bg-amber-900/25 px-2 py-0.5 text-[11px] font-semibold text-amber-500/90">
-            <Hourglass className="h-3 w-3" aria-hidden />
+        <div className="relative">
+          <TokenAvatar address={row.address} symbol={row.symbol} imageURI={row.imageURI} fill />
+          <span className="absolute right-2 top-2 rounded bg-black/60 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-400/90 backdrop-blur-md">
             Ancient
           </span>
         </div>
-
-        <p className="mt-2.5 truncate text-xs text-neutral-500">
-          Pre-existing Robinhood token
-        </p>
-
-        <div className="mt-4 grid grid-cols-2 gap-2">
-          <div>
-            <p className="text-[10px] font-semibold uppercase tracking-wider text-neutral-500">
-              Market Cap
-            </p>
-            <p className="mt-0.5 font-mono text-sm text-neutral-100">
-              {row.marketCapUsd && row.marketCapUsd > 0 ? formatUsd(row.marketCapUsd) : "—"}
-            </p>
+        <div className="flex flex-1 flex-col justify-between gap-2 p-3">
+          <div className="flex items-baseline justify-between gap-1.5">
+            <h3 className="truncate text-sm font-bold text-neutral-100">{row.name || row.symbol}</h3>
+            <span className="shrink-0 font-mono text-[10px] text-neutral-500">${row.symbol}</span>
           </div>
-          <div>
-            <p className="text-[10px] font-semibold uppercase tracking-wider text-neutral-500">
-              24h Volume
-            </p>
-            <p className="mt-0.5 font-mono text-sm text-neutral-100">
-              {row.volume24Usd && row.volume24Usd > 0 ? formatUsd(row.volume24Usd) : "—"}
-            </p>
+          <div className="flex items-baseline justify-between font-mono text-xs">
+            <span className="font-bold text-amber-400">
+              {mc} <span className="text-[9px] font-normal text-neutral-500">MC</span>
+            </span>
+            <span className="text-neutral-400">
+              {vol} <span className="text-[9px] font-normal text-neutral-600">VOL</span>
+            </span>
           </div>
         </div>
       </Link>
     );
   }
 
-  const mcapEthLabel = `${row.marketCapEth.toLocaleString("en-US", { maximumFractionDigits: 2 })} ETH`;
-  const mcapLabel =
-    ethUsd !== null && row.marketCapEth > 0 ? formatUsd(row.marketCapEth * ethUsd) : mcapEthLabel;
-
-  // Range climb: how far price has walked from the open (~3 ETH FDV) toward the
-  // top (~525 ETH FDV). Not a bonding curve; the token is live from block one.
-  const progress = Math.max(0, Math.min(100, Number(fdvProgressBps(row.marketCapEth, range)) / 100));
-
+  // ── PotatoPad card: image (age overlay), name, MC ──
   return (
     <Link
       href={`/token/${row.address}`}
-      className="card block p-5 transition-colors hover:border-amber-500/40"
+      className="group flex flex-col overflow-hidden rounded-xl border border-neutral-800/50 bg-neutral-900 transition-colors hover:border-amber-500/40"
     >
-      <div className="flex items-center gap-3">
-        {/* Thumbnail: resolves ipfs:// via public gateways; broken URLs fall back to a potato tile */}
-        <TokenAvatar
-          address={row.address}
-          symbol={row.symbol}
-          imageURI={row.imageURI}
-          size="md"
-        />
-        <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
-          <h3 className="truncate font-bold text-neutral-100">{row.name}</h3>
-          <span className="shrink-0 font-mono text-xs text-neutral-500">${row.symbol}</span>
-        </div>
-      </div>
-
-      <p className="mt-2.5 flex items-center gap-1.5 truncate text-xs text-neutral-500">
-        by <span className="font-mono text-neutral-400">{shortAddress(row.creator)}</span>
+      <div className="relative">
+        <TokenAvatar address={row.address} symbol={row.symbol} imageURI={row.imageURI} fill />
         {row.createdAt !== undefined && row.createdAt > 0 && (
-          <>
-            <span aria-hidden>&middot;</span>
-            <span className="whitespace-nowrap">{timeAgo(row.createdAt)}</span>
-          </>
+          <span className="absolute right-2 top-2 rounded bg-black/60 px-1.5 py-0.5 font-mono text-[9px] text-neutral-300 backdrop-blur-md">
+            {timeAgo(row.createdAt)}
+          </span>
         )}
-      </p>
-
-      <div className="mt-4 grid grid-cols-2 gap-2">
-        <div>
-          <p className="text-[10px] font-semibold uppercase tracking-wider text-neutral-500">
-            Price
-          </p>
-          <p className="mt-0.5 font-mono text-sm text-neutral-100">
-            {ethUsd !== null && row.priceWeth > 0 ? formatUsdPrice(row.priceWeth * ethUsd) : "—"}
-          </p>
-        </div>
-        <div>
-          <p className="text-[10px] font-semibold uppercase tracking-wider text-neutral-500">
-            Market Cap
-          </p>
-          <p className="mt-0.5 font-mono text-sm tabular-nums text-neutral-100">{mcapLabel}</p>
-        </div>
       </div>
-
-      {/* Range climb (open → top FDV): Seed → Sprout → Bloom. Not a bonding curve. */}
-      <div className="mt-4">
-        <div className="h-1.5 w-full overflow-hidden rounded-full bg-neutral-800">
-          <div
-            className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-amber-500"
-            style={{ width: `${Math.max(2, progress)}%` }}
-          />
+      <div className="flex flex-1 flex-col justify-between gap-2.5 p-3">
+        <div>
+          <div className="flex items-baseline justify-between gap-1.5">
+            <h3 className="truncate text-sm font-bold text-neutral-100">{row.name}</h3>
+            <span className="shrink-0 font-mono text-[10px] text-neutral-500">${row.symbol}</span>
+          </div>
+          <p className="mt-1.5 font-mono text-xs font-bold text-neutral-200">
+            {mc} <span className="text-[10px] font-normal text-neutral-500">MC</span>
+          </p>
         </div>
-        <div className="mt-1 flex justify-between font-mono text-[10px] tabular-nums text-neutral-600">
-          <span>🥔 Seed</span>
-          <span>{progress.toFixed(0)}% up range</span>
-          <span>🌻 Harvest</span>
+        <div className="truncate font-mono text-[9px] text-neutral-600">
+          {shortAddress(row.address)}
         </div>
       </div>
     </Link>

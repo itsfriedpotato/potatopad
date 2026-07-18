@@ -66,6 +66,7 @@ export function TokenAvatar({
   address,
   imageURI,
   size = "md",
+  fill = false,
   className = "",
 }: {
   address: string;
@@ -74,6 +75,8 @@ export function TokenAvatar({
   /** launch image URL / ipfs hash; falls back to the generated tile if absent/broken */
   imageURI?: string;
   size?: keyof typeof SIZES;
+  /** Full-bleed square (fills parent width), no border/rounding — for grid cards. */
+  fill?: boolean;
   className?: string;
 }) {
   const h = hashAddress(address);
@@ -87,13 +90,15 @@ export function TokenAvatar({
 
   return (
     <div
-      className={`relative flex shrink-0 items-center justify-center overflow-hidden rounded-xl border border-neutral-800 ${box} ${className}`}
+      className={`relative flex items-center justify-center overflow-hidden ${
+        fill ? "aspect-square w-full" : `shrink-0 rounded-xl border border-neutral-800 ${box}`
+      } ${className}`}
       style={{
         background: `linear-gradient(${angle}deg, hsl(${hue1} 55% ${light1}%), hsl(${hue2} 60% ${light2}%))`,
       }}
       aria-hidden
     >
-      <PotatoLogo className={`${icon} text-amber-200 drop-shadow-sm`} />
+      <PotatoLogo className={`${fill ? "h-12 w-12" : icon} text-amber-200 drop-shadow-sm`} />
       <TokenAvatarImage
         key={`${address.toLowerCase()}|${imageURI ?? ""}`}
         imageURI={imageURI}

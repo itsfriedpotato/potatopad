@@ -1,6 +1,6 @@
 "use client";
 
-import { Hourglass, Sprout, TrendingUp } from "lucide-react";
+import { Hourglass, Sprout } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useReadContracts } from "wagmi";
@@ -17,23 +17,40 @@ import {
 import { NotDeployed } from "@/components/NotDeployed";
 import { useSearch } from "@/components/SearchContext";
 import { TokenCard, type TokenRow } from "@/components/TokenCard";
-import { TokenCardSkeleton } from "@/components/Skeletons";
 
-const TABS = [
-  { id: "fresh", label: "Fresh Sprouts", Icon: Sprout },
-  { id: "top", label: "Top Market Cap", Icon: TrendingUp },
-  { id: "ancient", label: "Ancient", Icon: Hourglass },
-] as const;
+type TabId = "growing" | "ancient";
+type SortId = "recent" | "new" | "old" | "mcap";
 
-type TabId = (typeof TABS)[number]["id"];
+const TABS: { id: TabId; label: string }[] = [
+  { id: "growing", label: "Growing" },
+  { id: "ancient", label: "Ancients" },
+];
+const SORTS: { id: SortId; label: string }[] = [
+  { id: "recent", label: "Recent buys" },
+  { id: "new", label: "Newest" },
+  { id: "old", label: "Oldest" },
+  { id: "mcap", label: "Market Cap" },
+];
 
 type Slot0 = readonly [bigint, number, number, number, number, number, boolean];
+
+function CardSkeleton() {
+  return (
+    <div className="overflow-hidden rounded-xl border border-neutral-800/50 bg-neutral-900">
+      <div className="skeleton aspect-square w-full rounded-none" />
+      <div className="space-y-2 p-3">
+        <div className="skeleton h-3 w-2/3" />
+        <div className="skeleton h-3 w-1/2" />
+      </div>
+    </div>
+  );
+}
 
 export default function DiscoverPage() {
   const { weth, chainId, isDeployed } = usePad();
   const { query } = useSearch();
-  const [tab, setTab] = useState<TabId>("fresh");
-  const [sortOrder, setSortOrder] = useState<"new" | "old">("new");
+  const [tab, setTab] = useState<TabId>("growing");
+  const [sort, setSort] = useState<SortId>("recent");
   const isAncientTab = tab === "ancient";
 
   // PotatoPad launches — span ALL pads (primary + legacy).
@@ -84,6 +101,7 @@ export default function DiscoverPage() {
           marketCapEth: priceWeth * TOTAL_SUPPLY_WHOLE,
           createdAt: c.timestamp,
           imageURI: c.imageURI,
+          volume24Usd: c.volume24Usd,
         };
       }),
     [creations, poolReads, weth],
@@ -113,7 +131,6 @@ export default function DiscoverPage() {
     const q = query.trim().toLowerCase();
     let list = activeRows;
     if (q) {
-      // When the query looks like an address (0x…), also match by contract address.
       const isAddressQuery = q.startsWith("0x");
       list = list.filter(
         (r) =>
@@ -125,137 +142,138 @@ export default function DiscoverPage() {
     if (isAncientTab) {
       return [...list].sort((a, b) => (b.marketCapUsd ?? 0) - (a.marketCapUsd ?? 0));
     }
-    switch (tab) {
-      case "fresh":
-        return [...list].sort((a, b) =>
-          sortOrder === "new"
-            ? (b.createdAt ?? 0) - (a.createdAt ?? 0)
-            : (a.createdAt ?? 0) - (b.createdAt ?? 0),
-        );
-      case "top":
+    switch (sort) {
+      case "recent":
+        return [...list].sort((a, b) => (b.volume24Usd ?? 0) - (a.volume24Usd ?? 0));
+      case "new":
+        return [...list].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+      case "old":
+        return [...list].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+      case "mcap":
         return [...list].sort((a, b) => b.marketCapEth - a.marketCapEth);
       default:
         return list;
     }
-  }, [activeRows, query, tab, isAncientTab, sortOrder]);
+  }, [activeRows, query, sort, isAncientTab]);
 
   if (!isDeployed) {
     return <NotDeployed chainId={chainId} />;
   }
 
   // Treat a soft-degraded scan (unavailable) as "still loading", not "empty", so a
-  // transient RPC / cold-cache blip never flashes the "nothing planted" empty state.
+  // transient RPC / cold-cache blip never flashes the empty state.
   const loading = isAncientTab
     ? (ancientLoading || ancientUnavailable) && ancientTokens.length === 0
     : (launchLoading || launchUnavailable) && creations.length === 0;
 
+  const segBase = "rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors";
+
   return (
-    <div>
-      {/* Filter pills, centered, with a centered Plant a Coin call to action below */}
-      <div className="mb-5 flex flex-wrap items-center justify-center gap-2">
-        {TABS.map(({ id, label, Icon }) => (
-          <button
-            key={id}
-            type="button"
-            onClick={() => setTab(id)}
-            className={`inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-sm font-medium transition-colors ${
-              tab === id
-                ? "border-amber-500/50 bg-amber-500/10 text-amber-300"
-                : "border-neutral-800 bg-neutral-900/50 text-neutral-400 hover:border-neutral-700 hover:text-neutral-200"
-            }`}
-          >
-            <Icon className="h-3.5 w-3.5" aria-hidden />
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {tab === "fresh" && (
-        <div className="mb-6 flex items-center justify-center gap-1.5 text-xs">
-          <span className="text-neutral-500">Sort</span>
-          {(
-            [
-              ["new", "Newest"],
-              ["old", "Oldest"],
-            ] as const
-          ).map(([val, lbl]) => (
-            <button
-              key={val}
-              type="button"
-              onClick={() => setSortOrder(val)}
-              className={`rounded-full border px-3 py-1 font-medium transition-colors ${
-                sortOrder === val
-                  ? "border-amber-500/50 bg-amber-500/10 text-amber-300"
-                  : "border-neutral-800 bg-neutral-900/50 text-neutral-400 hover:text-neutral-200"
-              }`}
-            >
-              {lbl}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {isAncientTab && (
-        <div className="mx-auto mb-5 max-w-xl rounded-xl border border-amber-600/20 bg-amber-500/5 px-4 py-3 text-center text-xs text-neutral-400">
-          <p className="font-semibold text-amber-500">
-            <Hourglass className="mr-1 inline h-3.5 w-3.5" aria-hidden />
-            What&apos;s an Ancient? 🏛️
-          </p>
-          <p className="mt-1">
-            A token that launched on <span className="text-neutral-200">Noxa</span>{" "}
-            and ran with a community. A pre-existing Robinhood runner. We honor the originals here:
-            view and trade them, but they can&apos;t be planted on PotatoPad.
-          </p>
-        </div>
-      )}
-
-      {loading ? (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {Array.from({ length: 6 }).map((_, i) => (
-            <TokenCardSkeleton key={i} />
-          ))}
-        </div>
-      ) : activeRows.length === 0 ? (
-        <div className="card mx-auto max-w-lg p-10 text-center">
-          {isAncientTab ? (
-            <>
-              <Hourglass className="mx-auto h-10 w-10 text-amber-600/70" aria-hidden />
-              <h2 className="mt-4 text-lg font-bold text-neutral-100">No ancient tokens yet</h2>
-              <p className="mt-2 text-sm text-neutral-400">
-                Couldn&apos;t load the pre-existing Robinhood runners right now. Try again in a
-                moment.
-              </p>
-            </>
-          ) : (
-            <>
-              <Sprout className="mx-auto h-10 w-10 text-green-500/70" aria-hidden />
-              <h2 className="mt-4 text-lg font-bold text-neutral-100">Nothing planted yet</h2>
-              <p className="mt-2 text-sm text-neutral-400">
-                Be the first to plant a coin. It launches straight onto Uniswap V3, live from
-                the first block.
-              </p>
-              <Link href="/create" className="btn-primary mt-5">
-                Plant the first coin
-              </Link>
-            </>
+    <div className="space-y-5">
+      {/* Unified header + controls */}
+      <div className="flex flex-col gap-4 rounded-2xl border border-neutral-800/60 bg-neutral-950 p-5 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <h1 className="text-xl font-bold tracking-tight text-neutral-100">
+            {isAncientTab ? "Ancient Heritage" : "Explore Sprouts"}
+          </h1>
+          {isAncientTab && (
+            <p className="mt-1 text-xs text-neutral-500">
+              Verified legacy runners from Noxa. Honored here, protected from copycats.
+            </p>
           )}
         </div>
-      ) : visible.length === 0 ? (
-        <div className="card mx-auto max-w-lg p-10 text-center">
-          <h2 className="text-lg font-bold text-neutral-100">No coins match</h2>
-          <p className="mt-2 text-sm text-neutral-400">
-            {query.trim()
-              ? `Nothing matches “${query.trim()}” in this patch of the field.`
-              : "Nothing in this patch of the field yet."}
-          </p>
+
+        <div className="flex flex-wrap items-center gap-2 self-start sm:self-center">
+          <div className="flex gap-1 rounded-xl border border-neutral-800 bg-neutral-900 p-1">
+            {TABS.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => setTab(t.id)}
+                className={`${segBase} ${
+                  tab === t.id
+                    ? "bg-amber-500 text-neutral-950"
+                    : "text-neutral-400 hover:text-neutral-200"
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+
+          {!isAncientTab && (
+            <div className="flex gap-1 rounded-xl border border-neutral-800 bg-neutral-900 p-1 font-mono">
+              {SORTS.map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => setSort(s.id)}
+                  className={`rounded-lg px-2.5 py-1.5 text-[11px] transition-colors ${
+                    sort === s.id ? "bg-neutral-800 text-white" : "text-neutral-500 hover:text-neutral-300"
+                  }`}
+                >
+                  {s.label}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
-      ) : (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {visible.map((row) => (
-            <TokenCard key={row.address} row={row} />
-          ))}
-        </div>
-      )}
+      </div>
+
+      {/* Container panel: amber accent for Growing, stone-gray for Ancients */}
+      <div
+        className={`rounded-2xl border bg-neutral-950 p-4 sm:p-5 ${
+          isAncientTab ? "border-neutral-700/50" : "border-amber-500/20"
+        }`}
+      >
+        {loading ? (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+            {Array.from({ length: 10 }).map((_, i) => (
+              <CardSkeleton key={i} />
+            ))}
+          </div>
+        ) : activeRows.length === 0 ? (
+          <div className="mx-auto max-w-lg px-6 py-12 text-center">
+            {isAncientTab ? (
+              <>
+                <Hourglass className="mx-auto h-10 w-10 text-amber-600/70" aria-hidden />
+                <h2 className="mt-4 text-lg font-bold text-neutral-100">No ancient tokens yet</h2>
+                <p className="mt-2 text-sm text-neutral-400">
+                  Couldn&apos;t load the pre-existing Robinhood runners right now. Try again in a
+                  moment.
+                </p>
+              </>
+            ) : (
+              <>
+                <Sprout className="mx-auto h-10 w-10 text-green-500/70" aria-hidden />
+                <h2 className="mt-4 text-lg font-bold text-neutral-100">Nothing planted yet</h2>
+                <p className="mt-2 text-sm text-neutral-400">
+                  Be the first to plant a coin. It launches straight onto Uniswap V3, live from the
+                  first block.
+                </p>
+                <Link href="/create" className="btn-primary mt-5">
+                  Plant the first coin
+                </Link>
+              </>
+            )}
+          </div>
+        ) : visible.length === 0 ? (
+          <div className="mx-auto max-w-lg px-6 py-12 text-center">
+            <h2 className="text-lg font-bold text-neutral-100">No coins match</h2>
+            <p className="mt-2 text-sm text-neutral-400">
+              {query.trim()
+                ? `Nothing matches “${query.trim()}” in this patch of the field.`
+                : "Nothing in this patch of the field yet."}
+            </p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+            {visible.map((row) => (
+              <TokenCard key={row.address} row={row} />
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

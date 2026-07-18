@@ -26,9 +26,9 @@ export function ActivityTabs({
   function holderStatus(address: Address) {
     const a = address.toLowerCase();
     if (pool !== ZERO_ADDRESS && a === pool.toLowerCase())
-      return { text: "Uniswap V3 Pool", emoji: "🦄", tone: "pool" as const };
+      return { text: "Uniswap V3 Pool", emoji: "", tone: "pool" as const };
     if (a === creator.toLowerCase())
-      return { text: "creator", emoji: "🌱", tone: "creator" as const };
+      return { text: "creator", emoji: "", tone: "creator" as const };
     return { text: "", emoji: "", tone: "clean" as const };
   }
 
@@ -100,9 +100,6 @@ export function ActivityTabs({
               );
             })}
           </ul>
-          <p className="mt-3 text-[11px] text-neutral-600">
-            Computed client-side from Transfer logs (MVP).
-          </p>
         </div>
       )}
     </div>

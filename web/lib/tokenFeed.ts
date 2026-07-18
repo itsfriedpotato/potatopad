@@ -45,6 +45,8 @@ export interface CreationDTO {
   /** decimal string — JSON has no bigint; the client converts back. */
   blockNumber: string;
   pad: Address;
+  /** 24h USD volume from GeckoTerminal (0 if unindexed) — drives "Recent buys". */
+  volume24Usd: number;
 }
 export interface FeedPayload {
   creations: CreationDTO[];
@@ -66,6 +68,40 @@ async function fetchCreatedLogs(pad: Address, from: bigint, to: bigint): Promise
     toBlock: to,
   });
   return logs as unknown as CreatedLog[];
+}
+
+/** Best-effort per-token 24h USD volume from GeckoTerminal (0 if unindexed). */
+async function fetchVolumes(addresses: Address[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  if (addresses.length === 0) return out;
+  const key = process.env.COINGECKO_API_KEY;
+  const base = key
+    ? "https://pro-api.coingecko.com/api/v3/onchain/networks/robinhood"
+    : "https://api.geckoterminal.com/api/v2/networks/robinhood";
+  const headers: Record<string, string> = key
+    ? { "x-cg-pro-api-key": key, accept: "application/json" }
+    : { accept: "application/json" };
+  // Multi-token endpoint takes up to 30 addresses per call.
+  for (let i = 0; i < addresses.length; i += 30) {
+    const chunk = addresses.slice(i, i + 30);
+    try {
+      const res = await fetch(`${base}/tokens/multi/${chunk.join(",")}`, {
+        headers,
+        cache: "no-store",
+      });
+      if (!res.ok) continue;
+      const j = (await res.json()) as {
+        data?: { attributes?: { address?: string; volume_usd?: { h24?: string } } }[];
+      };
+      for (const t of j.data ?? []) {
+        const addr = (t.attributes?.address ?? "").toLowerCase();
+        if (addr) out.set(addr, Number(t.attributes?.volume_usd?.h24) || 0);
+      }
+    } catch {
+      // best-effort — a volume miss just means that token sorts as cold
+    }
+  }
+  return out;
 }
 
 async function scan(): Promise<FeedPayload> {
@@ -134,9 +170,18 @@ async function scan(): Promise<FeedPayload> {
       timestamp: bn !== null ? (tsByBlock.get(bn) ?? 0) : 0,
       blockNumber: bn !== null ? bn.toString() : "0",
       pad,
+      volume24Usd: 0,
     });
   }
-  return { creations: [...byToken.values()], unavailable: false };
+  // Enrich with 24h volume (best-effort) so the client can offer a "Recent buys" sort.
+  const creations = [...byToken.values()];
+  try {
+    const vols = await fetchVolumes(creations.map((c) => c.token));
+    for (const c of creations) c.volume24Usd = vols.get(c.token.toLowerCase()) ?? 0;
+  } catch {
+    /* leave volumes at 0 */
+  }
+  return { creations, unavailable: false };
 }
 
 /**

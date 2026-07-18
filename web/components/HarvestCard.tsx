@@ -7,7 +7,7 @@ import { useAccount, useReadContract } from "wagmi";
 import { potatoFeeLockerAbi, potatoPadAbi } from "@/lib/abi";
 import { PAD_ADDRESSES, ZERO_ADDRESS } from "@/lib/config";
 import { usePad, useTx } from "@/lib/hooks";
-import { formatEth, formatTokens } from "@/lib/format";
+import { formatEth } from "@/lib/format";
 import { useAccruedFees } from "@/lib/pool";
 import { TxStatus } from "@/components/TxStatus";
 
@@ -380,9 +380,9 @@ export function HarvestCard({
   // is still uncollected in the pool. One figure so it never reads "0 WETH" while
   // fees sit uncollected in the position.
   const creatorWeth = claimableWeth + (accrued.wethAmount ?? 0n) / 2n;
-  const creatorToken = claimableToken + (accrued.tokenAmount ?? 0n) / 2n;
-  // The current pad burns the launched-token side of fees, so its creators realize
-  // WETH only. Legacy-pad tokens still split the token side — keep the old copy there.
+  // Creators realize WETH only — the launched-token side is burned on the current
+  // pad. (Legacy-pad tokens still deliver their token share on claim, just not
+  // shown; the card presents the WETH-only burn model everywhere.)
   const isBurnPad = pad.toLowerCase() === (PAD_ADDRESSES[chainId] ?? ZERO_ADDRESS).toLowerCase();
 
   return (
@@ -392,21 +392,15 @@ export function HarvestCard({
         Creator fees
       </h3>
       <p className="mt-1 text-xs text-neutral-500">
-        {isBurnPad
-          ? "Your 50% of WETH swap fees. Principal is locked forever and unruggable."
-          : "Your 50% of swap fees. Principal is locked forever and unruggable."}
+        Your 50% of WETH swap fees. Principal is locked forever and unruggable.
       </p>
 
       <div className="mt-4 rounded-lg border border-neutral-800 bg-neutral-950 p-3">
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
             <p className="text-xs text-neutral-500">Claimable (your 50%)</p>
-            <p className="mt-0.5 font-mono text-sm font-semibold text-neutral-100">
-              {claimablesKnown
-                ? isBurnPad
-                  ? `${formatEth(creatorWeth)} WETH`
-                  : `${formatEth(creatorWeth)} WETH + ${formatTokens(creatorToken)} ${symbol}`
-                : "…"}
+            <p className="mt-0.5 font-mono text-sm font-semibold tabular-nums text-neutral-100">
+              {claimablesKnown ? `${formatEth(creatorWeth)} WETH` : "…"}
             </p>
           </div>
           <button
@@ -422,8 +416,8 @@ export function HarvestCard({
 
         <p className="mt-2.5 text-[11px] text-neutral-600">
           {isBurnPad
-            ? `Fees accrue as people trade. Collecting splits the WETH 50/50 with the treasury; the ${symbol} side is burned 🔥.`
-            : `Fees accrue as people trade (WETH and ${symbol}). One click collects them into the locker and claims your share; the treasury auto-takes its 50%.`}
+            ? `Fees accrue as people trade. Collecting splits the WETH 50/50 with the treasury; the ${symbol} side is burned.`
+            : "Fees accrue as people trade. One click collects them into the locker and claims your share; the treasury auto-takes its 50%."}
         </p>
         {isConnected && !isCreator && (
           <p className="mt-1 text-[11px] text-neutral-600">
