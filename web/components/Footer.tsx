@@ -15,6 +15,13 @@ export function Footer() {
             Tokens listed here are created by third parties.{" "}
             <span className="text-neutral-400">We do not endorse any token.</span>{" "}
             <Link
+              href="/analytics"
+              className="underline decoration-neutral-700 underline-offset-2 transition-colors hover:text-neutral-200"
+            >
+              Analytics
+            </Link>
+            {" · "}
+            <Link
               href="/terms"
               className="underline decoration-neutral-700 underline-offset-2 transition-colors hover:text-neutral-200"
             >
