@@ -247,3 +247,5 @@ This project is provided for **educational purposes**. You are responsible for h
 MIT with an attribution requirement. See [LICENSE](./LICENSE).
 
 Made by [proofofpotato.com](https://proofofpotato.com). Any public deployment, fork, or derivative that has a user-facing interface must keep a visible "Made by proofofpotato.com" credit in its site footer and retain this attribution in its README. That credit may not be removed, hidden, or obscured. Beyond that, fork away. And if you ship a launchpad from this, get an audit first: this code has had adversarial review but no professional audit.
+
+TEMP-HIGHLIGHT-TEST — delete me

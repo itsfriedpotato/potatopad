@@ -49,7 +49,36 @@ const client = createPublicClient({
   transport: http(process.env.ROBINHOOD_RPC_URL || "https://rpc.mainnet.chain.robinhood.com"),
 });
 
-const cache = new Map<string, { payload: HoldersPayload; expiresAt: number }>();
+// Prefer a Ponder indexer when configured, fall back to the live log scan below
+const INDEXER_URL = process.env.INDEXER_URL?.replace(/\/+$/, "");
+
+async function fromIndexer(token: string): Promise<HoldersPayload | null> {
+  if (!INDEXER_URL) return null;
+  try {
+    const res = await fetch(`${INDEXER_URL}/holders?token=${token}`, {
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) return null;
+    const json = (await res.json()) as Partial<HoldersPayload>;
+    if (!json || !Array.isArray(json.holders)) return null;
+    return {
+      holders: json.holders as HolderDTO[],
+      total: json.total ?? "0",
+      unavailable: false,
+    };
+  } catch {
+    return null;
+  }
+}
+
+
+// indicator from where the feed comes from.
+type FeedSource = "indexer" | "scan";
+
+const cache = new Map<
+  string,
+  { payload: HoldersPayload; source: FeedSource; expiresAt: number }
+>();
 
 async function collectLogs<T>(
   fromBlock: bigint,
@@ -125,23 +154,35 @@ export async function GET(req: Request) {
 
   const hit = cache.get(key);
   if (hit && hit.expiresAt > now) {
-    return NextResponse.json(hit.payload, { headers: CACHE_HEADERS });
+    return NextResponse.json(hit.payload, {
+      headers: { ...CACHE_HEADERS, "x-feed-source": hit.source },
+    });
   }
 
   try {
-    const payload = await scan(token as Address);
-    cache.set(key, { payload, expiresAt: now + CACHE_TTL_MS });
+    const indexed = await fromIndexer(token);
+    const source: FeedSource = indexed ? "indexer" : "scan";
+    const payload = indexed ?? (await scan(token as Address));
+    cache.set(key, { payload, source, expiresAt: now + CACHE_TTL_MS });
     if (cache.size > MAX_CACHED_TOKENS) {
       const oldest = cache.keys().next().value;
       if (oldest !== undefined) cache.delete(oldest);
     }
-    return NextResponse.json(payload, { headers: CACHE_HEADERS });
+    return NextResponse.json(payload, {
+      headers: { ...CACHE_HEADERS, "x-feed-source": source },
+    });
   } catch {
     // Scan failed (RPC hiccup). Serve the last good payload for this token if we
     // have one, else an empty-but-unavailable list — always HTTP 200 so the UI
-    // degrades softly.
-    if (hit) return NextResponse.json(hit.payload, { headers: CACHE_HEADERS });
+    // degrades softly. Cached payloads keep the source that produced them.
+    if (hit) {
+      return NextResponse.json(hit.payload, {
+        headers: { ...CACHE_HEADERS, "x-feed-source": hit.source },
+      });
+    }
     const empty: HoldersPayload = { holders: [], total: "0", unavailable: true };
-    return NextResponse.json(empty, { headers: CACHE_HEADERS });
+    return NextResponse.json(empty, {
+      headers: { ...CACHE_HEADERS, "x-feed-source": "scan" },
+    });
   }
 }

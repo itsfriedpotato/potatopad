@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { loadFeed } from "@/lib/tokenFeed";
+import { loadFeedWithSource } from "@/lib/tokenFeed";
 
 /**
  * Server-side, cached Discover feed. The scan + cache live in `@/lib/tokenFeed`
@@ -13,8 +13,9 @@ const CACHE_HEADERS = {
 };
 
 export async function GET() {
-  // loadFeed soft-degrades on RPC failure (last good payload, or unavailable:true),
-  // so we always return HTTP 200 and the UI degrades gracefully.
-  const payload = await loadFeed();
-  return NextResponse.json(payload, { headers: CACHE_HEADERS });
+  // Adds the source for dev purpose, to check the source of the results.
+  const { payload, source } = await loadFeedWithSource();
+  return NextResponse.json(payload, {
+    headers: { ...CACHE_HEADERS, "x-feed-source": source },
+  });
 }
