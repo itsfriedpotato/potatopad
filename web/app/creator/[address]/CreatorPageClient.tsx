@@ -3,7 +3,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Share2, Sprout } from "lucide-react";
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { getAddress, isAddress, type Address } from "viem";
 import { useAccount } from "wagmi";
 import { chainName, WETH_ADDRESSES, ZERO_ADDRESS } from "@/lib/config";
@@ -83,18 +83,28 @@ export function CreatorPageClient({ address: raw }: { address: string }) {
     return creationsByCreator(allCreations, address);
   }, [allCreations, address]);
 
-  const pageItems = useMemo(
-    () => mine.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE),
-    [mine, page],
-  );
   const pageCount = Math.max(1, Math.ceil(mine.length / PAGE_SIZE));
+  // Clamp so navigating between planters (or a shrinking feed) never strands on
+  // an empty page past the last valid index.
+  const safePage = Math.min(page, pageCount - 1);
+  useEffect(() => {
+    setPage(0);
+  }, [address]);
+  useEffect(() => {
+    if (page !== safePage) setPage(safePage);
+  }, [page, safePage]);
+
+  const pageItems = useMemo(
+    () => mine.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE),
+    [mine, safePage],
+  );
 
   const pricesQuery = useQuery({
     queryKey: [
       "creator-slot0",
       ANALYTICS_CHAIN_ID,
       address,
-      page,
+      safePage,
       pageItems.map((c) => c.token).join(","),
     ],
     enabled: pageItems.length > 0,
@@ -360,18 +370,18 @@ export function CreatorPageClient({ address: raw }: { address: string }) {
           <div className="flex items-center gap-2 text-xs text-neutral-500">
             <button
               type="button"
-              disabled={page <= 0}
+              disabled={safePage <= 0}
               onClick={() => setPage((p) => Math.max(0, p - 1))}
               className="rounded border border-neutral-800 px-2 py-1 disabled:opacity-40"
             >
               Prev
             </button>
             <span>
-              {page + 1} / {pageCount}
+              {safePage + 1} / {pageCount}
             </span>
             <button
               type="button"
-              disabled={page >= pageCount - 1}
+              disabled={safePage >= pageCount - 1}
               onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
               className="rounded border border-neutral-800 px-2 py-1 disabled:opacity-40"
             >

@@ -4,7 +4,7 @@ import { Hourglass, Search, Sprout } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useReadContracts } from "wagmi";
-import { ZERO_ADDRESS } from "@/lib/config";
+import { WETH_ADDRESSES, ZERO_ADDRESS } from "@/lib/config";
 import { useAncientTokens } from "@/lib/ancient";
 import { useLaunchActivity } from "@/lib/events";
 import { usePad } from "@/lib/hooks";
@@ -14,9 +14,13 @@ import {
   uniswapV3PoolAbi,
   TOTAL_SUPPLY_WHOLE,
 } from "@/lib/pool";
+import { ANALYTICS_CHAIN_ID } from "@/lib/robinhoodPublicClient";
 import { NotDeployed } from "@/components/NotDeployed";
 import { useSearch } from "@/components/SearchContext";
 import { TokenCard, type TokenRow } from "@/components/TokenCard";
+
+/** Discover feed is Robinhood-pinned; price with RH WETH, not wallet-chain WETH. */
+const RH_WETH = WETH_ADDRESSES[ANALYTICS_CHAIN_ID] ?? ZERO_ADDRESS;
 
 type TabId = "growing" | "ancient";
 type SortId = "recent" | "new" | "old" | "mcap";
@@ -47,13 +51,13 @@ function CardSkeleton() {
 }
 
 export default function DiscoverPage() {
-  const { weth, chainId, isDeployed } = usePad();
+  const { chainId, isDeployed } = usePad();
   const { query, setQuery } = useSearch();
   const [tab, setTab] = useState<TabId>("growing");
   const [sort, setSort] = useState<SortId>("recent");
   const isAncientTab = tab === "ancient";
 
-  // PotatoPad launches — span ALL pads (primary + legacy).
+  // PotatoPad launches — span ALL pads (primary + legacy). Feed is Robinhood-pinned.
   const { creations, unavailable: launchUnavailable, isLoading: launchLoading } =
     useLaunchActivity();
   // Pre-existing Robinhood "ancient" runners (Noxa etc.), served by /api/ancient.
@@ -64,12 +68,14 @@ export default function DiscoverPage() {
   } = useAncientTokens();
 
   // Price each PotatoPad token from its pool's slot0, index-aligned to `creations`.
+  // chainId is forced to Robinhood so wallet-on-testnet doesn't mis-price RH pools.
   const poolContracts = useMemo(
     () =>
       creations.map((c) => ({
         address: c.pool ?? ZERO_ADDRESS,
         abi: uniswapV3PoolAbi,
-        functionName: "slot0",
+        functionName: "slot0" as const,
+        chainId: ANALYTICS_CHAIN_ID,
       })),
     [creations],
   );
@@ -94,7 +100,7 @@ export default function DiscoverPage() {
         // Failed / missing slot0 → null (never coerce unknown price to 0 ETH).
         let priceWeth: number | null = null;
         if (sqrtPriceX96 !== undefined && sqrtPriceX96 > 0n) {
-          const p = priceWethPerToken(sqrtPriceX96, tokenIsToken0(c.token, weth));
+          const p = priceWethPerToken(sqrtPriceX96, tokenIsToken0(c.token, RH_WETH));
           priceWeth = Number.isFinite(p) && p > 0 ? p : null;
         }
         return {
@@ -110,7 +116,7 @@ export default function DiscoverPage() {
           volume24Usd: c.volume24Usd,
         };
       }),
-    [creations, poolReads, weth],
+    [creations, poolReads],
   );
 
   const ancientRows = useMemo<TokenRow[]>(

@@ -4,8 +4,8 @@
 // Transfer logs). v2 has no Trade or Graduated events — price/liquidity come
 // from the Uniswap pool (see lib/pool). All fetchers degrade gracefully.
 
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useMemo } from "react";
 import type { Address } from "viem";
 import { isHiddenToken } from "@/lib/config";
 import { usePad } from "@/lib/hooks";
@@ -125,7 +125,6 @@ const EMPTY_LAUNCH: LaunchActivity = {
  * the connected wallet chain. Discover, ticker, and creator profiles share this.
  */
 export function useLaunchActivity() {
-  const queryClient = useQueryClient();
   const queryKey = useMemo(() => ["launch-activity", ANALYTICS_CHAIN_ID] as const, []);
   const cacheKey = LAUNCH_CACHE_PREFIX + ANALYTICS_CHAIN_ID;
 
@@ -135,10 +134,20 @@ export function useLaunchActivity() {
     staleTime: 60_000,
     gcTime: 24 * 60 * 60 * 1000,
     refetchInterval: (q) => (q.state.data?.state === "unavailable" ? 10_000 : 60_000),
-    queryFn: async () => {
+    // Prefer a warm local snapshot over a blank unavailable frame while revalidating.
+    placeholderData: () => {
+      const cached = readLaunchCache(cacheKey);
+      return cached ? presentAged(cached.data) : undefined;
+    },
+    queryFn: async ({ client }) => {
+      const previous = client.getQueryData<LaunchActivity>(queryKey);
       try {
         const res = await fetch("/api/tokens", { cache: "no-store" });
         if (!res.ok) {
+          // Keep last good / placeholder data instead of wiping to empty unavailable.
+          if (previous && previous.creations.length > 0) {
+            return { ...previous, state: "stale" as const, unavailable: false };
+          }
           return {
             ...EMPTY_LAUNCH,
             state: "unavailable" as const,
@@ -171,6 +180,15 @@ export function useLaunchActivity() {
         }));
         const state: FeedState =
           json.state ?? (json.unavailable ? "unavailable" : "fresh");
+        // Server unavailable with empty list: prefer previous warm data as stale.
+        if (state === "unavailable" && creations.length === 0 && previous?.creations.length) {
+          return {
+            ...previous,
+            state: "stale" as const,
+            unavailable: false,
+            servedAt: json.servedAt ?? Date.now(),
+          };
+        }
         const result: LaunchActivity = {
           creations,
           state,
@@ -182,6 +200,9 @@ export function useLaunchActivity() {
         writeLaunchCache(cacheKey, result);
         return result;
       } catch {
+        if (previous && previous.creations.length > 0) {
+          return { ...previous, state: "stale" as const, unavailable: false };
+        }
         return {
           ...EMPTY_LAUNCH,
           state: "unavailable" as const,
@@ -191,17 +212,6 @@ export function useLaunchActivity() {
       }
     },
   });
-
-  // Seed React Query after hydration (SSR-safe) from localStorage.
-  useEffect(() => {
-    const cached = readLaunchCache(cacheKey);
-    if (!cached) return;
-    queryClient.setQueryData<LaunchActivity>(
-      queryKey,
-      (current) => current ?? presentAged(cached.data),
-      { updatedAt: cached.updatedAt },
-    );
-  }, [cacheKey, queryClient, queryKey]);
 
   const raw = query.data ?? EMPTY_LAUNCH;
   const data = presentAged(raw);

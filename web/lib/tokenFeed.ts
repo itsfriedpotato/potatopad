@@ -83,6 +83,10 @@ let cache: {
   expiresAt: number;
 } | null = null;
 
+/** Short cooldown after a cold unavailable so /api/tokens can't force full rescans. */
+const UNAVAILABLE_COOLDOWN_MS = 15_000;
+let unavailableUntil = 0;
+
 function stamp(
   creations: CreationDTO[],
   state: FeedState,
@@ -302,6 +306,10 @@ export async function loadFeed(): Promise<FeedPayload> {
   if (cache && cache.expiresAt > now) {
     return stamp(cache.creations, cache.state, cache.scanCompletedAt);
   }
+  // Cold failure backoff: avoid hammering RPC with full multi-pad scans.
+  if (!cache && now < unavailableUntil) {
+    return stamp([], "unavailable", 0);
+  }
   if (inFlight) return inFlight;
   inFlight = (async () => {
     try {
@@ -309,9 +317,11 @@ export async function loadFeed(): Promise<FeedPayload> {
       // Gappy scans: soft-degrade. Prefer warm cache as "stale" over a partial list.
       if (result.unavailable) {
         if (cache) return stamp(cache.creations, "stale", cache.scanCompletedAt);
+        unavailableUntil = Date.now() + UNAVAILABLE_COOLDOWN_MS;
         return stamp([], "unavailable", 0);
       }
       const scanCompletedAt = Date.now();
+      unavailableUntil = 0;
       cache = {
         creations: result.creations,
         scanCompletedAt,
@@ -321,6 +331,7 @@ export async function loadFeed(): Promise<FeedPayload> {
       return stamp(result.creations, "fresh", scanCompletedAt);
     } catch {
       if (cache) return stamp(cache.creations, "stale", cache.scanCompletedAt);
+      unavailableUntil = Date.now() + UNAVAILABLE_COOLDOWN_MS;
       return stamp([], "unavailable", 0);
     } finally {
       inFlight = null;

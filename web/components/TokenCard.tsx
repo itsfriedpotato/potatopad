@@ -91,7 +91,10 @@ export function TokenCard({
   // ── PotatoPad card: sibling token + creator destinations (no nested anchors) ──
   return (
     <article className={cardShell}>
-      <Link href={`/token/${row.address}`} className="flex min-h-0 flex-1 flex-col outline-none">
+      <Link
+        href={`/token/${row.address}`}
+        className="flex min-h-0 flex-1 flex-col outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500/60"
+      >
         <div className="relative">
           <TokenAvatar address={row.address} symbol={row.symbol} imageURI={row.imageURI} fill />
           <div className="pointer-events-none absolute inset-x-0 bottom-0 h-14 bg-gradient-to-t from-neutral-900 via-neutral-900/40 to-transparent" />

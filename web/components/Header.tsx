@@ -131,14 +131,15 @@ export function Header() {
                     {myProfileHref && (
                       <Link
                         href={myProfileHref}
-                        className={`hidden items-center gap-1.5 rounded-lg px-2.5 py-2 text-xs font-medium transition-colors sm:inline-flex ${
+                        className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-2 text-xs font-medium transition-colors ${
                           pathname.startsWith("/creator/")
                             ? "text-amber-500"
                             : "text-neutral-400 hover:text-neutral-100"
                         }`}
+                        aria-label="My profile"
                       >
                         <User className="h-3.5 w-3.5" />
-                        My profile
+                        <span className="hidden sm:inline">My profile</span>
                       </Link>
                     )}
                     {SHOW_CHAIN_SWITCHER && (
