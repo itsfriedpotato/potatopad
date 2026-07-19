@@ -390,6 +390,64 @@ async function maybeSnapshot(address: string, usd: number) {
   }
 }
 
+// Block whose timestamp is ~24h ago (cached 30 min; the tip moves slowly). Binary
+// search over block timestamps, bounded near the tip.
+let block24hCache: { block: bigint; expiresAt: number } | null = null;
+async function block24hAgo(): Promise<bigint | null> {
+  if (block24hCache && block24hCache.expiresAt > Date.now()) return block24hCache.block;
+  try {
+    const latest = await client.getBlockNumber();
+    const tip = await client.getBlock({ blockNumber: latest });
+    const target = Number(tip.timestamp) - Math.floor(HOLD_MS / 1000);
+    let lo = latest > 2_000_000n ? latest - 2_000_000n : 0n;
+    let hi = latest;
+    try {
+      if (Number((await client.getBlock({ blockNumber: lo })).timestamp) > target) lo = 0n;
+    } catch {
+      lo = 0n;
+    }
+    while (lo < hi) {
+      const mid = (lo + hi + 1n) / 2n;
+      const ts = Number((await client.getBlock({ blockNumber: mid })).timestamp);
+      if (ts <= target) lo = mid;
+      else hi = mid - 1n;
+    }
+    block24hCache = { block: lo, expiresAt: Date.now() + 30 * 60_000 };
+    return lo;
+  } catch {
+    return block24hCache?.block ?? null;
+  }
+}
+
+// Did the wallet hold >= $50 of qualifying tokens ~24h ago, read straight from
+// on-chain state at that block? Satisfies "held for a day" for a genuine multi-day
+// holder immediately, without waiting for our snapshot history to accrue (which is
+// what matters at launch, when nothing is 24h old yet). Uses current prices as a
+// close approximation of the value 24h ago.
+async function heldEnough24hAgo(address: string, qtokens: QToken[]): Promise<boolean> {
+  if (qtokens.length === 0) return false;
+  const past = await block24hAgo();
+  if (past === null) return false;
+  let usd = 0;
+  await Promise.all(
+    qtokens.map(async (t) => {
+      try {
+        const bal = (await client.readContract({
+          address: t.address,
+          abi: erc20Abi,
+          functionName: "balanceOf",
+          args: [address as Address],
+          blockNumber: past,
+        })) as bigint;
+        usd += (Number(bal) / 1e18) * t.priceUsd;
+      } catch {
+        /* no archival state for this token/block -> skip */
+      }
+    }),
+  );
+  return usd >= MIN_USD;
+}
+
 export async function getEligibility(addressRaw: string): Promise<EligibilityInfo> {
   const address = addressRaw.toLowerCase();
   const db = requireSupabase();
@@ -431,7 +489,14 @@ export async function getEligibility(addressRaw: string): Promise<EligibilityInf
       .lte("ts", cutoff)
       .gte("qualifying_usd", MIN_USD)
       .limit(1);
-    heldLongEnough = heldEnough && !!old && old.length > 0;
+    const bySnapshot = !!old && old.length > 0;
+    // On-chain fallback (launch-proof, and credits a genuine multi-day holder):
+    // did they hold >= $50 of qualifying tokens ~24h ago?
+    const byChain =
+      heldEnough && !bySnapshot
+        ? await heldEnough24hAgo(address, (await getQualifyingTokens()).filter((t) => t.qualifies))
+        : false;
+    heldLongEnough = heldEnough && (bySnapshot || byChain);
   }
 
   const { data: profile } = await db
