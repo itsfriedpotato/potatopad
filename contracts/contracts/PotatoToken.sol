@@ -18,6 +18,10 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 ///         a complete no-op once `antiSnipeDeadlineBlock` passes, so it can
 ///         never interfere with normal trading afterwards.
 contract PotatoToken is ERC20 {
+    /// @notice Burn sink for fees. Must be a normal (unspendable) address — OZ
+    ///         ERC20 reverts on transfers to address(0).
+    address internal constant DEAD = 0x000000000000000000000000000000000000dEaD;
+
     /// @notice The launchpad that deployed this token (holds the full supply at genesis).
     address public immutable pad;
     /// @notice Max tokens a non-exempt wallet may hold during the anti-snipe window.
@@ -61,7 +65,7 @@ contract PotatoToken is ERC20 {
         // Fee-burn sink: the locker sends the launched-token side of swap fees here,
         // which must never trip the max-wallet cap and revert a permissionless
         // collect() during the anti-snipe window.
-        antiSnipeExempt[0x000000000000000000000000000000000000dEaD] = true;
+        antiSnipeExempt[DEAD] = true;
 
         _mint(pad_, supply_);
     }
@@ -69,7 +73,10 @@ contract PotatoToken is ERC20 {
     /// @notice One-time hook for the pad to register the pool as exempt once it
     ///         exists. The pool must be exempt because it custodies ~the entire
     ///         supply as single-sided LP.
-    function setPool(address pool_) external {
+    /// @dev `public virtual` (not external) so subclasses can extend it via
+    ///      `super.setPool` — {PotatoRewardToken} also excludes the pool from
+    ///      holder rewards there. The ABI is identical either way.
+    function setPool(address pool_) public virtual {
         if (msg.sender != pad) revert OnlyPad();
         if (pool != address(0)) revert PoolAlreadySet();
         pool = pool_;
@@ -87,7 +94,7 @@ contract PotatoToken is ERC20 {
     /// @dev Enforces the max-wallet cap on the recipient during the anti-snipe
     ///      window only. After `antiSnipeDeadlineBlock` this is a pure no-op, so
     ///      transfers behave exactly like a vanilla ERC-20 forever after.
-    function _update(address from, address to, uint256 value) internal override {
+    function _update(address from, address to, uint256 value) internal virtual override {
         super._update(from, to, value);
 
         if (block.number <= antiSnipeDeadlineBlock && to != address(0) && !antiSnipeExempt[to]) {

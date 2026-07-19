@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { imageUriCandidates } from "@/lib/format";
+import { imageProxyCandidates } from "@/lib/format";
 import { PotatoLogo } from "@/components/PotatoLogo";
 
 /**
@@ -33,28 +33,35 @@ const SIZES = {
  * flash where the previous retry index is applied to a new candidate list.
  */
 function TokenAvatarImage({ imageURI }: { imageURI?: string }) {
-  const candidates = useMemo(() => imageUriCandidates(imageURI), [imageURI]);
+  const candidates = useMemo(() => imageProxyCandidates(imageURI), [imageURI]);
   const [srcIndex, setSrcIndex] = useState(0);
+  const [loaded, setLoaded] = useState(false);
   const src = srcIndex < candidates.length ? candidates[srcIndex] : undefined;
 
   if (!src) return null;
 
   return (
     <>
-      {/* Solid dark backdrop so a transparent PNG shows on black, not the warm
-          potato tile bleeding through. Removed with the img when all gateways fail. */}
-      <div className="absolute inset-0 bg-black" />
+      {/* Solid dark backdrop so a transparent PNG shows on black — but only ONCE
+          the image has loaded. Until then the warm potato tile shows through, so
+          a slow gateway reads as "loading", not a black square. */}
+      {loaded && <div className="absolute inset-0 bg-black" />}
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
         key={src}
         src={src}
         alt=""
-        className="absolute inset-0 h-full w-full object-cover"
+        className={`absolute inset-0 h-full w-full object-cover transition-opacity duration-200 ${
+          loaded ? "opacity-100" : "opacity-0"
+        }`}
         loading="lazy"
         decoding="async"
         referrerPolicy="no-referrer"
+        onLoad={() => setLoaded(true)}
         onError={() => {
-          // Try the next gateway / candidate; when exhausted, only the tile shows.
+          // This candidate failed: hide it and try the next gateway. When the
+          // list is exhausted `src` becomes undefined and only the tile shows.
+          setLoaded(false);
           setSrcIndex((i) => i + 1);
         }}
       />

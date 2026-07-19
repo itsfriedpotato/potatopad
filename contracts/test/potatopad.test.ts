@@ -42,8 +42,12 @@ const isToken0 = (token: string, weth: string) => token.toLowerCase() < weth.toL
 /**
  * Reproduces PotatoPad's CREATE2 salt loop off-chain. `createToken` seeds from
  * keccak(sender, salt) and walks `seed, seed+1, …` deriving each candidate token
- * address as CREATE2(pad, seed+i, initCodeHash). Lets a test predict — and thus
- * poison — the exact addresses the loop will probe.
+ * address as CREATE2(tokenFactory, seed+i, initCodeHash). Lets a test predict —
+ * and thus poison — the exact addresses the loop will probe.
+ *
+ * NOTE the CREATE2 deployer is the pad's `tokenFactory`, not the pad: the factory
+ * carries the token creation bytecode (EIP-170 headroom). The pad is still the
+ * `pad_` CONSTRUCTOR ARG below, which is a different thing.
  */
 async function saltLoopParams(pad: any, name: string, symbol: string, sender: string, salt: string) {
   const abi = ethers.AbiCoder.defaultAbiCoder();
@@ -63,13 +67,13 @@ async function saltLoopParams(pad: any, name: string, symbol: string, sender: st
   );
   const initCodeHash = ethers.keccak256(ethers.concat([PotatoToken.bytecode, ctor]));
   const seed = BigInt(ethers.keccak256(abi.encode(["address", "bytes32"], [sender, salt])));
-  return { initCodeHash, seed };
+  return { initCodeHash, seed, deployer: await pad.tokenFactory() };
 }
 
 /** The i-th CREATE2 candidate the loop probes (mirrors `bytes32(seed + i)`, 256-bit wrapping). */
-function candidateAt(padAddr: string, seed: bigint, i: number, initCodeHash: string): string {
+function candidateAt(deployer: string, seed: bigint, i: number, initCodeHash: string): string {
   const saltI = ethers.toBeHex(BigInt.asUintN(256, seed + BigInt(i)), 32);
-  return ethers.getCreate2Address(padAddr, saltI, initCodeHash);
+  return ethers.getCreate2Address(deployer, saltI, initCodeHash);
 }
 
 async function deployRealUniswap() {
@@ -320,27 +324,16 @@ describe("PotatoPad v2 (direct-to-Uniswap single-sided launch)", () => {
       const symbol = "FR";
       const salt = saltFor("FR");
 
-      // Reproduce the pad's FIRST CREATE2 candidate address exactly (see PotatoPad
-      // createToken): initCodeHash = keccak(creationCode ++ abi.encode(ctorArgs)),
-      // seed = keccak(abi.encode(creator, salt)), addr = CREATE2(pad, seed, hash).
-      const abi = ethers.AbiCoder.defaultAbiCoder();
-      const PotatoToken = await ethers.getContractFactory("PotatoToken");
-      const ctor = abi.encode(
-        ["string", "string", "uint256", "address", "address", "address", "uint256", "uint256"],
-        [
-          name,
-          symbol,
-          await pad.TOTAL_SUPPLY(),
-          await pad.getAddress(),
-          await pad.positionManager(),
-          await pad.locker(),
-          await pad.MAX_WALLET(),
-          await pad.antiSnipeBlocks(),
-        ]
+      // Reproduce the pad's FIRST CREATE2 candidate address exactly, so the
+      // griefer below poisons the pool the launch will actually probe.
+      const { initCodeHash, seed, deployer } = await saltLoopParams(
+        pad,
+        name,
+        symbol,
+        creator.address,
+        salt
       );
-      const initCodeHash = ethers.keccak256(ethers.concat([PotatoToken.bytecode, ctor]));
-      const seed = ethers.keccak256(abi.encode(["address", "bytes32"], [creator.address, salt]));
-      const candidate0 = ethers.getCreate2Address(await pad.getAddress(), seed, initCodeHash);
+      const candidate0 = candidateAt(deployer, seed, 0, initCodeHash);
       expect(await ethers.provider.getCode(candidate0)).to.equal("0x"); // not deployed yet
 
       // Attacker pre-creates + initializes candidate0's WETH pool at a hostile
@@ -395,8 +388,7 @@ describe("PotatoPad v2 (direct-to-Uniswap single-sided launch)", () => {
     async function griefedFixture() {
       const ctx = await deployFixture();
       const maxTries = Number(await ctx.pad.MAX_SALT_TRIES());
-      const padAddr = await ctx.pad.getAddress();
-      const { initCodeHash, seed } = await saltLoopParams(
+      const { initCodeHash, seed, deployer } = await saltLoopParams(
         ctx.pad,
         GRIEF_NAME,
         GRIEF_SYMBOL,
@@ -404,7 +396,7 @@ describe("PotatoPad v2 (direct-to-Uniswap single-sided launch)", () => {
         GRIEF_SALT
       );
       for (let i = 0; i < maxTries; i++) {
-        const candidate = candidateAt(padAddr, seed, i, initCodeHash);
+        const candidate = candidateAt(deployer, seed, i, initCodeHash);
         await ctx.v3Factory.createPool(candidate, ctx.weth.target, POOL_FEE);
       }
       return { ...ctx, maxTries };
@@ -414,16 +406,15 @@ describe("PotatoPad v2 (direct-to-Uniswap single-sided launch)", () => {
       const { pad, creator, v3Factory, weth } = await loadFixture(griefedFixture);
 
       // Sanity: the loop's whole candidate window really is poisoned.
-      const { initCodeHash, seed } = await saltLoopParams(
+      const { initCodeHash, seed, deployer } = await saltLoopParams(
         pad,
         GRIEF_NAME,
         GRIEF_SYMBOL,
         creator.address,
         GRIEF_SALT
       );
-      const padAddr = await pad.getAddress();
-      const first = candidateAt(padAddr, seed, 0, initCodeHash);
-      const last = candidateAt(padAddr, seed, Number(await pad.MAX_SALT_TRIES()) - 1, initCodeHash);
+      const first = candidateAt(deployer, seed, 0, initCodeHash);
+      const last = candidateAt(deployer, seed, Number(await pad.MAX_SALT_TRIES()) - 1, initCodeHash);
       expect(await v3Factory.getPool(first, weth.target, POOL_FEE)).to.not.equal(ethers.ZeroAddress);
       expect(await v3Factory.getPool(last, weth.target, POOL_FEE)).to.not.equal(ethers.ZeroAddress);
 
