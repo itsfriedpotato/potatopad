@@ -297,16 +297,23 @@ contract PotatoPad is ReentrancyGuard {
     ///
     ///         Holders earn pro-rata against the CIRCULATING supply (total minus the
     ///         locked LP and launch infrastructure), so holding 1% of circulating
-    ///         earns 1% of the holder slice. Each harvest streams over
-    ///         {PotatoRewardToken.DRIP_WINDOW} rather than landing at once, so the
-    ///         reward tracks time actually spent holding and cannot be sniped by
-    ///         buying just before a permissionless `collect()`.
+    ///         earns 1% of the holder slice. Credit is derived from the locked
+    ///         position's LIVE Uniswap fee growth and lands as each swap does, so
+    ///         holders earn exactly the volume they held through and keep it even
+    ///         if they sell before anyone calls `collect()`.
     ///
-    /// @param creatorFeeBps the creator's cut of TOTAL WETH fees, 0..{CREATOR_FEE_SHARE_BPS}
-    ///        (0 = creator takes nothing and holders receive the entire creator half;
-    ///        {CREATOR_FEE_SHARE_BPS} = the standard launch split, holders get nothing).
-    ///        Fixed at launch and immutable thereafter — the split a buyer sees is the
-    ///        split they keep. The treasury's half is never affected.
+    /// @param creatorFeeBps the creator's cut of TOTAL WETH fees, strictly less than
+    ///        {CREATOR_FEE_SHARE_BPS} (0 = creator takes nothing and holders receive
+    ///        the entire creator half). Fixed at launch and immutable thereafter —
+    ///        the split a buyer sees is the split they keep. The treasury's half is
+    ///        never affected.
+    /// @dev Rejects `creatorFeeBps == CREATOR_FEE_SHARE_BPS`. That value pays holders
+    ///      exactly zero while the token still reports {isHolderRewardToken} and
+    ///      carries the holder-rewards badge everywhere it is listed — on a
+    ///      permissionless pad the badge IS the marketing, so allowing it hands
+    ///      launchers a ready-made deceptive-launch vector. Anyone actually wanting
+    ///      that split already has {createToken}, which is the same thing without the
+    ///      misleading label.
     function createRewardToken(
         string calldata name,
         string calldata symbol,
@@ -314,7 +321,7 @@ contract PotatoPad is ReentrancyGuard {
         bytes32 salt,
         uint16 creatorFeeBps
     ) external payable nonReentrant returns (address token) {
-        if (creatorFeeBps > CREATOR_FEE_SHARE_BPS) revert InvalidConfig();
+        if (creatorFeeBps >= CREATOR_FEE_SHARE_BPS) revert InvalidConfig();
         return _launch(name, symbol, meta, salt, true, creatorFeeBps);
     }
 

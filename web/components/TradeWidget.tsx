@@ -3,7 +3,7 @@
 import { ExternalLink, TrendingUp } from "lucide-react";
 import { useState } from "react";
 import { encodeFunctionData, formatEther, parseEther, type Address } from "viem";
-import { useAccount, useBalance, useBlock, useReadContract } from "wagmi";
+import { useAccount, useBalance, usePublicClient, useReadContract } from "wagmi";
 import { potatoTokenAbi } from "@/lib/abi";
 import {
   POOL_FEE_TIER,
@@ -43,6 +43,12 @@ const SWAP_DEADLINE_SECONDS = 600n; // 10 minutes
  *
  * Taking the max of the two is safe in both directions: the chain's own
  * timestamp when it is ahead, wall-clock when the latest block is stale.
+ *
+ * NOTE: this makes the window an UPPER bound, not an exact one. When the chain
+ * clock lags wall-clock, the effective allowance measured against
+ * `block.timestamp` is longer than SWAP_DEADLINE_SECONDS by however far it lags.
+ * Immaterial on an L2 with real blocktimes, but do not later tighten this
+ * constant on the assumption that it is exact.
  */
 function swapDeadline(latestBlockTs?: bigint): bigint {
   const wall = BigInt(Math.floor(Date.now() / 1000));
@@ -75,10 +81,18 @@ export function TradeWidget({
   const sellTx = useTx();
 
   const router = SWAP_ROUTER_ADDRESSES[chainId];
-  // Chain clock, for the swap deadline. Refetched periodically so a long-open
-  // tab does not sign against a stale timestamp.
-  const { data: latestBlock } = useBlock({ watch: false, query: { refetchInterval: 15_000 } });
-  const chainNow = latestBlock?.timestamp;
+  // Chain clock for the swap deadline, read ON DEMAND at submit rather than
+  // polled. A poller would add a recurring hit to the rate-limited /api/rpc proxy
+  // on every open token page, and the value is only ever needed at the moment a
+  // swap is signed.
+  const publicClient = usePublicClient();
+  async function chainNow(): Promise<bigint | undefined> {
+    try {
+      return (await publicClient?.getBlock())?.timestamp;
+    } catch {
+      return undefined; // fall back to wall-clock inside swapDeadline()
+    }
+  }
   const quoter = QUOTER_ADDRESSES[chainId];
   const inApp = !!router && weth !== ZERO_ADDRESS;
 
@@ -181,7 +195,7 @@ export function TradeWidget({
     setAmountIn(formatEther((tokenBalance * bps) / 10000n));
   }
 
-  function onBuy() {
+  async function onBuy() {
     if (amount === undefined || !user || minOut === 0n || !router || exceedsBalance) return;
     const swapData = encodeFunctionData({
       abi: swapRouter02Abi,
@@ -203,7 +217,7 @@ export function TradeWidget({
       address: router,
       abi: swapRouter02Abi,
       functionName: "multicall",
-      args: [swapDeadline(chainNow), [swapData]],
+      args: [swapDeadline(await chainNow()), [swapData]],
       value: amount,
     });
   }
@@ -218,7 +232,7 @@ export function TradeWidget({
     });
   }
 
-  function onSell() {
+  async function onSell() {
     if (amount === undefined || !user || minOut === 0n || !router || exceedsBalance) return;
     const swapData = encodeFunctionData({
       abi: swapRouter02Abi,
@@ -240,7 +254,7 @@ export function TradeWidget({
       address: router,
       abi: swapRouter02Abi,
       functionName: "multicall",
-      args: [swapDeadline(chainNow), [swapData]],
+      args: [swapDeadline(await chainNow()), [swapData]],
     });
   }
 

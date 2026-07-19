@@ -21,6 +21,7 @@ const DEAD = "0x000000000000000000000000000000000000dead";
 /** Creator's cut of TOTAL weth fees; holders get 5000 minus this. */
 const BPS_ALL_TO_HOLDERS = 0;
 const BPS_EVEN_SPLIT = 2500;
+/** Rejected: pays holders zero while still carrying the holder-rewards badge. */
 const BPS_NONE_TO_HOLDERS = 5000;
 
 const saltFor = (s: string) => ethers.id(s);
@@ -84,7 +85,8 @@ async function launchReward(creatorFeeBps: number) {
 
 const allToHolders = () => launchReward(BPS_ALL_TO_HOLDERS);
 const evenSplit = () => launchReward(BPS_EVEN_SPLIT);
-const noneToHolders = () => launchReward(BPS_NONE_TO_HOLDERS);
+/** The largest creator cut that still leaves holders a real slice. */
+const capSplit = () => launchReward(BPS_NONE_TO_HOLDERS - 100);
 
 async function buy(ctx: any, buyer: any, tokenAddr: string, value: bigint) {
   const deadline = (await ethers.provider.getBlock("latest"))!.timestamp + 600;
@@ -168,11 +170,53 @@ describe("PotatoRewardToken (fees to holders)", () => {
         .withArgs(anyAddress, ctx.creator.address, BPS_EVEN_SPLIT, 2500);
     });
 
-    it("rejects a creator cut above the creator half", async () => {
+    it("rejects a creator cut at or above the creator half", async () => {
       const ctx = await loadFixture(deployPad);
+      // Above the half would underflow the split...
       await expect(
         ctx.pad.connect(ctx.creator).createRewardToken("Yam", "YAM", NO_META, saltFor("Yam"), 5001)
       ).to.be.revertedWithCustomError(ctx.pad, "InvalidConfig");
+
+      // ...and EXACTLY the half pays holders zero while the token still reports
+      // isHolderRewardToken() and carries the badge wherever it is listed. On a
+      // permissionless pad that badge is the marketing, so this would be a
+      // ready-made deceptive launch. createToken() is the honest way to take the
+      // whole creator half.
+      await expect(
+        ctx.pad
+          .connect(ctx.creator)
+          .createRewardToken("Yam", "YAM", NO_META, saltFor("Yam"), BPS_NONE_TO_HOLDERS)
+      ).to.be.revertedWithCustomError(ctx.pad, "InvalidConfig");
+
+      // The largest cut that still leaves holders something must work.
+      await expect(
+        ctx.pad
+          .connect(ctx.creator)
+          .createRewardToken("Yam", "YAM", NO_META, saltFor("Yam"), BPS_NONE_TO_HOLDERS - 1)
+      ).to.emit(ctx.pad, "RewardTokenLaunched");
+    });
+
+    it("the locker refuses the same split, independently of the pad", async () => {
+      // Backstop: the pad is the gatekeeper today, but a future pad wired to this
+      // locker must not be able to register a zero-to-holders reward config.
+      const ctx = await loadFixture(allToHolders);
+      const padSigner = await ethers.getImpersonatedSigner(ctx.pad.target as string);
+      await ethers.provider.send("hardhat_setBalance", [
+        ctx.pad.target,
+        "0x" + (10n ** 18n).toString(16),
+      ]);
+      // A real tokenId: register() reads the position before it validates.
+      await expect(
+        ctx.locker
+          .connect(padSigner)
+          .register(
+            ctx.info.lpTokenId,
+            ctx.tokenAddr,
+            ctx.creator.address,
+            ctx.tokenAddr,
+            BPS_NONE_TO_HOLDERS
+          )
+      ).to.be.revertedWithCustomError(ctx.locker, "InvalidRewardConfig");
     });
 
     it("leaves standard launches completely unaffected", async () => {
@@ -665,14 +709,17 @@ describe("PotatoRewardToken (fees to holders)", () => {
       );
     });
 
-    it("5000 bps: degenerates to the standard launch, holders get nothing", async () => {
-      const ctx = await loadFixture(noneToHolders);
+    it("4900 bps: holders still get a real, non-zero slice at the cap", async () => {
+      const ctx = await loadFixture(capSplit);
       await mine(ANTI_SNIPE_BLOCKS + 1);
       await buy(ctx, ctx.alice, ctx.tokenAddr, ethers.parseEther("2"));
+      await churn(ctx, ctx.carol, ctx.tokenAddr, ethers.parseEther("1"), 2);
 
       const { toTreasury, toCreator, toHolders } = await harvest(ctx);
-      expect(toHolders).to.equal(0n);
-      expectClose(toCreator, toTreasury, toTreasury / 1000n, "classic 50/50");
+      expect(toHolders, "holders are never zero on a reward launch").to.be.gt(0n);
+      // creator 49% : holders 1% of total fees, i.e. 49:1.
+      expectClose(toHolders * 49n, toCreator, toCreator / 100n, "49:1 creator:holder");
+      expectClose(toCreator + toHolders, toTreasury, toTreasury / 1000n, "sum is the creator half");
     });
 
     it("still burns the launched-token side rather than paying it to holders", async () => {
@@ -706,6 +753,30 @@ describe("PotatoRewardToken (fees to holders)", () => {
       expect(owed).to.be.gt(0n);
 
       await expect(token.connect(alice).claim()).to.changeEtherBalance(alice, owed);
+      expect(await token.pendingRewards(alice.address)).to.equal(0n);
+    });
+
+    it("self-funds: claim() harvests when the token holds no ETH", async () => {
+      // The flagship UX property — "nobody has to crank anything". The contract
+      // deliberately holds ZERO WETH here: everything alice is owed is still
+      // inside the Uniswap position, so claim() must collect for itself.
+      const ctx = await loadFixture(allToHolders);
+      await mine(ANTI_SNIPE_BLOCKS + 1);
+      const { token, tokenAddr, weth, alice } = ctx;
+
+      await buy(ctx, alice, tokenAddr, ethers.parseEther("2"));
+      await churn(ctx, ctx.carol, tokenAddr, ethers.parseEther("1"), 3);
+
+      // Nobody has ever collected: credited, but entirely unfunded.
+      const owed = await token.pendingRewards(alice.address);
+      expect(owed, "alice is owed something").to.be.gt(0n);
+      expect(await weth.balanceOf(tokenAddr), "token holds no ETH yet").to.equal(0n);
+      expect(await token.unharvestedRewards()).to.be.gt(0n);
+
+      // One transaction, no prior collect() — and it pays out in full.
+      await expect(token.connect(alice).claim()).to.changeEtherBalance(alice, owed);
+
+      expect(await token.totalClaimed()).to.equal(owed);
       expect(await token.pendingRewards(alice.address)).to.equal(0n);
     });
 
@@ -891,7 +962,7 @@ describe("PotatoRewardToken (fees to holders)", () => {
       // the locker swallowed a failure.
       await expect(ctx.locker.connect(ctx.carol).collect(ctx.info.lpTokenId))
         .to.emit(ctx.locker, "HolderRewardsPaid")
-        .withArgs(ctx.tokenAddr, anyValue, true);
+        .withArgs(ctx.tokenAddr, anyValue);
       await ctx.token.harvest();
       expect(await ctx.token.totalRewarded()).to.be.gt(0n);
     });

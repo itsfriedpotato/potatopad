@@ -102,7 +102,7 @@ contract PotatoFeeLocker is IERC721Receiver, ReentrancyGuard {
     event FeesClaimed(address indexed asset, address indexed beneficiary, uint256 amount);
     event TokenFeesBurned(address indexed asset, uint256 amount);
     event FeesRedirected(uint256 indexed tokenId, address indexed to, address indexed by);
-    event HolderRewardsPaid(address indexed rewardToken, uint256 amount, bool synced);
+    event HolderRewardsPaid(address indexed rewardToken, uint256 amount);
     event HolderRewardsPayFailed(address indexed rewardToken, uint256 amount);
 
     error OnlyPad();
@@ -137,9 +137,11 @@ contract PotatoFeeLocker is IERC721Receiver, ReentrancyGuard {
         positions[tokenId] = LockedPosition({creator: creator, token0: token0, token1: token1});
 
         if (rewardToken != address(0)) {
-            // Never let a launch promise holders more than the creator half exists
-            // to give, which would underflow the split below.
-            if (creatorBps > CREATOR_FEE_SHARE_BPS) revert InvalidRewardConfig();
+            // Strictly less than the creator half: anything more would underflow the
+            // split below, and exactly the half pays holders zero while the token
+            // still advertises holder rewards. {PotatoPad.createRewardToken} rejects
+            // it too; this is the backstop for any future pad wired to this locker.
+            if (creatorBps >= CREATOR_FEE_SHARE_BPS) revert InvalidRewardConfig();
             rewardConfig[tokenId] = RewardConfig({token: rewardToken, creatorBps: creatorBps});
         }
 
@@ -254,7 +256,7 @@ contract PotatoFeeLocker is IERC721Receiver, ReentrancyGuard {
         // only funds what holders were credited for at the moment of each swap.
         // Arriving late (or not at all until someone claims) changes nobody's
         // share; {PotatoRewardToken.claim} harvests for itself when short.
-        emit HolderRewardsPaid(rewardToken, amount, true);
+        emit HolderRewardsPaid(rewardToken, amount);
     }
 
     // ------------------------------------------------------- fee redirect --

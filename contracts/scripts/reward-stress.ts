@@ -40,8 +40,15 @@ const MAX_UINT = (1n << 256n) - 1n;
 
 const WALLETS = Number(process.env.STRESS_WALLETS ?? 250);
 const ACTIONS = Number(process.env.STRESS_ACTIONS ?? 3000);
-/** Creator's cut of total WETH fees; holders get 5000 minus this. */
+/**
+ * Creator's cut of total WETH fees; holders get 5000 minus this. Must be
+ * STRICTLY under 5000 — the pad rejects exactly the creator half, since that
+ * pays holders nothing while still advertising holder rewards.
+ */
 const CREATOR_FEE_BPS = Number(process.env.STRESS_CREATOR_BPS ?? 1000);
+if (CREATOR_FEE_BPS >= 5000) {
+  throw new Error(`STRESS_CREATOR_BPS must be < 5000 (got ${CREATOR_FEE_BPS})`);
+}
 
 /** Deterministic PRNG so any failure reproduces exactly: STRESS_SEED=… to vary. */
 let seed = Number(process.env.STRESS_SEED ?? 20260719);
@@ -420,9 +427,11 @@ async function main() {
       // Zero wallets is only acceptable when holders were never entitled to
       // anything (creator took the whole half) — otherwise an empty check would
       // silently pass while verifying nothing.
-      checked > 0 ? worstRelPpm <= 100n : CREATOR_FEE_BPS >= 5000,
+      // No "nothing to attribute" escape hatch any more: every valid reward
+      // launch pays holders a real slice, so an empty replay is a failure.
+      checked > 0 && worstRelPpm <= 100n,
       checked === 0
-        ? "n/a — holders take 0% at this split, so there is nothing to attribute"
+        ? "NO WALLETS CHECKED — the replay verified nothing"
         : `${checked} wallets checked · worst drift ${worstAbs} wei` +
           ` (${Number(worstRelPpm) / 10_000}% of that wallet's earnings)` +
           (worstAddr ? ` @ ${worstAddr.slice(0, 10)}…` : ""),

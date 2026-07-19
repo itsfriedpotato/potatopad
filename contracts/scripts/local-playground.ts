@@ -13,7 +13,10 @@ import { ethers, network } from "hardhat";
 import * as fs from "fs";
 import * as path from "path";
 
-import RouterArtifact from "@uniswap/swap-router-contracts/artifacts/contracts/SwapRouter02.sol/SwapRouter02.json";
+// Vendored rather than depended on: @uniswap/swap-router-contracts is deprecated
+// on npm and pulls in hardhat-watcher, an old dotenv and OZ 3.4.2 for a single
+// artifact used only to stand up a router on a local chain.
+import RouterArtifact from "./vendor/SwapRouter02.json";
 import QuoterArtifact from "@uniswap/v3-periphery/artifacts/contracts/lens/QuoterV2.sol/QuoterV2.json";
 
 const E18 = 10n ** 18n;
@@ -39,8 +42,13 @@ async function main() {
   const weth = await ethers.getContractAt("WETH9", d.weth);
 
   // ── the router + quoter the web app's TradeWidget needs ──
-  const router = await (
-    await ethers.getContractFactoryFromArtifact(RouterArtifact)
+  // Built straight from abi+bytecode: the vendored blob is not a full Hardhat
+  // artifact (no sourceName/linkReferences), and does not need to be.
+  const [routerDeployer] = await ethers.getSigners();
+  const router = await new ethers.ContractFactory(
+    RouterArtifact.abi,
+    RouterArtifact.bytecode,
+    routerDeployer
   ).deploy(ethers.ZeroAddress, d.v3Factory, d.positionManager, d.weth);
   await router.waitForDeployment();
   const quoter = await (

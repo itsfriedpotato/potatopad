@@ -83,7 +83,8 @@ Fees accrue on **both** sides (WETH and the token), tracked as
 
 `createRewardToken` deploys a **`PotatoRewardToken`** instead: the same token,
 plus an accrual accumulator that pays the token's own holders a share of the
-fees, in ETH. The creator picks their cut at launch (`creatorFeeBps`, 0–50% of
+fees, in ETH. The creator picks their cut at launch (`creatorFeeBps`, 0 up to
+strictly under 50% of
 total WETH fees) and holders get the rest of the creator half. The treasury's
 50% and the token-side burn are untouched, and the split is immutable.
 
