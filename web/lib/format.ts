@@ -78,6 +78,16 @@ export function timeAgo(tsSeconds: number): string {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
+/** Unix seconds → short calendar date for profile "first plant" style labels. */
+export function shortDate(tsSeconds: number): string {
+  if (!tsSeconds) return "—";
+  return new Date(tsSeconds * 1000).toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
 /** Format a small float price (ETH per token) for chart labels/tags. */
 export function formatFloatPrice(p: number): string {
   if (!isFinite(p) || p <= 0) return "0";

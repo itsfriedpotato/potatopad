@@ -4,7 +4,7 @@ import { Hourglass, Search, Sprout } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useReadContracts } from "wagmi";
-import { ZERO_ADDRESS } from "@/lib/config";
+import { WETH_ADDRESSES, ZERO_ADDRESS } from "@/lib/config";
 import { useAncientTokens } from "@/lib/ancient";
 import { useLaunchActivity } from "@/lib/events";
 import { usePad } from "@/lib/hooks";
@@ -14,9 +14,13 @@ import {
   uniswapV3PoolAbi,
   TOTAL_SUPPLY_WHOLE,
 } from "@/lib/pool";
+import { ANALYTICS_CHAIN_ID } from "@/lib/robinhoodPublicClient";
 import { NotDeployed } from "@/components/NotDeployed";
 import { useSearch } from "@/components/SearchContext";
 import { TokenCard, type TokenRow } from "@/components/TokenCard";
+
+/** Discover feed is Robinhood-pinned; price with RH WETH, not wallet-chain WETH. */
+const RH_WETH = WETH_ADDRESSES[ANALYTICS_CHAIN_ID] ?? ZERO_ADDRESS;
 
 type TabId = "growing" | "ancient";
 type SortId = "recent" | "new" | "old" | "mcap";
@@ -47,13 +51,13 @@ function CardSkeleton() {
 }
 
 export default function DiscoverPage() {
-  const { weth, chainId, isDeployed } = usePad();
+  const { chainId, isDeployed } = usePad();
   const { query, setQuery } = useSearch();
   const [tab, setTab] = useState<TabId>("growing");
   const [sort, setSort] = useState<SortId>("recent");
   const isAncientTab = tab === "ancient";
 
-  // PotatoPad launches — span ALL pads (primary + legacy).
+  // PotatoPad launches — span ALL pads (primary + legacy). Feed is Robinhood-pinned.
   const { creations, unavailable: launchUnavailable, isLoading: launchLoading } =
     useLaunchActivity();
   // Pre-existing Robinhood "ancient" runners (Noxa etc.), served by /api/ancient.
@@ -64,12 +68,14 @@ export default function DiscoverPage() {
   } = useAncientTokens();
 
   // Price each PotatoPad token from its pool's slot0, index-aligned to `creations`.
+  // chainId is forced to Robinhood so wallet-on-testnet doesn't mis-price RH pools.
   const poolContracts = useMemo(
     () =>
       creations.map((c) => ({
         address: c.pool ?? ZERO_ADDRESS,
         abi: uniswapV3PoolAbi,
-        functionName: "slot0",
+        functionName: "slot0" as const,
+        chainId: ANALYTICS_CHAIN_ID,
       })),
     [creations],
   );
@@ -91,10 +97,12 @@ export default function DiscoverPage() {
       creations.map((c, i) => {
         const slot0 = poolReads?.[i]?.result as Slot0 | undefined;
         const sqrtPriceX96 = slot0?.[0];
-        const priceWeth =
-          sqrtPriceX96 !== undefined
-            ? priceWethPerToken(sqrtPriceX96, tokenIsToken0(c.token, weth))
-            : 0;
+        // Failed / missing slot0 → null (never coerce unknown price to 0 ETH).
+        let priceWeth: number | null = null;
+        if (sqrtPriceX96 !== undefined && sqrtPriceX96 > 0n) {
+          const p = priceWethPerToken(sqrtPriceX96, tokenIsToken0(c.token, RH_WETH));
+          priceWeth = Number.isFinite(p) && p > 0 ? p : null;
+        }
         return {
           address: c.token,
           name: c.name,
@@ -102,13 +110,13 @@ export default function DiscoverPage() {
           creator: c.creator,
           pool: c.pool,
           priceWeth,
-          marketCapEth: priceWeth * TOTAL_SUPPLY_WHOLE,
+          marketCapEth: priceWeth != null ? priceWeth * TOTAL_SUPPLY_WHOLE : null,
           createdAt: c.timestamp,
           imageURI: c.imageURI,
           volume24Usd: c.volume24Usd,
         };
       }),
-    [creations, poolReads, weth],
+    [creations, poolReads],
   );
 
   const ancientRows = useMemo<TokenRow[]>(
@@ -119,8 +127,8 @@ export default function DiscoverPage() {
         symbol: t.symbol,
         creator: ZERO_ADDRESS,
         pool: t.tradePool,
-        priceWeth: 0,
-        marketCapEth: 0,
+        priceWeth: null,
+        marketCapEth: null,
         imageURI: t.imageUrl,
         ancient: true,
         marketCapUsd: t.fdvUsd,
@@ -154,7 +162,8 @@ export default function DiscoverPage() {
       case "old":
         return [...list].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
       case "mcap":
-        return [...list].sort((a, b) => b.marketCapEth - a.marketCapEth);
+        // Null FDVs sort last (unknown ≠ zero).
+        return [...list].sort((a, b) => (b.marketCapEth ?? -1) - (a.marketCapEth ?? -1));
       default:
         return list;
     }
