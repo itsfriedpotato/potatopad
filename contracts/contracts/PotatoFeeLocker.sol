@@ -14,6 +14,8 @@ interface IPotatoPadOwner {
     function owner() external view returns (address);
 }
 
+/// @dev Holder-rewards launches: the locker pushes the holders' WETH slice to the
+///      token itself, then nudges it to start streaming. See {PotatoRewardToken}.
 /// @title PotatoFeeLocker
 /// @notice Permanent vault for launched Uniswap V3 LP positions.
 ///
@@ -46,6 +48,19 @@ contract PotatoFeeLocker is IERC721Receiver, ReentrancyGuard {
         address token1;
     }
 
+    /// @notice Per-position holder-rewards terms, chosen once at launch.
+    /// @param token the {PotatoRewardToken} receiving the holders' slice, or
+    ///        address(0) for a standard launch (the whole creator half is the
+    ///        creator's). A separate field is required because a 0% creator cut
+    ///        is a legitimate setting and must stay distinguishable from "off".
+    /// @param creatorBps the creator's cut of TOTAL WETH fees, 0..{CREATOR_FEE_SHARE_BPS};
+    ///        holders receive the rest of the creator half. Packs with `token`
+    ///        into a single slot.
+    struct RewardConfig {
+        address token;
+        uint16 creatorBps;
+    }
+
     uint256 public constant CREATOR_FEE_SHARE_BPS = 5_000; // 50% of collected fees
     uint256 internal constant BPS = 10_000;
 
@@ -61,6 +76,11 @@ contract PotatoFeeLocker is IERC721Receiver, ReentrancyGuard {
 
     /// @notice tokenId => locked position metadata. Registered positions are locked forever.
     mapping(uint256 => LockedPosition) public positions;
+
+    /// @notice tokenId => holder-rewards terms. Empty (`token == address(0)`) for
+    ///         standard launches. Immutable once registered — the fee split a
+    ///         buyer sees at launch is the split they keep forever.
+    mapping(uint256 => RewardConfig) public rewardConfig;
 
     /// @notice asset => beneficiary => claimable amount.
     ///         Holds the creator's pull-payments, plus any treasury share that
@@ -82,12 +102,15 @@ contract PotatoFeeLocker is IERC721Receiver, ReentrancyGuard {
     event FeesClaimed(address indexed asset, address indexed beneficiary, uint256 amount);
     event TokenFeesBurned(address indexed asset, uint256 amount);
     event FeesRedirected(uint256 indexed tokenId, address indexed to, address indexed by);
+    event HolderRewardsPaid(address indexed rewardToken, uint256 amount, bool synced);
+    event HolderRewardsPayFailed(address indexed rewardToken, uint256 amount);
 
     error OnlyPad();
     error UnknownPosition();
     error NothingToClaim();
     error EthTransferFailed();
     error OnlyOwner();
+    error InvalidRewardConfig();
 
     constructor(INonfungiblePositionManager positionManager_, IWETH9 weth_, address treasury_) {
         pad = msg.sender;
@@ -98,10 +121,28 @@ contract PotatoFeeLocker is IERC721Receiver, ReentrancyGuard {
 
     /// @notice Registers a freshly minted LP position. Only callable by the launchpad,
     ///         which mints the NFT directly to this contract at launch.
-    function register(uint256 tokenId, address launchedToken, address creator) external {
+    /// @param rewardToken for a holder-rewards launch, the {PotatoRewardToken} that
+    ///        receives the holders' slice of WETH fees; address(0) for a standard launch.
+    /// @param creatorBps the creator's cut of TOTAL WETH fees when `rewardToken` is
+    ///        set (0..{CREATOR_FEE_SHARE_BPS}); holders get the rest of the creator half.
+    function register(
+        uint256 tokenId,
+        address launchedToken,
+        address creator,
+        address rewardToken,
+        uint16 creatorBps
+    ) external {
         if (msg.sender != pad) revert OnlyPad();
         (,, address token0, address token1,,,,,,,,) = positionManager.positions(tokenId);
         positions[tokenId] = LockedPosition({creator: creator, token0: token0, token1: token1});
+
+        if (rewardToken != address(0)) {
+            // Never let a launch promise holders more than the creator half exists
+            // to give, which would underflow the split below.
+            if (creatorBps > CREATOR_FEE_SHARE_BPS) revert InvalidRewardConfig();
+            rewardConfig[tokenId] = RewardConfig({token: rewardToken, creatorBps: creatorBps});
+        }
+
         emit PositionLocked(tokenId, launchedToken, creator);
     }
 
@@ -132,8 +173,9 @@ contract PotatoFeeLocker is IERC721Receiver, ReentrancyGuard {
         // The creator half goes to the current beneficiary (an owner/creator
         // override if set, else the creator). Treasury cut + burn are unaffected.
         address beneficiary = _beneficiaryOf(tokenId, pos.creator);
-        _distribute(pos.token0, beneficiary, amount0);
-        _distribute(pos.token1, beneficiary, amount1);
+        RewardConfig memory rc = rewardConfig[tokenId];
+        _distribute(pos.token0, beneficiary, amount0, rc);
+        _distribute(pos.token1, beneficiary, amount1, rc);
 
         emit FeesCollected(tokenId, msg.sender, amount0, amount1);
     }
@@ -155,22 +197,64 @@ contract PotatoFeeLocker is IERC721Receiver, ReentrancyGuard {
         emit FeesClaimed(asset, msg.sender, amount);
     }
 
-    /// @dev Splits `amount` of `asset`: the creator's half is parked as claimable
-    ///      for `beneficiary`, the treasury's half is auto-forwarded (with a
-    ///      claimable fallback).
-    function _distribute(address asset, address beneficiary, uint256 amount) internal {
+    /// @dev Splits `amount` of `asset`. The treasury's half is always auto-forwarded
+    ///      (with a claimable fallback). The other half is the creator's on a standard
+    ///      launch; on a holder-rewards launch it divides between the creator and the
+    ///      token's holders per `rc.creatorBps`.
+    function _distribute(address asset, address beneficiary, uint256 amount, RewardConfig memory rc)
+        internal
+    {
         if (amount == 0) return;
-        // Launched-token side is burned in full — neither creator nor treasury
-        // receives it. Only the WETH side is split 50/50 below.
+        // Launched-token side is burned in full — neither creator, treasury, nor
+        // holders receive it. Only the WETH side is split below.
         if (asset != address(weth)) {
             IERC20(asset).safeTransfer(DEAD, amount);
             emit TokenFeesBurned(asset, amount);
             return;
         }
-        uint256 creatorCut = (amount * CREATOR_FEE_SHARE_BPS) / BPS;
-        uint256 treasuryCut = amount - creatorCut;
-        if (creatorCut != 0) claimable[asset][beneficiary] += creatorCut;
+
+        uint256 creatorSide = (amount * CREATOR_FEE_SHARE_BPS) / BPS;
+        uint256 treasuryCut = amount - creatorSide;
+
+        if (rc.token == address(0)) {
+            // Standard launch: the whole non-treasury half is the creator's.
+            if (creatorSide != 0) claimable[asset][beneficiary] += creatorSide;
+        } else {
+            // Holder-rewards launch: carve the creator's chosen cut out of that
+            // half, the remainder streams to holders. `creatorBps` is capped at
+            // CREATOR_FEE_SHARE_BPS in {register}, so this cannot underflow — at
+            // the cap the two expressions are identical and holders get zero.
+            uint256 creatorCut = (amount * rc.creatorBps) / BPS;
+            uint256 holdersCut = creatorSide - creatorCut;
+            if (creatorCut != 0) claimable[asset][beneficiary] += creatorCut;
+            if (holdersCut != 0) _payHolders(rc.token, asset, holdersCut, beneficiary);
+        }
+
         _payTreasury(asset, treasuryCut);
+    }
+
+    /// @dev Pushes the holders' slice to the reward token, then nudges it to start
+    ///      streaming. Like {_payTreasury} this can NEVER revert {collect}: a failed
+    ///      transfer falls back to the creator's claimable balance (it is their half
+    ///      being shared), so fee collection — and the trading that cranks it — can
+    ///      never be bricked.
+    function _payHolders(address rewardToken, address asset, uint256 amount, address fallbackTo)
+        internal
+    {
+        (bool ok, bytes memory ret) =
+            asset.call(abi.encodeWithSelector(IERC20.transfer.selector, rewardToken, amount));
+        if (!ok || (ret.length != 0 && !abi.decode(ret, (bool)))) {
+            claimable[asset][fallbackTo] += amount;
+            emit HolderRewardsPayFailed(rewardToken, amount);
+            return;
+        }
+
+        // No nudge needed. The token credits holders from the pool's live fee
+        // growth, so it has ALREADY accounted for this money — the transfer above
+        // only funds what holders were credited for at the moment of each swap.
+        // Arriving late (or not at all until someone claims) changes nobody's
+        // share; {PotatoRewardToken.claim} harvests for itself when short.
+        emit HolderRewardsPaid(rewardToken, amount, true);
     }
 
     // ------------------------------------------------------- fee redirect --

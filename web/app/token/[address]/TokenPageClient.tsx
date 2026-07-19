@@ -13,6 +13,7 @@ import { usePoolStats } from "@/lib/pool";
 import { formatUsd } from "@/lib/format";
 import { ActivityTabs } from "@/components/ActivityTabs";
 import { HarvestCard } from "@/components/HarvestCard";
+import { HolderRewardsCard } from "@/components/HolderRewardsCard";
 import { NotDeployed } from "@/components/NotDeployed";
 import { TokenChart } from "@/components/TokenChart";
 import { LineSkeleton } from "@/components/Skeletons";
@@ -220,6 +221,8 @@ export default function TokenPageClient() {
           marketCapEth={poolStats.marketCapEth}
           wethInPool={poolStats.wethInPool}
         />
+        {/* Renders only for holder-rewards launches; a no-op otherwise. */}
+        <HolderRewardsCard token={token} symbol={symbol} pad={resolved.pad} chainId={chainId} />
         <HarvestCard
           creator={creator}
           lpTokenId={lpTokenId}

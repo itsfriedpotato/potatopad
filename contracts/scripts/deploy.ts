@@ -99,10 +99,12 @@ async function main() {
   ).deploy(treasury, startFdv, topFdv, antiSnipeBlocks, factory, npm, weth, owner, ANCIENT_BANNED);
   await pad.waitForDeployment();
   const locker = await pad.locker();
+  const tokenFactory = await pad.tokenFactory();
   const [actualStart, actualTop] = await Promise.all([pad.actualStartFdv(), pad.actualTopFdv()]);
 
-  console.log(`PotatoPad:       ${pad.target}`);
-  console.log(`PotatoFeeLocker: ${locker}`);
+  console.log(`PotatoPad:          ${pad.target}`);
+  console.log(`PotatoFeeLocker:    ${locker}`);
+  console.log(`PotatoTokenFactory: ${tokenFactory}  (CREATE2 deployer for launches)`);
   console.log(
     `actual open FDV: ${ethers.formatEther(actualStart)} ETH  |  top FDV: ${ethers.formatEther(actualTop)} ETH`,
   );
@@ -111,6 +113,7 @@ async function main() {
     network: network.name,
     pad: pad.target,
     locker,
+    tokenFactory,
     treasury,
     owner,
     bannedSeed: ANCIENT_BANNED,

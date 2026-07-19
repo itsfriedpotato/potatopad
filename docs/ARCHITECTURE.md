@@ -13,6 +13,16 @@ web/        Next.js: read the chain (cached feed + RPC proxy), no DB, no indexer
 
 The whole launch is one atomic transaction: `PotatoPad.createToken(name, symbol, meta, salt)`.
 
+There are two launch entry points, sharing one internal `_launch`:
+
+| Entry point | Creator half of WETH fees |
+|---|---|
+| `createToken(name, symbol, meta, salt)` | all to the creator |
+| `createRewardToken(…, creatorFeeBps)` | split creator / **token holders** |
+
+Everything else — locked LP, treasury cut, anti-snipe, ownerless token — is
+identical. See [Holder-rewards launches](#holder-rewards-launches) below.
+
 ### 1. CREATE2 salt loop — a griefer-proof token address
 
 The token is deployed with **CREATE2** off `keccak256(msg.sender, salt)`, not plain
@@ -20,6 +30,15 @@ The token is deployed with **CREATE2** off `keccak256(msg.sender, salt)`, not pl
 anyone can predict the next token address and pre-`initialize` its Uniswap pool at
 a hostile price — which would make our single-sided mint revert, and (because a
 revert rolls the nonce back) brick *every* future launch at that address forever.
+
+> **The CREATE2 deployer is `PotatoTokenFactory`, not the pad.** To `CREATE2` a
+> token, the deployer must carry that token's whole creation bytecode in its own
+> runtime code; carrying two token types pushed the pad past the 24 KB EIP-170
+> limit, so the bytecode lives in a small factory the pad calls. The griefing
+> argument is unchanged, just re-anchored — addresses derive from the factory,
+> the salt is still the caller's random value, and `deploy` is pad-only. Anything
+> predicting a launch address off-chain must use `pad.tokenFactory()` as the
+> deployer.
 
 CREATE2 off a **random** salt makes the address unpredictable until the tx is
 public, so the pool can't be pre-poisoned. If a candidate address is somehow
@@ -60,7 +79,72 @@ Each swap pays the pool's 1% fee to that position. Fees flow out in two steps:
 Fees accrue on **both** sides (WETH and the token), tracked as
 `claimable[asset][account]`.
 
-### 5. Optional atomic dev-buy
+### 5. Holder-rewards launches
+
+`createRewardToken` deploys a **`PotatoRewardToken`** instead: the same token,
+plus an accrual accumulator that pays the token's own holders a share of the
+fees, in ETH. The creator picks their cut at launch (`creatorFeeBps`, 0–50% of
+total WETH fees) and holders get the rest of the creator half. The treasury's
+50% and the token-side burn are untouched, and the split is immutable.
+
+Three properties are worth understanding, because they drive the whole design:
+
+**Pull, not push.** Paying every holder inside `_transfer` is unbounded gas — you
+cannot loop the holder set. (Tokens advertising "auto-payouts" run a gas-budgeted
+queue: every trade costs hundreds of thousands of extra gas, payouts follow queue
+order rather than fairness, and the tail stops getting paid as holders grow.)
+Instead a monotonic `rewardPerShareX128` accumulator plus a per-account
+`rewardDebtX128` makes accrual **O(1) per transfer** at any holder count, and
+exact rather than approximate. Holders pull with `claim()`, paid as native ETH.
+
+**Accounting is decoupled from custody.** Fees physically sit in the locked
+position until someone calls `collect()`. The obvious design credits holders when
+that money *arrives* — but then fees are attributed to whoever holds **after** the
+harvest, not to whoever held while the volume traded. Hold through a week of
+trading, sell an hour before a collect, and you get nothing.
+
+So the token doesn't wait for custody. Uniswap moves `feeGrowthGlobal` on **every
+swap**, and it is readable at any instant, so `_accrue()` derives the position's
+`feeGrowthInside` on each transfer and credits the delta immediately:
+
+```
+feeGrowthInside = feeGrowthGlobal − feeGrowthBelow − feeGrowthAbove
+earned          = positionLiquidity × Δ feeGrowthInside / 2¹²⁸
+```
+
+A `collect()` becomes a pure **funding** operation — it moves ETH that holders
+were already credited for. `claim()` calls it itself when the contract is short,
+so nobody has to crank anything. Two consequences: attribution is exact (you earn
+for swaps that happen while you hold, and keep it when you sell), and there is no
+distribution *event* left to front-run, so buying just before a collect gains
+nothing. An earlier design streamed each harvest over 24h purely to defend that
+attack; with no lump sum, the defence became unnecessary.
+
+Reading pool state inside `_update` is safe mid-swap: Uniswap writes `slot0` and
+`feeGrowthGlobal` **before** it transfers tokens, and those getters carry no
+reentrancy lock — so a buy is credited with its own fee, in the transaction that
+generated it.
+
+**Measured against circulating supply.** `eligibleSupply` is total supply minus
+the locked LP pool, the pad, the locker, the position manager, and the burn
+address — maintained incrementally on transfer, never by iterating holders. So
+the ~entire supply parked in the locked position never dilutes real holders. If
+`eligibleSupply` is ever zero the fee checkpoint is deliberately *not* advanced,
+banking that growth for the next holder rather than crediting nobody.
+
+Because credit is derived from pool fee growth rather than from arriving WETH,
+donating WETH to the token does **not** mint rewards — it only over-funds the
+contract. Integer division can leave cumulative credit a few wei ahead of
+cumulative funding, so `claim()` caps each payout at the funded balance and
+leaves the remainder claimable rather than reverting.
+
+> Code: `contracts/contracts/PotatoRewardToken.sol`,
+> `PotatoFeeLocker._distribute` / `_payHolders`.
+> Tested in `contracts/test/potatoreward.test.ts` (continuous accrual with no
+> harvest, payout to a holder who sold before any collect, snipe resistance,
+> all three split settings, solvency).
+
+### 6. Optional atomic dev-buy
 
 If ETH is attached to `createToken`, the pad wraps it to WETH and swaps into the
 fresh pool in the same tx, delivering tokens to the creator (capped by the
@@ -71,8 +155,10 @@ Contracts at a glance:
 | File | Role |
 |---|---|
 | `contracts/contracts/PotatoPad.sol` | launchpad: token deploy + pool init + single-sided mint + dev-buy |
-| `contracts/contracts/PotatoFeeLocker.sol` | permanent LP lock + 50/50 fee splitter (auto-pay treasury, pull for creator) |
+| `contracts/contracts/PotatoTokenFactory.sol` | CREATE2 deployer for launch tokens (holds their creation bytecode) |
+| `contracts/contracts/PotatoFeeLocker.sol` | permanent LP lock + fee splitter (auto-pay treasury, pull for creator, push to holders) |
 | `contracts/contracts/PotatoToken.sol` | minimal fixed-supply ERC-20 + time-boxed anti-snipe max-wallet |
+| `contracts/contracts/PotatoRewardToken.sol` | the above + O(1) holder fee accrual, credited live from pool fee growth |
 | `contracts/contracts/libraries/TickMath.sol` | Uniswap tick math, ported to 0.8.24 |
 
 ## Frontend data layer

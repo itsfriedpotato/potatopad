@@ -23,10 +23,10 @@ This README is written to be vibecoded: if you can run a few terminal commands a
 
 ## What you get
 
-- **Smart contracts** (Solidity 0.8.24, Hardhat): a factory that mints single-sided Uniswap V3 liquidity, a permanent fee locker, and a minimal fixed-supply ERC-20. No owner, no mint function, no pause switch, no blacklist.
+- **Smart contracts** (Solidity 0.8.24, Hardhat): a factory that mints single-sided Uniswap V3 liquidity, a permanent fee locker, and a minimal fixed-supply ERC-20 — plus an optional variant that pays trading fees to holders in ETH. No owner, no mint function, no pause switch, no blacklist.
 - **A website** (Next.js App Router, wagmi v2, viem, RainbowKit): a Discover feed, a "Plant a Coin" launch form, and per-token pages with price / market cap, holders, a trade widget, and fee collection. A few small server routes keep infrastructure fast and keys hidden: `/api/rpc` (RPC-key proxy with a write-method denylist, rate limit, and multi-key failover), `/api/tokens` (server-side cached launch feed), and `/api/upload` (image → IPFS via Pinata).
 - **Scripts**: a narrated end-to-end demo, a deploy script (local, Base Sepolia, and Robinhood Chain), and a seeder that fills a local chain with sample tokens.
-- **Tests**: 23 Hardhat tests that run against the real Uniswap V3 contracts (factory, position manager, router) deployed from the official `@uniswap/*` npm artifacts. No mocks.
+- **Tests**: 63 Hardhat tests that run against the real Uniswap V3 contracts (factory, position manager, router) deployed from the official `@uniswap/*` npm artifacts. No mocks.
 
 ## How it works
 
@@ -40,6 +40,10 @@ A launch is a single atomic transaction — no curve, no graduation, no waiting.
 
 4. **Fees for life.** Every swap pays the pool's 1% fee to the locked position. Anyone can call `locker.collect(tokenId)` to harvest the accrued fees; they split 50/50 — the treasury's half is auto-forwarded on `collect`, and the creator claims their half with `locker.claim()`.
 
+**Two fee models.** `createToken` gives the creator that whole half. `createRewardToken(…, creatorFeeBps)` instead shares it with **everyone holding the token**, paid in ETH: the creator picks their own cut (0–50% of total fees) at launch and holders take the rest. Holders earn pro-rata against *circulating* supply — the locked LP is excluded, so holding 1% of what's actually in circulation earns 1% of the holder share.
+
+Credit lands **as each swap happens**, not when someone harvests. The token reads the locked position's live Uniswap fee growth and credits the delta on every transfer, so you earn exactly the volume you held through — and keep it when you sell, even if nobody has collected yet. `collect()` is reduced to a funding step that moves ETH holders were already credited for, and `claim()` triggers one itself when the contract is short. Accrual is O(1) per transfer (no per-holder loops, so gas doesn't grow with the holder count), and because there is no lump-sum distribution event, there is nothing to front-run. The split is fixed at launch and can never be changed.
+
 **Why the token address is random.** The token is deployed with `CREATE2` off a caller-supplied **random** salt, so the address is unpredictable until the transaction is public. That stops a griefer from pre-creating and mis-initializing the token's Uniswap pool to break the single-sided mint. If a candidate address is somehow already taken, the pad walks to the next one and self-heals — no launch can be permanently bricked.
 
 **Anti-snipe.** For a short window after launch (a fixed number of blocks) no non-exempt wallet may end a transfer holding more than 2% of supply, throttling bots from vacuuming the opening liquidity. After the window it becomes a complete no-op, so normal trading is never affected.
@@ -52,12 +56,17 @@ A launch is a single atomic transaction — no curve, no graduation, no waiting.
 potatopad/
   contracts/                          Hardhat project (Solidity 0.8.24)
     contracts/PotatoPad.sol           launchpad: token deploy + single-sided LP mint + dev-buy
-    contracts/PotatoFeeLocker.sol     permanent LP lock + 50/50 fee splitter
+    contracts/PotatoTokenFactory.sol  CREATE2 deployer for launch tokens
+    contracts/PotatoFeeLocker.sol     permanent LP lock + fee splitter
     contracts/PotatoToken.sol         minimal fixed-supply ERC-20 (+ time-boxed anti-snipe)
+    contracts/PotatoRewardToken.sol   the above + holder fee rewards, credited per swap
     contracts/libraries/TickMath.sol  Uniswap tick math, ported to 0.8.24
     contracts/interfaces/             minimal Uniswap V3 interfaces
     test/potatopad.test.ts            32 tests vs real Uniswap V3 bytecode
+    test/potatoreward.test.ts         31 tests for the holder-rewards flow
     scripts/demo.ts                   narrated launch showcase
+    scripts/reward-demo.ts            narrated holder-rewards walkthrough (balances per step)
+    scripts/reward-stress.ts          250 wallets / 3k actions, checks 8 invariants
     scripts/deploy.ts                 local / Base Sepolia / Robinhood deployment
     scripts/seed-demo.ts              fill a local chain for the frontend
   web/                                Next.js + wagmi v2 + RainbowKit

@@ -3,7 +3,7 @@
 import { ExternalLink, TrendingUp } from "lucide-react";
 import { useState } from "react";
 import { encodeFunctionData, formatEther, parseEther, type Address } from "viem";
-import { useAccount, useBalance, useReadContract } from "wagmi";
+import { useAccount, useBalance, useBlock, useReadContract } from "wagmi";
 import { potatoTokenAbi } from "@/lib/abi";
 import {
   POOL_FEE_TIER,
@@ -31,8 +31,23 @@ const GAS_BUFFER = parseEther("0.01");
  */
 const SWAP_DEADLINE_SECONDS = 600n; // 10 minutes
 
-function swapDeadline(): bigint {
-  return BigInt(Math.floor(Date.now() / 1000)) + SWAP_DEADLINE_SECONDS;
+/**
+ * Deadline measured against the CHAIN's clock, not the browser's.
+ *
+ * The router compares against `block.timestamp`, so a browser clock that is
+ * behind the chain produces a deadline already in the chain's past and every
+ * swap reverts `Transaction too old`. That is easy to hit on a local or forked
+ * node (Hardhat stamps each auto-mined block at least a second after the last,
+ * so a burst of activity runs the chain clock ahead of real time), and it can
+ * also bite a user whose system clock is simply wrong.
+ *
+ * Taking the max of the two is safe in both directions: the chain's own
+ * timestamp when it is ahead, wall-clock when the latest block is stale.
+ */
+function swapDeadline(latestBlockTs?: bigint): bigint {
+  const wall = BigInt(Math.floor(Date.now() / 1000));
+  const base = latestBlockTs && latestBlockTs > wall ? latestBlockTs : wall;
+  return base + SWAP_DEADLINE_SECONDS;
 }
 
 const SLIPPAGE_OPTIONS: Array<{ label: string; bps: bigint }> = [
@@ -60,6 +75,10 @@ export function TradeWidget({
   const sellTx = useTx();
 
   const router = SWAP_ROUTER_ADDRESSES[chainId];
+  // Chain clock, for the swap deadline. Refetched periodically so a long-open
+  // tab does not sign against a stale timestamp.
+  const { data: latestBlock } = useBlock({ watch: false, query: { refetchInterval: 15_000 } });
+  const chainNow = latestBlock?.timestamp;
   const quoter = QUOTER_ADDRESSES[chainId];
   const inApp = !!router && weth !== ZERO_ADDRESS;
 
@@ -184,7 +203,7 @@ export function TradeWidget({
       address: router,
       abi: swapRouter02Abi,
       functionName: "multicall",
-      args: [swapDeadline(), [swapData]],
+      args: [swapDeadline(chainNow), [swapData]],
       value: amount,
     });
   }
@@ -221,7 +240,7 @@ export function TradeWidget({
       address: router,
       abi: swapRouter02Abi,
       functionName: "multicall",
-      args: [swapDeadline(), [swapData]],
+      args: [swapDeadline(chainNow), [swapData]],
     });
   }
 

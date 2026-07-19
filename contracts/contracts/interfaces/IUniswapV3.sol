@@ -27,6 +27,31 @@ interface IUniswapV3Pool {
 
     function liquidity() external view returns (uint128);
 
+    /// @dev Cumulative fees earned per unit of liquidity across ALL of the pool's
+    ///      history, in Q128.128. Grows on every swap and is never reset — which
+    ///      is what lets {PotatoRewardToken} account for fees continuously,
+    ///      without waiting for anyone to call `collect`.
+    function feeGrowthGlobal0X128() external view returns (uint256);
+
+    function feeGrowthGlobal1X128() external view returns (uint256);
+
+    /// @dev Per-tick fee growth on the far side of `tick` from the current price.
+    ///      Needed to subtract the out-of-range portion when deriving how much a
+    ///      bounded position has earned.
+    function ticks(int24 tick)
+        external
+        view
+        returns (
+            uint128 liquidityGross,
+            int128 liquidityNet,
+            uint256 feeGrowthOutside0X128,
+            uint256 feeGrowthOutside1X128,
+            int56 tickCumulativeOutside,
+            uint160 secondsPerLiquidityOutsideX128,
+            uint32 secondsOutside,
+            bool initialized
+        );
+
     function initialize(uint160 sqrtPriceX96) external;
 
     function swap(
