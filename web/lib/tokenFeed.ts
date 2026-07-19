@@ -17,7 +17,7 @@ const tokenCreatedEvent = parseAbiItem(
 
 const LOG_CHUNK = 9_000n; // Alchemy on Robinhood caps eth_getLogs at 10k blocks.
 const SCAN_CONCURRENCY = 6; // windows fetched at once — fast without a CU spike.
-const CACHE_TTL_MS = 45_000;
+const CACHE_TTL_MS = 90_000;
 const CHUNK_RETRIES = 3; // a window survives transient RPC blips instead of aborting the scan.
 // If more than this fraction of a pad's windows never succeed, the scan is too
 // incomplete to trust — flag `unavailable` so the client retries (vs. caching a

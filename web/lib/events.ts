@@ -120,7 +120,7 @@ export function useLaunchActivity() {
     // an empty view until the next focus/refresh.
     // Poll gently for new launches (server feed is cached ~45s) instead of a live
     // RPC event-watcher. Back off harder while degraded rather than hammering 4s.
-    refetchInterval: (q) => (q.state.data?.unavailable ? 10_000 : 30_000),
+    refetchInterval: (q) => (q.state.data?.unavailable ? 10_000 : 60_000),
     queryFn: async () => {
       try {
         const res = await fetch("/api/tokens");
@@ -221,8 +221,8 @@ export function useTokenHolders(token: Address | undefined) {
   const query = useQuery<HoldersData>({
     queryKey,
     enabled: isDeployed && !!token,
-    staleTime: 15_000,
-    refetchInterval: 25_000,
+    staleTime: 30_000,
+    refetchInterval: 60_000,
     queryFn: async () => {
       if (!token) return EMPTY_HOLDERS;
       try {

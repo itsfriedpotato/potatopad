@@ -79,6 +79,10 @@ export default function DiscoverPage() {
     allowFailure: true,
     query: {
       enabled: isDeployed && creations.some((c) => !!c.pool && c.pool !== ZERO_ADDRESS),
+      // These ~39 pool reads multiply per visitor. Hold them 60s and don't refetch on
+      // every window focus, to cut proxy/RPC load.
+      staleTime: 60_000,
+      refetchOnWindowFocus: false,
     },
   });
 

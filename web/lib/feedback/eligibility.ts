@@ -183,10 +183,21 @@ export async function debugScan(address: string) {
   };
 }
 
-// --- qualifying tokens (cached 10 min) ---
+// --- qualifying tokens (cached 30 min) ---
 let qCache: { tokens: QToken[]; expiresAt: number } | null = null;
 let qInFlight: Promise<QToken[]> | null = null;
-const Q_TTL_MS = 10 * 60_000;
+const Q_TTL_MS = 30 * 60_000;
+
+// Holder counts cached in memory for 6h. The Transfer-log scan is the costliest RPC
+// work in the whole engine and counts move slowly, so most refreshes reuse these and
+// do NO holder getLogs at all.
+const holderCache = new Map<string, { count: number | null; expiresAt: number }>();
+const HOLDER_TTL_MS = 6 * 60 * 60_000;
+
+// Short per-address cache of the final eligibility verdict, to dedupe the client's
+// polling and avoid re-reading wallet balances on every request.
+const eligCache = new Map<string, { info: EligibilityInfo; expiresAt: number }>();
+const ELIG_TTL_MS = 30_000;
 
 export async function getQualifyingTokens(): Promise<QToken[]> {
   if (qCache && qCache.expiresAt > Date.now()) return qCache.tokens;
@@ -251,12 +262,22 @@ async function scanQualifyingTokens(): Promise<QToken[]> {
   // Phase 2: holder floor, only for the (small) set that already clears liq+age.
   // Scanned one token at a time (windows concurrent within a token) to stay gentle
   // on the shared RPC key. Tokens beyond the budget stay holders-unknown.
-  const latestBlock = await client.getBlockNumber().catch(() => null);
-  const passers = prelim.filter((t) => t.passesLiqAge).slice(0, MAX_HOLDER_TOKENS);
+  const passers = prelim.filter((t) => t.passesLiqAge);
   const holdersByToken = new Map<string, number | null>();
-  if (latestBlock !== null) {
-    for (const t of passers) {
-      holdersByToken.set(t.address.toLowerCase(), await countHolders(t.address, t.createdBlock, latestBlock));
+  const toScan: PrelimToken[] = [];
+  for (const t of passers) {
+    const c = holderCache.get(t.address.toLowerCase());
+    if (c && c.expiresAt > Date.now()) holdersByToken.set(t.address.toLowerCase(), c.count);
+    else toScan.push(t);
+  }
+  if (toScan.length > 0) {
+    const latestBlock = await client.getBlockNumber().catch(() => null);
+    if (latestBlock !== null) {
+      for (const t of toScan.slice(0, MAX_HOLDER_TOKENS)) {
+        const count = await countHolders(t.address, t.createdBlock, latestBlock);
+        holderCache.set(t.address.toLowerCase(), { count, expiresAt: Date.now() + HOLDER_TTL_MS });
+        holdersByToken.set(t.address.toLowerCase(), count);
+      }
     }
   }
 
@@ -451,6 +472,8 @@ async function heldEnough24hAgo(address: string, qtokens: QToken[]): Promise<boo
 
 export async function getEligibility(addressRaw: string): Promise<EligibilityInfo> {
   const address = addressRaw.toLowerCase();
+  const cachedElig = eligCache.get(address);
+  if (cachedElig && cachedElig.expiresAt > Date.now()) return cachedElig.info;
   const db = requireSupabase();
   const admin = isAdmin(address);
 
@@ -510,7 +533,7 @@ export async function getEligibility(addressRaw: string): Promise<EligibilityInf
   const cooldownOk = Date.now() >= canPostAtMs;
 
   const eligible = heldEnough && heldLongEnough;
-  return {
+  const result: EligibilityInfo = {
     eligible,
     qualifyingUsd: Math.round(usd * 100) / 100,
     heldEnough,
@@ -523,4 +546,6 @@ export async function getEligibility(addressRaw: string): Promise<EligibilityInf
         ? "Hold it for at least 24 hours"
         : undefined,
   };
+  eligCache.set(address, { info: result, expiresAt: Date.now() + ELIG_TTL_MS });
+  return result;
 }

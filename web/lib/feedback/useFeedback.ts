@@ -11,8 +11,8 @@ export function useEligibility() {
   return useQuery<EligibilityInfo | null>({
     queryKey: ["feedback-eligibility", address],
     enabled: !!address,
-    staleTime: 30_000,
-    refetchInterval: 60_000,
+    staleTime: 60_000,
+    refetchInterval: 180_000,
     queryFn: async () => {
       if (!address) return null;
       const r = await fetch(`/api/feedback/eligibility?address=${address}`);

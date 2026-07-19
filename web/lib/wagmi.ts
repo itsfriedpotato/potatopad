@@ -37,6 +37,6 @@ export const wagmiConfig = getDefaultConfig({
   // Every browser RPC read tunnels through /api/rpc → Alchemy. wagmi's 4s default
   // block-poll (balances, block number) multiplies that; 15s is plenty fresh for a
   // launchpad and cuts proxy/Alchemy load ~4x.
-  pollingInterval: 15_000,
+  pollingInterval: 30_000,
   ssr: true,
 });
