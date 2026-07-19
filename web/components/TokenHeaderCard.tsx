@@ -3,7 +3,7 @@
 import { Globe, Send, X } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { Address } from "viem";
-import { imageUriCandidates } from "@/lib/format";
+import { imageProxyCandidates } from "@/lib/format";
 import { useLaunchActivity } from "@/lib/events";
 import { AddressChip } from "@/components/AddressChip";
 import { TokenAvatar } from "@/components/TokenAvatar";
@@ -38,10 +38,11 @@ export function TokenHeaderCard({
   const { creationByToken } = useLaunchActivity();
   const meta = creationByToken.get(token.toLowerCase());
 
-  // Click-to-enlarge: walk the same gateway candidate list the avatar uses, so a
-  // dead IPFS gateway falls through to the next instead of a broken lightbox.
+  // Click-to-enlarge: walk the same proxy-first candidate list the avatar uses,
+  // so the enlarged view is cached too and a dead gateway falls through instead
+  // of a broken lightbox.
   const effectiveImage = imageURI ?? meta?.imageURI;
-  const zoomCandidates = useMemo(() => imageUriCandidates(effectiveImage), [effectiveImage]);
+  const zoomCandidates = useMemo(() => imageProxyCandidates(effectiveImage), [effectiveImage]);
   const [zoomOpen, setZoomOpen] = useState(false);
   const [zoomIdx, setZoomIdx] = useState(0);
   useEffect(() => {

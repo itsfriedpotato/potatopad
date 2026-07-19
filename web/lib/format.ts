@@ -106,16 +106,17 @@ export function formatUsdPrice(n: number): string {
 }
 
 /**
- * Public IPFS gateways tried in order for launch images.
- *
- * Pinata is first: `/api/upload` pins via Pinata, and `ipfs.io` is often slow
- * or blocked for browsers. Remaining gateways are fallbacks for CIDs pinned
- * elsewhere (or when Pinata is temporarily unreachable).
+ * Public IPFS gateways, ordered by MEASURED latency (warm GET of a real token
+ * image): ipfs.io (~60ms, serves bytes directly) first, then dweb.link (fast
+ * but 301-redirects to a per-CID subdomain), then the shared Pinata gateway
+ * LAST — the pad pins via Pinata, but its shared *read* gateway measured ~6s
+ * per image, far too slow to lead with. Client `<img>` reads should prefer the
+ * same-origin proxy (see {@link imageProxyCandidates}); these are its fallbacks.
  */
 const IPFS_GATEWAYS = [
-  "https://gateway.pinata.cloud/ipfs/",
   "https://ipfs.io/ipfs/",
   "https://dweb.link/ipfs/",
+  "https://gateway.pinata.cloud/ipfs/",
 ] as const;
 
 /**
@@ -193,9 +194,11 @@ function sanitizeIpfsPath(path: string): string | undefined {
 
 /**
  * Extract an IPFS content path (CID + optional subpath) from common URI forms.
- * Returns undefined when the input is not a safe IPFS path.
+ * Returns undefined when the input is not a safe IPFS path. Exported so the
+ * `/api/img` proxy can validate the client-supplied CID with the exact same
+ * rules that build the gateway URLs here (no drift between the two).
  */
-function extractIpfsPath(uri: string): string | undefined {
+export function extractIpfsPath(uri: string): string | undefined {
   const t = uri.trim();
   if (!t) return undefined;
 
@@ -246,6 +249,44 @@ export function imageUriCandidates(uri: string | undefined | null): string[] {
   if (/^https?:\/\//i.test(t)) return [t];
 
   // Drop javascript:, data:text/*, bare junk, etc.
+  return [];
+}
+
+/**
+ * Client-side `<img>` candidates that lead with the same-origin `/api/img`
+ * proxy. The proxy fetches each CID once from the fastest gateway, caches the
+ * bytes across every visitor, and serves them from our own origin with an
+ * immutable header — so repeat views and navigations are instant instead of
+ * re-hitting a slow, poorly-cached public gateway. The direct gateways follow
+ * as `onError` fallbacks.
+ *
+ * SERVER-side callers (OG images, SSR) must keep using {@link imageUriCandidates}
+ * / {@link resolveImageUri}: a relative `/api/img` URL has no origin to resolve
+ * against off the browser.
+ */
+export function imageProxyCandidates(uri: string | undefined | null): string[] {
+  if (uri == null) return [];
+  const t = uri.trim();
+  if (!t) return [];
+
+  // data: images are already inline — nothing to proxy or cache.
+  if (/^data:image\//i.test(t)) return [t];
+
+  const ipfsPath = extractIpfsPath(t);
+  if (ipfsPath) {
+    const out: string[] = [`/api/img?cid=${encodeURIComponent(ipfsPath)}`];
+    // A creator-pinned full https URL, then the direct gateways, as fallbacks.
+    if (/^https?:\/\//i.test(t) && !out.includes(t)) out.push(t);
+    for (const base of IPFS_GATEWAYS) {
+      const candidate = `${base}${ipfsPath}`;
+      if (!out.includes(candidate)) out.push(candidate);
+    }
+    return out;
+  }
+
+  // Plain http(s) image URLs pass through direct (never proxy an arbitrary URL).
+  if (/^https?:\/\//i.test(t)) return [t];
+
   return [];
 }
 
