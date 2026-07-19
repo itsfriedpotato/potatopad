@@ -91,11 +91,18 @@ interface PrelimToken {
 let priceCache: { usd: number; expiresAt: number } | null = null;
 async function ethUsd(): Promise<number> {
   if (priceCache && priceCache.expiresAt > Date.now()) return priceCache.usd;
+  // Use the CoinGecko PRO endpoint + API key when configured (the free endpoint is
+  // rate-limited from cloud IPs like Railway, which would return 0 and zero out every
+  // token's USD value). Mirrors lib/tokenFeed.ts.
+  const key = process.env.COINGECKO_API_KEY;
+  const url = key
+    ? "https://pro-api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd"
+    : "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd";
+  const headers: Record<string, string> = key
+    ? { "x-cg-pro-api-key": key, accept: "application/json" }
+    : { accept: "application/json" };
   try {
-    const r = await fetch(
-      "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd",
-      { signal: AbortSignal.timeout(5000) },
-    );
+    const r = await fetch(url, { headers, signal: AbortSignal.timeout(6000) });
     const j = (await r.json()) as { ethereum?: { usd?: number } };
     const usd = j.ethereum?.usd ?? 0;
     if (usd > 0) priceCache = { usd, expiresAt: Date.now() + 5 * 60_000 };
@@ -103,6 +110,40 @@ async function ethUsd(): Promise<number> {
   } catch {
     return priceCache?.usd ?? 0;
   }
+}
+
+/** Diagnostic: expose the engine's internal state for one address (dev / triage). */
+export async function debugScan(address: string) {
+  const price = await ethUsd();
+  const feed = await loadFeed().catch((e) => ({ creations: [], err: String(e) }));
+  const creations = feed.creations;
+  let firstRead: unknown = "no creations";
+  const c0 = creations[0];
+  if (c0?.pool) {
+    try {
+      const [slot0, wethBal] = await Promise.all([
+        client.readContract({ address: c0.pool as Address, abi: uniswapV3PoolAbi, functionName: "slot0" }),
+        client.readContract({ address: WETH, abi: erc20Abi, functionName: "balanceOf", args: [c0.pool as Address] }),
+      ]);
+      firstRead = { pool: c0.pool, sqrt: String((slot0 as readonly unknown[])[0]), wethInPool: String(wethBal) };
+    } catch (e) {
+      firstRead = { readError: String(e).slice(0, 300) };
+    }
+  }
+  const q = await getQualifyingTokens();
+  const usd = await getWalletUsd(address);
+  return {
+    ethUsd: price,
+    coingeckoKey: !!process.env.COINGECKO_API_KEY,
+    creations: creations.length,
+    firstRead,
+    qualifyingTotal: q.length,
+    qualifyingTrue: q.filter((t) => t.qualifies).length,
+    walletUsd: usd,
+    sample: q
+      .slice(0, 4)
+      .map((t) => ({ symbol: t.symbol, priceUsd: t.priceUsd, liquidityUsd: t.liquidityUsd, holders: t.holders, qualifies: t.qualifies })),
+  };
 }
 
 // --- qualifying tokens (cached 10 min) ---
