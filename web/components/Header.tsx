@@ -55,6 +55,16 @@ export function Header() {
             Discover
           </Link>
           <Link
+            href="/feedback"
+            className={`rounded-lg px-3 py-1.5 text-sm transition-colors ${
+              pathname === "/feedback"
+                ? "text-amber-500"
+                : "text-neutral-400 hover:text-neutral-100"
+            }`}
+          >
+            Feedback
+          </Link>
+          <Link
             href="/create"
             className={`whitespace-nowrap rounded-lg px-3 py-1.5 text-sm font-bold transition-colors ${
               pathname === "/create"
