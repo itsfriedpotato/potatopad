@@ -132,7 +132,7 @@ export function Header() {
                       <Link
                         href={myProfileHref}
                         className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-2 text-xs font-medium transition-colors ${
-                          pathname.startsWith("/creator/")
+                          pathname.toLowerCase() === myProfileHref.toLowerCase()
                             ? "text-amber-500"
                             : "text-neutral-400 hover:text-neutral-100"
                         }`}
