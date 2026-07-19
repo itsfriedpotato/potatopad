@@ -90,13 +90,15 @@ export const CHAINS: ChainConfig[] = [
     // Only Robinhood is wired for in-app trading (router + quoter present).
     swapRouter: "0xcaf681a66d020601342297493863e78c959e5cb2",
     quoter: "0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7",
-    padStartBlock: 13_221_549n, // deploy block of the 2%/redirect/owner() pad 0xe26e…9001
+    padStartBlock: 14_072_000n, // deploy block of the holder-rewards pad 0x88eB…A338
     legacyPads: [
       // Superseded pads, CAPPED at the block their successor took over: existing
       // tokens still render, but launches after the repoint do not surface. No
       // token is lost — every pre-repoint launch is below the cap. (The cap on
       // 0x6722 has a small buffer past 13_221_549 to cover the deploy→repoint
       // window, so a token launched during it still shows.)
+      // v5 pad 0xe26e…9001 — the 2%/redirect/owner pad, superseded by the holder-rewards pad.
+      { address: "0xe26e17B552A3f0361b0546443FFe58F7cF509001", startBlock: 13_221_549n, endBlock: 14_073_506n },
       // v4 pad 0x6722…63E8 — the burn+blacklist pad, superseded by the redirect pad.
       { address: "0x67225AC6ba037aA220F68e5aAA2b49Be4B0863E8", startBlock: 12_757_281n, endBlock: 13_230_000n },
       // v3 pad 0x12A0…D91F — held all launches before the burn+blacklist upgrade.
