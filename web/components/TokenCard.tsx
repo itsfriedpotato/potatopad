@@ -119,19 +119,20 @@ export function TokenCard({
           </div>
         </div>
       </Link>
+      {/* Sibling link (not nested): open planter profile without leaving token nav. */}
       {profile ? (
         <div className="border-t border-neutral-800/60 px-3 py-2">
           <Link
             href={profile}
-            className="block truncate font-mono text-[10px] text-neutral-500 transition-colors hover:text-amber-400 focus-visible:text-amber-400 focus-visible:outline-none"
+            className="block truncate text-[10px] text-neutral-500 transition-colors hover:text-amber-400 focus-visible:text-amber-400 focus-visible:outline-none"
           >
-            Planter {shortAddress(row.creator)}
+            by <span className="font-mono">{shortAddress(row.creator)}</span>
           </Link>
         </div>
       ) : (
         <div className="border-t border-neutral-800/60 px-3 py-2">
-          <span className="block truncate font-mono text-[10px] text-neutral-600">
-            Planter {shortAddress(row.creator)}
+          <span className="block truncate text-[10px] text-neutral-600">
+            by <span className="font-mono">{shortAddress(row.creator)}</span>
           </span>
         </div>
       )}

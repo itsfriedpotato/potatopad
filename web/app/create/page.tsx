@@ -1,5 +1,6 @@
 "use client";
 
+import { useQueryClient } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent } from "react";
@@ -25,6 +26,7 @@ const labelCls = "text-[10px] font-bold uppercase tracking-wider text-neutral-50
 
 export default function CreatePage() {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const { pad, chainId, isDeployed } = usePad();
   const tx = useTx();
   const { tokens: ancientTokens } = useAncientTokens();
@@ -103,9 +105,12 @@ export default function CreatePage() {
         // not a TokenCreated log — keep scanning
       }
     }
+    // Kick the Discover/profile feed so "My profile" / planter pages pick up the
+    // new plant sooner (server cache may still lag one TTL).
+    void queryClient.invalidateQueries({ queryKey: ["launch-activity"] });
     const timer = setTimeout(() => router.push(target), 800);
     return () => clearTimeout(timer);
-  }, [tx.confirmed, tx.receipt, router]);
+  }, [tx.confirmed, tx.receipt, router, queryClient]);
 
   if (!isDeployed) {
     return <NotDeployed chainId={chainId} />;

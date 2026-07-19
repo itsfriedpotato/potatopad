@@ -8,7 +8,7 @@ import { getAddress, isAddress, type Address } from "viem";
 import { useAccount } from "wagmi";
 import { chainName, WETH_ADDRESSES, ZERO_ADDRESS } from "@/lib/config";
 import { useLaunchActivity } from "@/lib/events";
-import { shortAddress, timeAgo } from "@/lib/format";
+import { shortAddress, shortDate, timeAgo } from "@/lib/format";
 import {
   creationsByCreator,
   firstPlantTimestamp,
@@ -78,9 +78,12 @@ export function CreatorPageClient({ address: raw }: { address: string }) {
   const [page, setPage] = useState(0);
   const [shareMsg, setShareMsg] = useState("");
 
+  // Newest first — feed scan order is not chronological; profiles should feel like a timeline.
   const mine = useMemo(() => {
     if (!address) return [];
-    return creationsByCreator(allCreations, address);
+    return [...creationsByCreator(allCreations, address)].sort(
+      (a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0),
+    );
   }, [allCreations, address]);
 
   const pageCount = Math.max(1, Math.ceil(mine.length / PAGE_SIZE));
@@ -234,10 +237,32 @@ export function CreatorPageClient({ address: raw }: { address: string }) {
   }
 
   // Planter-scoped: non-planters do not get the full profile chrome.
+  // Journey note: right after a plant, the server feed can lag (~TTL). Never tell the
+  // connected planter "you never launched" when the feed is empty — that is indexing lag.
   if (mine.length === 0) {
     return (
       <div className="card mx-auto max-w-lg p-10 text-center">
-        {feedState === "stale" ? (
+        {isYou ? (
+          <>
+            <Sprout className="mx-auto h-10 w-10 text-amber-500/80" aria-hidden />
+            <h2 className="mt-4 text-lg font-bold text-neutral-100">
+              Looking for your plants…
+            </h2>
+            <p className="mt-2 text-sm text-neutral-400">
+              New launches can take a minute or two to show up here while the Discover feed
+              refreshes. If you just planted, stay on the token page from the success redirect,
+              then reopen this profile shortly — or plant your first coin below.
+            </p>
+            <div className="mt-5 flex flex-wrap justify-center gap-2">
+              <Link href="/create" className="btn-primary inline-flex">
+                Plant a Coin
+              </Link>
+              <Link href="/" className="btn-secondary inline-flex">
+                Back to Discover
+              </Link>
+            </div>
+          </>
+        ) : feedState === "stale" ? (
           <>
             <h2 className="text-lg font-bold text-neutral-100">
               No plants found in the last updated data
@@ -250,6 +275,9 @@ export function CreatorPageClient({ address: raw }: { address: string }) {
                 Last updated {new Date(scanCompletedAt).toLocaleString()}
               </p>
             )}
+            <Link href="/" className="btn-secondary mt-6 inline-flex">
+              Back to Discover
+            </Link>
           </>
         ) : (
           <>
@@ -259,21 +287,16 @@ export function CreatorPageClient({ address: raw }: { address: string }) {
             </h2>
             <p className="mt-2 text-sm text-neutral-400">
               {shortAddress(address)} hasn&apos;t planted a coin on PotatoPad (Robinhood)
-              yet. Profiles are for wallets that have launched.
+              yet. Profiles are for wallets that have launched at least once.
             </p>
             <div className="mt-4 flex justify-center">
               <AddressChip address={address} chainId={ANALYTICS_CHAIN_ID} />
             </div>
-            {isYou && (
-              <Link href="/create" className="btn-primary mt-6 inline-flex">
-                Plant a Coin
-              </Link>
-            )}
+            <Link href="/" className="btn-secondary mt-6 inline-flex">
+              Back to Discover
+            </Link>
           </>
         )}
-        <Link href="/" className="btn-secondary mt-4 inline-flex">
-          Back to Discover
-        </Link>
       </div>
     );
   }
@@ -336,8 +359,16 @@ export function CreatorPageClient({ address: raw }: { address: string }) {
 
         <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
           <Stat label="Coins planted" value={String(mine.length)} />
-          <Stat label="First plant" value={first != null ? timeAgo(first) : "—"} />
-          <Stat label="Latest plant" value={latest != null ? timeAgo(latest) : "—"} />
+          <Stat
+            label="First plant"
+            value={first != null ? shortDate(first) : "—"}
+            sub={first != null ? timeAgo(first) : undefined}
+          />
+          <Stat
+            label="Latest plant"
+            value={latest != null ? timeAgo(latest) : "—"}
+            sub={latest != null ? shortDate(latest) : undefined}
+          />
           <Stat
             label="Top coin"
             value={
@@ -351,11 +382,17 @@ export function CreatorPageClient({ address: raw }: { address: string }) {
                   }`
                 : "—"
             }
-            sub={topCoin ? "Among priced coins on this page" : undefined}
+            sub={
+              topCoin
+                ? pageCount > 1
+                  ? "Highest MC on this page only (not all plants)"
+                  : "Among priced coins on this list"
+                : "Prices fill in as pools respond"
+            }
           />
         </div>
         <p className="mt-3 text-[11px] text-neutral-600">
-          Existence metrics from on-chain launches — not volume, holdings, or fee totals.
+          Launch history only — not volume, holdings, fees, or rank. Sort is newest plant first.
         </p>
       </div>
 

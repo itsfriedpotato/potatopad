@@ -109,8 +109,9 @@ export function TokenHeaderCard({
                     <Link
                       href={`/creator/${getAddress(creator)}`}
                       className="text-xs text-amber-500/90 transition-colors hover:text-amber-400"
+                      title="Coins this wallet has planted on PotatoPad"
                     >
-                      View profile
+                      View planter
                     </Link>
                   )}
                 </span>
