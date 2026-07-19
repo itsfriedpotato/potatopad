@@ -14,6 +14,13 @@ export const robinhoodChain = defineChain({
   blockExplorers: {
     default: { name: "Robinscan", url: "https://robinhoodchain.blockscout.com" },
   },
+  contracts: {
+    // Canonical Multicall3, verified live on Robinhood via eth_getCode. Lets
+    // wagmi/viem batch the Discover slot0 fan-out (~39 pool reads per visitor)
+    // into ONE eth_call (multicall3.aggregate3) instead of 39, which is the
+    // single biggest cut to burst RPC volume — bigger than adding nodes.
+    multicall3: { address: "0xcA11bde05977b3631167028862bE2a173976CA11" },
+  },
 });
 
 export const ZERO_ADDRESS =

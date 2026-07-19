@@ -8,7 +8,8 @@ import { getAddress, isAddress, type Address } from "viem";
 import { useAccount } from "wagmi";
 import { chainName, WETH_ADDRESSES, ZERO_ADDRESS } from "@/lib/config";
 import { useLaunchActivity } from "@/lib/events";
-import { shortAddress, shortDate, timeAgo } from "@/lib/format";
+import { formatUsd, shortAddress, shortDate, timeAgo } from "@/lib/format";
+import { useEthUsdPrice } from "@/lib/price";
 import {
   creationsByCreator,
   firstPlantTimestamp,
@@ -168,6 +169,7 @@ export function CreatorPageClient({ address: raw }: { address: string }) {
   );
 
   const topCoin = useMemo(() => topCoinByMarketCap(rows), [rows]);
+  const { usd: ethUsd } = useEthUsdPrice();
 
   const isYou =
     !!address && !!connected && connected.toLowerCase() === address.toLowerCase();
@@ -375,9 +377,11 @@ export function CreatorPageClient({ address: raw }: { address: string }) {
               topCoin
                 ? `$${topCoin.symbol}${
                     topCoin.marketCapEth != null
-                      ? ` · ${topCoin.marketCapEth.toLocaleString("en-US", {
-                          maximumFractionDigits: 2,
-                        })} ETH`
+                      ? ethUsd != null
+                        ? ` · ${formatUsd(topCoin.marketCapEth * ethUsd)}`
+                        : ` · ${topCoin.marketCapEth.toLocaleString("en-US", {
+                            maximumFractionDigits: 2,
+                          })} ETH`
                       : ""
                   }`
                 : "—"
