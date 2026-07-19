@@ -18,13 +18,20 @@ import NPMArtifact from "@uniswap/v3-periphery/artifacts/contracts/NonfungiblePo
  *   START_FDV_ETH      launch/open FDV in ETH    (default: 3   ≈ $6k)
  *   TOP_FDV_ETH        range-ceiling FDV in ETH  (default: 530 ≈ $1M)
  *   ANTI_SNIPE_BLOCKS  max-wallet (2%) window    (default: 1200 ≈ 2min at Robinhood's 0.1s blocks)
+ *   CHIP_TOKEN         enable the ChipFurnace: deploys a furnace that receives
+ *                      the protocol fee half and splits it 25% treasury /
+ *                      25% buyback-and-burn of this token. The pad's `treasury`
+ *                      is then the furnace, not TREASURY directly.
+ *   SWAP_ROUTER        SwapRouter02 used by the furnace (default: per-network canonical)
+ *   BURNER             keeper allowed to execute furnace buybacks (default: OWNER)
  */
-const CANONICAL: Record<string, { factory: string; npm: string; weth: string }> = {
+const CANONICAL: Record<string, { factory: string; npm: string; weth: string; swapRouter02?: string }> = {
   // https://developers.uniswap.org/contracts/v3/reference/deployments/base-deployments
   baseSepolia: {
     factory: "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24",
     npm: "0x27F971cb582BF9E50F397e4d29a5C7A34f11faA2",
     weth: "0x4200000000000000000000000000000000000006",
+    swapRouter02: "0x94cC0AaC535CCDB3C01d6787D6413C739ae12bc4",
   },
   // Robinhood Chain mainnet (chainId 4663). Uniswap V3 lives at NON-canonical
   // addresses here. Every address below was triangulated + verified on-chain:
@@ -33,12 +40,18 @@ const CANONICAL: Record<string, { factory: string; npm: string; weth: string }> 
   //   - npm: from Uniswap's deployments page; its factory()/WETH9() point back
   //     to the factory + weth below (self-consistent on-chain).
   //   - weth: a live pool's token0() equals Robinhood's official docs WETH address.
+  //   - swapRouter02: the router the potato.fm frontend trades through.
   robinhoodMainnet: {
     factory: "0x1f7d7550b1b028f7571e69a784071f0205fd2efa",
     npm: "0x73991a25c818bf1f1128deaab1492d45638de0d3",
     weth: "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+    swapRouter02: "0xcaf681a66d020601342297493863e78c959e5cb2",
   },
 };
+
+// $CHIP on Robinhood Chain (launched on the v2 pad; CHIP/WETH pool is the 1% tier).
+// Passed as a default so `CHIP_TOKEN=default` works; any other value overrides.
+const ROBINHOOD_CHIP = "0x1e4d3243a287EDb687A4cBf2A1223dA54E8c835f";
 
 const DEFAULT_TREASURY = "0xd3358b1F39A6a71911c6e33717D185F99d43e80d";
 
@@ -94,9 +107,32 @@ async function main() {
     throw new Error(`no Uniswap V3 addresses configured for network '${network.name}'`);
   }
 
+  // Optional ChipFurnace: when CHIP_TOKEN is set, the pad's treasury becomes a
+  // furnace that splits the protocol's fee half 50/50 — half onward to the real
+  // TREASURY, half market-buying CHIP and burning it. Net split of total LP
+  // fees: 50% creator / 25% treasury / 25% CHIP buyback-and-burn.
+  let furnace: string | undefined;
+  let padTreasury = treasury;
+  const chipEnv = process.env.CHIP_TOKEN;
+  if (chipEnv) {
+    const chip = chipEnv === "default" ? ROBINHOOD_CHIP : chipEnv;
+    const swapRouter = process.env.SWAP_ROUTER || CANONICAL[network.name]?.swapRouter02;
+    if (!swapRouter) {
+      throw new Error(`CHIP_TOKEN set but no SwapRouter02 known for '${network.name}' — set SWAP_ROUTER`);
+    }
+    const burner = process.env.BURNER || owner;
+    const furnaceC = await (
+      await ethers.getContractFactory("ChipFurnace")
+    ).deploy(treasury, weth, swapRouter, chip, 10_000, burner);
+    await furnaceC.waitForDeployment();
+    furnace = furnaceC.target as string;
+    padTreasury = furnace;
+    console.log(`ChipFurnace:     ${furnace}  (chip=${chip}, burner=${burner})`);
+  }
+
   const pad = await (
     await ethers.getContractFactory("PotatoPad")
-  ).deploy(treasury, startFdv, topFdv, antiSnipeBlocks, factory, npm, weth, owner, ANCIENT_BANNED);
+  ).deploy(padTreasury, startFdv, topFdv, antiSnipeBlocks, factory, npm, weth, owner, ANCIENT_BANNED);
   await pad.waitForDeployment();
   const locker = await pad.locker();
   const [actualStart, actualTop] = await Promise.all([pad.actualStartFdv(), pad.actualTopFdv()]);
@@ -111,6 +147,8 @@ async function main() {
     network: network.name,
     pad: pad.target,
     locker,
+    furnace: furnace ?? null,
+    padTreasury,
     treasury,
     owner,
     bannedSeed: ANCIENT_BANNED,

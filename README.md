@@ -40,6 +40,8 @@ A launch is a single atomic transaction — no curve, no graduation, no waiting.
 
 4. **Fees for life.** Every swap pays the pool's 1% fee to the locked position. Anyone can call `locker.collect(tokenId)` to harvest the accrued fees; they split 50/50 — the treasury's half is auto-forwarded on `collect`, and the creator claims their half with `locker.claim()`.
 
+5. **Optional: the CHIP furnace.** Deploy with `CHIP_TOKEN` set and the pad's treasury becomes a `ChipFurnace` instead of a plain address: the protocol's half of the WETH fees flows into the furnace, where a permissionless `split()` pushes 50% onward to the real treasury and parks 50% as a WETH reserve that a keeper market-buys $CHIP with and burns (the router delivers the CHIP straight to `0xdEaD`). Net split of total LP fees: **50% creator / 25% treasury / 25% CHIP buyback-and-burn**. Funds in the furnace have exactly two exits, both fixed at construction — the treasury and the burn — so the keeper controls only timing and minimum price, never destination.
+
 **Why the token address is random.** The token is deployed with `CREATE2` off a caller-supplied **random** salt, so the address is unpredictable until the transaction is public. That stops a griefer from pre-creating and mis-initializing the token's Uniswap pool to break the single-sided mint. If a candidate address is somehow already taken, the pad walks to the next one and self-heals — no launch can be permanently bricked.
 
 **Anti-snipe.** For a short window after launch (a fixed number of blocks) no non-exempt wallet may end a transfer holding more than 2% of supply, throttling bots from vacuuming the opening liquidity. After the window it becomes a complete no-op, so normal trading is never affected.
@@ -53,6 +55,7 @@ potatopad/
   contracts/                          Hardhat project (Solidity 0.8.24)
     contracts/PotatoPad.sol           launchpad: token deploy + single-sided LP mint + dev-buy
     contracts/PotatoFeeLocker.sol     permanent LP lock + 50/50 fee splitter
+    contracts/ChipFurnace.sol         optional treasury: 25% treasury / 25% $CHIP buyback-and-burn
     contracts/PotatoToken.sol         minimal fixed-supply ERC-20 (+ time-boxed anti-snipe)
     contracts/libraries/TickMath.sol  Uniswap tick math, ported to 0.8.24
     contracts/interfaces/             minimal Uniswap V3 interfaces
@@ -163,6 +166,10 @@ BASE_SEPOLIA_RPC_URL=https://sepolia.base.org
 # START_FDV_ETH=3           # launch/open fully-diluted valuation, in ETH
 # TOP_FDV_ETH=530           # range-ceiling FDV, in ETH
 # ANTI_SNIPE_BLOCKS=1200    # length of the 2% max-wallet window, in blocks
+# CHIP_TOKEN=default        # deploy the ChipFurnace: 25% treasury / 25% buyback-burn
+#                           # ("default" = $CHIP on Robinhood; or any token address)
+# SWAP_ROUTER=0x...         # furnace's SwapRouter02 (defaults per network)
+# BURNER=0x...              # furnace buyback keeper (defaults to OWNER)
 ```
 
 Deploy:
@@ -205,6 +212,7 @@ Notes:
 |---|---|---|
 | Uniswap fee tier | 1% (`POOL_FEE = 10000`) | `PotatoPad.sol` |
 | Fee split | 50% creator / 50% treasury | `PotatoPad.sol`, `PotatoFeeLocker.sol` |
+| Fee split with furnace | 50% creator / 25% treasury / 25% $CHIP buyback-burn | `ChipFurnace.sol`, `CHIP_TOKEN` env |
 | Treasury | `0xd3358b1F39A6a71911c6e33717D185F99d43e80d` | constructor arg (`scripts/deploy.ts`) |
 | Total supply | 1,000,000,000 | `PotatoPad.sol` |
 | Launch (open) FDV | ~3 ETH | constructor arg (`START_FDV_ETH`) |
