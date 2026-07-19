@@ -6,7 +6,6 @@
 //   - the 1-post-per-3-days cooldown.
 import { createPublicClient, http, erc20Abi, parseAbiItem, type Address } from "viem";
 import { robinhoodChain, WETH_ADDRESSES, ZERO_ADDRESS } from "@/lib/config";
-import { priceWethPerToken, tokenIsToken0, uniswapV3PoolAbi } from "@/lib/pool";
 import { loadFeed } from "@/lib/tokenFeed";
 import { requireSupabase } from "@/lib/supabase";
 import {
@@ -57,6 +56,40 @@ const transferEvent = parseAbiItem(
 );
 type TransferLog = { args: { from?: Address; to?: Address; value?: bigint } };
 
+// Uniswap V3 slot0 ABI + price helpers, inlined here on purpose. They must NOT be
+// imported from lib/pool.ts (a "use client" module) — in the server/RSC bundle those
+// exports become client-reference stubs, and viem's abi.filter(...) throws
+// "o.filter is not a function" at runtime, silently zeroing every token.
+const slot0Abi = [
+  {
+    inputs: [],
+    name: "slot0",
+    outputs: [
+      { name: "sqrtPriceX96", type: "uint160" },
+      { name: "tick", type: "int24" },
+      { name: "observationIndex", type: "uint16" },
+      { name: "observationCardinality", type: "uint16" },
+      { name: "observationCardinalityNext", type: "uint16" },
+      { name: "feeProtocol", type: "uint8" },
+      { name: "unlocked", type: "bool" },
+    ],
+    stateMutability: "view",
+    type: "function",
+  },
+] as const;
+
+const Q96 = 2 ** 96;
+function tokenIsToken0(token: Address, weth: Address): boolean {
+  return BigInt(token) < BigInt(weth);
+}
+function priceWethPerToken(sqrtPriceX96: bigint, isToken0: boolean): number {
+  if (sqrtPriceX96 <= 0n) return 0;
+  const ratio = Number(sqrtPriceX96) / Q96;
+  const p = ratio * ratio;
+  if (!Number.isFinite(p) || p <= 0) return 0;
+  return isToken0 ? p : 1 / p;
+}
+
 export function isAdmin(address: string): boolean {
   return address.toLowerCase() === ADMIN_ADDRESS;
 }
@@ -94,13 +127,16 @@ async function ethUsd(): Promise<number> {
   // Use the CoinGecko PRO endpoint + API key when configured (the free endpoint is
   // rate-limited from cloud IPs like Railway, which would return 0 and zero out every
   // token's USD value). Mirrors lib/tokenFeed.ts.
+  // CoinGecko has two key types: demo keys (prefix "CG-") use api.coingecko.com with
+  // x-cg-demo-api-key; pro keys use pro-api.coingecko.com with x-cg-pro-api-key. Send
+  // the right host + header for whichever is configured; no key falls back to free.
   const key = process.env.COINGECKO_API_KEY;
-  const url = key
-    ? "https://pro-api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd"
-    : "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd";
-  const headers: Record<string, string> = key
-    ? { "x-cg-pro-api-key": key, accept: "application/json" }
-    : { accept: "application/json" };
+  const demo = !key || key.startsWith("CG-");
+  const url = demo
+    ? "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd"
+    : "https://pro-api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd";
+  const headers: Record<string, string> = { accept: "application/json" };
+  if (key) headers[demo ? "x-cg-demo-api-key" : "x-cg-pro-api-key"] = key;
   try {
     const r = await fetch(url, { headers, signal: AbortSignal.timeout(6000) });
     const j = (await r.json()) as { ethereum?: { usd?: number } };
@@ -122,7 +158,7 @@ export async function debugScan(address: string) {
   if (c0?.pool) {
     try {
       const [slot0, wethBal] = await Promise.all([
-        client.readContract({ address: c0.pool as Address, abi: uniswapV3PoolAbi, functionName: "slot0" }),
+        client.readContract({ address: c0.pool as Address, abi: slot0Abi, functionName: "slot0" }),
         client.readContract({ address: WETH, abi: erc20Abi, functionName: "balanceOf", args: [c0.pool as Address] }),
       ]);
       firstRead = { pool: c0.pool, sqrt: String((slot0 as readonly unknown[])[0]), wethInPool: String(wethBal) };
@@ -178,7 +214,7 @@ async function scanQualifyingTokens(): Promise<QToken[]> {
         if (!c.pool) return null;
         try {
           const [slot0, wethBal] = await Promise.all([
-            client.readContract({ address: c.pool as Address, abi: uniswapV3PoolAbi, functionName: "slot0" }),
+            client.readContract({ address: c.pool as Address, abi: slot0Abi, functionName: "slot0" }),
             client.readContract({ address: WETH, abi: erc20Abi, functionName: "balanceOf", args: [c.pool as Address] }),
           ]);
           const sqrtP = (slot0 as readonly unknown[])[0] as bigint;
