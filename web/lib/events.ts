@@ -140,14 +140,26 @@ export function useLaunchActivity() {
       return cached ? presentAged(cached.data) : undefined;
     },
     queryFn: async ({ client }) => {
-      const previous = client.getQueryData<LaunchActivity>(queryKey);
+      // `placeholderData` is observer-only — not in the query cache. Fall back to
+      // localStorage so a cold mount + failed fetch still preserves a warm snapshot.
+      const previous =
+        client.getQueryData<LaunchActivity>(queryKey) ??
+        (() => {
+          const cached = readLaunchCache(cacheKey);
+          return cached ? presentAged(cached.data) : undefined;
+        })();
+
+      const asStale = (base: LaunchActivity, servedAt?: number): LaunchActivity => ({
+        ...base,
+        state: "stale",
+        unavailable: false,
+        servedAt: servedAt ?? Date.now(),
+      });
+
       try {
         const res = await fetch("/api/tokens", { cache: "no-store" });
         if (!res.ok) {
-          // Keep last good / placeholder data instead of wiping to empty unavailable.
-          if (previous && previous.creations.length > 0) {
-            return { ...previous, state: "stale" as const, unavailable: false };
-          }
+          if (previous && previous.creations.length > 0) return asStale(previous);
           return {
             ...EMPTY_LAUNCH,
             state: "unavailable" as const,
@@ -180,14 +192,9 @@ export function useLaunchActivity() {
         }));
         const state: FeedState =
           json.state ?? (json.unavailable ? "unavailable" : "fresh");
-        // Server unavailable with empty list: prefer previous warm data as stale.
+        // Server unavailable with empty list: prefer warm previous/localStorage as stale.
         if (state === "unavailable" && creations.length === 0 && previous?.creations.length) {
-          return {
-            ...previous,
-            state: "stale" as const,
-            unavailable: false,
-            servedAt: json.servedAt ?? Date.now(),
-          };
+          return asStale(previous, json.servedAt);
         }
         const result: LaunchActivity = {
           creations,
@@ -200,9 +207,7 @@ export function useLaunchActivity() {
         writeLaunchCache(cacheKey, result);
         return result;
       } catch {
-        if (previous && previous.creations.length > 0) {
-          return { ...previous, state: "stale" as const, unavailable: false };
-        }
+        if (previous && previous.creations.length > 0) return asStale(previous);
         return {
           ...EMPTY_LAUNCH,
           state: "unavailable" as const,
