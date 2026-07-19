@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "test": "tsx --test lib/padStats.test.ts"
   },
   "dependencies": {
     "@rainbow-me/rainbowkit": "^2.2.0",
@@ -25,6 +26,7 @@
     "autoprefixer": "^10.4.19",
     "postcss": "^8.4.39",
     "tailwindcss": "^3.4.6",
+    "tsx": "^4.23.1",
     "typescript": "~5.8.3"
   }
 }

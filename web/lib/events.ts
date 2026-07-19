@@ -1,27 +1,25 @@
 "use client";
 
 // Event-driven data layer: launch history (TokenCreated) and holders (ERC-20
-// Transfer logs) fetched via the wagmi public client. v2 has no Trade or
-// Graduated events — price/liquidity come from the Uniswap pool (see lib/pool).
-// All fetchers degrade gracefully — RPCs that cap log ranges yield
-// `unavailable: true` instead of throwing.
+// Transfer logs). v2 has no Trade or Graduated events — price/liquidity come
+// from the Uniswap pool (see lib/pool). All fetchers degrade gracefully.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo } from "react";
 import type { Address } from "viem";
-import { isHiddenToken, padDeployments } from "@/lib/config";
+import { isHiddenToken } from "@/lib/config";
 import { usePad } from "@/lib/hooks";
+import type { FeedState } from "@/lib/tokenFeed";
+import { ANALYTICS_CHAIN_ID } from "@/lib/robinhoodPublicClient";
 
 // ---------------------------------------------------------------------------
-// localStorage cache for the launch feed (bigint-safe). The historical scan is
-// expensive; persisting it means a refresh paints instantly from cache and
-// revalidates in the background instead of re-scanning cold every time.
+// localStorage cache for the launch feed (bigint-safe).
 // ---------------------------------------------------------------------------
 
-const LAUNCH_CACHE_PREFIX = "potatopad:launch:v2:";
+const LAUNCH_CACHE_PREFIX = "potatopad:launch:v3:";
+/** Age a seeded fresh payload into "stale" after this (2 × server ~90s TTL). */
+const CLIENT_FRESH_MAX_MS = 180_000;
 
-// JSON can't hold bigint; tag them as {__b} so token names/symbols that happen to
-// look numeric are never mistaken for one.
 function launchReplacer(_key: string, value: unknown) {
   return typeof value === "bigint" ? { __b: value.toString() } : value;
 }
@@ -36,42 +34,6 @@ function launchReviver(_key: string, value: unknown) {
   }
   return value;
 }
-
-interface CachedLaunch {
-  data: LaunchActivity;
-  updatedAt: number;
-}
-
-function readLaunchCache(key: string): CachedLaunch | undefined {
-  if (typeof window === "undefined") return undefined;
-  try {
-    const raw = window.localStorage.getItem(key);
-    if (!raw) return undefined;
-    const parsed = JSON.parse(raw, launchReviver) as CachedLaunch;
-    if (!parsed?.data || !Array.isArray(parsed.data.creations)) return undefined;
-    return parsed;
-  } catch {
-    return undefined;
-  }
-}
-
-function writeLaunchCache(key: string, data: LaunchActivity) {
-  if (typeof window === "undefined") return;
-  try {
-    // Never cache an empty/failed scan — it would mask a real result on refresh.
-    if (data.unavailable || data.creations.length === 0) return;
-    window.localStorage.setItem(
-      key,
-      JSON.stringify({ data, updatedAt: Date.now() } satisfies CachedLaunch, launchReplacer),
-    );
-  } catch {
-    // quota / disabled storage — caching is best-effort.
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Launch activity: TokenCreated, served pre-scanned + cached by /api/tokens
-// ---------------------------------------------------------------------------
 
 export interface CreationEvent {
   token: Address;
@@ -91,43 +53,106 @@ export interface CreationEvent {
   volume24Usd: number;
 }
 
-interface LaunchActivity {
+export interface LaunchActivity {
   creations: CreationEvent[];
+  state: FeedState;
+  chainId: number;
+  servedAt: number;
+  scanCompletedAt: number;
+  /** @deprecated prefer state === "unavailable" */
   unavailable: boolean;
 }
 
-const EMPTY_LAUNCH: LaunchActivity = { creations: [], unavailable: false };
+interface CachedLaunch {
+  data: LaunchActivity;
+  updatedAt: number;
+}
 
+function readLaunchCache(key: string): CachedLaunch | undefined {
+  if (typeof window === "undefined") return undefined;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return undefined;
+    const parsed = JSON.parse(raw, launchReviver) as CachedLaunch;
+    if (!parsed?.data || !Array.isArray(parsed.data.creations)) return undefined;
+    // Discard legacy shapes without honesty fields.
+    if (
+      typeof parsed.data.servedAt !== "number" ||
+      typeof parsed.data.scanCompletedAt !== "number" ||
+      !parsed.data.state
+    ) {
+      return undefined;
+    }
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeLaunchCache(key: string, data: LaunchActivity) {
+  if (typeof window === "undefined") return;
+  // Persist only trustworthy fresh scans (incl. genuine empty).
+  if (data.state !== "fresh") return;
+  try {
+    window.localStorage.setItem(
+      key,
+      JSON.stringify({ data, updatedAt: Date.now() } satisfies CachedLaunch, launchReplacer),
+    );
+  } catch {
+    // quota / disabled storage — caching is best-effort.
+  }
+}
+
+/** Re-evaluate aged seeds so UI never treats a day-old snapshot as fresh. */
+function presentAged(data: LaunchActivity): LaunchActivity {
+  if (data.state === "fresh" && Date.now() - data.servedAt > CLIENT_FRESH_MAX_MS) {
+    return { ...data, state: "stale", unavailable: false };
+  }
+  return data;
+}
+
+const EMPTY_LAUNCH: LaunchActivity = {
+  creations: [],
+  state: "unavailable",
+  chainId: ANALYTICS_CHAIN_ID,
+  servedAt: 0,
+  scanCompletedAt: 0,
+  unavailable: true,
+};
+
+/**
+ * PotatoPad launch feed — always Robinhood (4663) server scan, independent of
+ * the connected wallet chain. Discover, ticker, and creator profiles share this.
+ */
 export function useLaunchActivity() {
-  const { chainId, isDeployed } = usePad();
   const queryClient = useQueryClient();
-  const pads = useMemo(() => padDeployments(chainId), [chainId]);
-  const queryKey = useMemo(
-    () => ["launch-activity", chainId, pads.map((p) => p.address).join(",")],
-    [chainId, pads],
-  );
-  const cacheKey = LAUNCH_CACHE_PREFIX + chainId + ":" + pads.map((p) => p.address).join(",");
+  const queryKey = useMemo(() => ["launch-activity", ANALYTICS_CHAIN_ID] as const, []);
+  const cacheKey = LAUNCH_CACHE_PREFIX + ANALYTICS_CHAIN_ID;
 
   const query = useQuery<LaunchActivity>({
     queryKey,
-    enabled: isDeployed && pads.length > 0,
-    // The scan itself runs server-side (cached) at /api/tokens, so no visitor
-    // pays the multi-pad getLogs cost anymore.
+    enabled: true,
     staleTime: 60_000,
     gcTime: 24 * 60 * 60 * 1000,
-    // A soft-degraded scan (unavailable) means "couldn't read right now", not "no
-    // tokens" — poll to auto-recover instead of stranding a cold-cache visitor on
-    // an empty view until the next focus/refresh.
-    // Poll gently for new launches (server feed is cached ~45s) instead of a live
-    // RPC event-watcher. Back off harder while degraded rather than hammering 4s.
-    refetchInterval: (q) => (q.state.data?.unavailable ? 10_000 : 60_000),
+    refetchInterval: (q) => (q.state.data?.state === "unavailable" ? 10_000 : 60_000),
     queryFn: async () => {
       try {
-        const res = await fetch("/api/tokens");
-        if (!res.ok) return { ...EMPTY_LAUNCH, unavailable: true };
+        const res = await fetch("/api/tokens", { cache: "no-store" });
+        if (!res.ok) {
+          return {
+            ...EMPTY_LAUNCH,
+            state: "unavailable" as const,
+            unavailable: true,
+            servedAt: Date.now(),
+          };
+        }
         const json = (await res.json()) as {
           creations: Array<Omit<CreationEvent, "blockNumber"> & { blockNumber: string }>;
-          unavailable: boolean;
+          unavailable?: boolean;
+          state?: FeedState;
+          chainId?: number;
+          servedAt?: number;
+          scanCompletedAt?: number;
         };
         const creations: CreationEvent[] = (json.creations ?? []).map((c) => ({
           token: c.token,
@@ -144,30 +169,42 @@ export function useLaunchActivity() {
           pad: c.pad,
           volume24Usd: c.volume24Usd ?? 0,
         }));
-        const result: LaunchActivity = { creations, unavailable: !!json.unavailable };
+        const state: FeedState =
+          json.state ?? (json.unavailable ? "unavailable" : "fresh");
+        const result: LaunchActivity = {
+          creations,
+          state,
+          chainId: json.chainId ?? ANALYTICS_CHAIN_ID,
+          servedAt: json.servedAt ?? Date.now(),
+          scanCompletedAt: json.scanCompletedAt ?? 0,
+          unavailable: state === "unavailable",
+        };
         writeLaunchCache(cacheKey, result);
         return result;
       } catch {
-        return { ...EMPTY_LAUNCH, unavailable: true };
+        return {
+          ...EMPTY_LAUNCH,
+          state: "unavailable" as const,
+          unavailable: true,
+          servedAt: Date.now(),
+        };
       }
     },
   });
 
-  // localStorage is unavailable during SSR. Seed React Query only after the
-  // initial hydration render so the server and browser produce the same tree
-  // (fix courtesy of #14). Cached refreshes still paint immediately after mount
-  // while the API request revalidates in the background.
+  // Seed React Query after hydration (SSR-safe) from localStorage.
   useEffect(() => {
     const cached = readLaunchCache(cacheKey);
     if (!cached) return;
     queryClient.setQueryData<LaunchActivity>(
       queryKey,
-      (current) => current ?? cached.data,
+      (current) => current ?? presentAged(cached.data),
       { updatedAt: cached.updatedAt },
     );
   }, [cacheKey, queryClient, queryKey]);
 
-  const data = query.data ?? EMPTY_LAUNCH;
+  const raw = query.data ?? EMPTY_LAUNCH;
+  const data = presentAged(raw);
   // creationByToken keeps the FULL set so a hidden token's own page/trade still
   // resolves by direct link; only the browse LISTS below drop hidden tokens.
   const creationByToken = useMemo(() => {
@@ -182,14 +219,22 @@ export function useLaunchActivity() {
 
   return {
     creations,
+    /** Unfiltered map (includes hidden tokens) for direct token-page lookups. */
     creationByToken,
-    unavailable: data.unavailable,
+    /** Unfiltered creations for planter checks (header "My profile"). */
+    allCreations: data.creations,
+    state: data.state,
+    chainId: data.chainId,
+    servedAt: data.servedAt,
+    scanCompletedAt: data.scanCompletedAt,
+    unavailable: data.state === "unavailable",
     isLoading: query.isLoading,
+    isFetching: query.isFetching,
   };
 }
 
 // ---------------------------------------------------------------------------
-// Holders, derived client-side from ERC20 Transfer logs (MVP approach)
+// Holders, derived client-side from server /api/holders
 // ---------------------------------------------------------------------------
 
 export interface Holder {
@@ -207,9 +252,8 @@ interface HoldersData {
 const EMPTY_HOLDERS: HoldersData = { holders: [], total: 0n, unavailable: false };
 
 /**
- * Balances per address, sorted descending. The Transfer-log scan now runs
- * server-side (cached) at /api/holders, so no visitor pays the per-token getLogs
- * cost — the browser just fetches a small JSON payload.
+ * Balances per address, sorted descending. The Transfer-log scan runs
+ * server-side (cached) at /api/holders.
  */
 export function useTokenHolders(token: Address | undefined) {
   const { chainId, isDeployed } = usePad();
@@ -233,7 +277,6 @@ export function useTokenHolders(token: Address | undefined) {
           total: string;
           unavailable: boolean;
         };
-        // JSON has no bigint; balances arrive as decimal strings.
         const holders: Holder[] = (json.holders ?? []).map((h) => ({
           address: h.address,
           balance: BigInt(h.balance),

@@ -1,8 +1,9 @@
 "use client";
 
 import { Globe, Send, X } from "lucide-react";
+import Link from "next/link";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import type { Address } from "viem";
+import { getAddress, isAddress, type Address } from "viem";
 import { imageUriCandidates } from "@/lib/format";
 import { useLaunchActivity } from "@/lib/events";
 import { AddressChip } from "@/components/AddressChip";
@@ -102,8 +103,16 @@ export function TokenHeaderCard({
                 Contract <AddressChip address={token} chainId={chainId} />
               </span>
               {!ancient && (
-                <span className="flex items-center gap-1.5">
+                <span className="flex flex-wrap items-center gap-1.5">
                   Creator <AddressChip address={creator} chainId={chainId} />
+                  {isAddress(creator) && (
+                    <Link
+                      href={`/creator/${getAddress(creator)}`}
+                      className="text-xs text-amber-500/90 transition-colors hover:text-amber-400"
+                    >
+                      View profile
+                    </Link>
+                  )}
                 </span>
               )}
             </div>

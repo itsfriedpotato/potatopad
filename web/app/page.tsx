@@ -91,10 +91,12 @@ export default function DiscoverPage() {
       creations.map((c, i) => {
         const slot0 = poolReads?.[i]?.result as Slot0 | undefined;
         const sqrtPriceX96 = slot0?.[0];
-        const priceWeth =
-          sqrtPriceX96 !== undefined
-            ? priceWethPerToken(sqrtPriceX96, tokenIsToken0(c.token, weth))
-            : 0;
+        // Failed / missing slot0 → null (never coerce unknown price to 0 ETH).
+        let priceWeth: number | null = null;
+        if (sqrtPriceX96 !== undefined && sqrtPriceX96 > 0n) {
+          const p = priceWethPerToken(sqrtPriceX96, tokenIsToken0(c.token, weth));
+          priceWeth = Number.isFinite(p) && p > 0 ? p : null;
+        }
         return {
           address: c.token,
           name: c.name,
@@ -102,7 +104,7 @@ export default function DiscoverPage() {
           creator: c.creator,
           pool: c.pool,
           priceWeth,
-          marketCapEth: priceWeth * TOTAL_SUPPLY_WHOLE,
+          marketCapEth: priceWeth != null ? priceWeth * TOTAL_SUPPLY_WHOLE : null,
           createdAt: c.timestamp,
           imageURI: c.imageURI,
           volume24Usd: c.volume24Usd,
@@ -119,8 +121,8 @@ export default function DiscoverPage() {
         symbol: t.symbol,
         creator: ZERO_ADDRESS,
         pool: t.tradePool,
-        priceWeth: 0,
-        marketCapEth: 0,
+        priceWeth: null,
+        marketCapEth: null,
         imageURI: t.imageUrl,
         ancient: true,
         marketCapUsd: t.fdvUsd,
@@ -154,7 +156,8 @@ export default function DiscoverPage() {
       case "old":
         return [...list].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
       case "mcap":
-        return [...list].sort((a, b) => b.marketCapEth - a.marketCapEth);
+        // Null FDVs sort last (unknown ≠ zero).
+        return [...list].sort((a, b) => (b.marketCapEth ?? -1) - (a.marketCapEth ?? -1));
       default:
         return list;
     }

@@ -56,8 +56,17 @@ export interface CreationDTO {
   /** 24h USD volume from GeckoTerminal (0 if unindexed) — drives "Recent buys". */
   volume24Usd: number;
 }
+export type FeedState = "fresh" | "stale" | "unavailable";
+
 export interface FeedPayload {
+  chainId: number;
+  /** unix ms — stamped on every loadFeed return (incl. cache hits). */
+  servedAt: number;
+  /** unix ms — last successful scan; 0 if never. */
+  scanCompletedAt: number;
+  state: FeedState;
   creations: CreationDTO[];
+  /** @deprecated prefer `state`; true iff state === "unavailable" */
   unavailable: boolean;
 }
 
@@ -66,7 +75,28 @@ const client = createPublicClient({
   transport: robinhoodServerTransport(),
 });
 
-let cache: { payload: FeedPayload; expiresAt: number } | null = null;
+/** In-process content cache (not the full response — servedAt is always re-stamped). */
+let cache: {
+  creations: CreationDTO[];
+  scanCompletedAt: number;
+  state: Exclude<FeedState, "unavailable">;
+  expiresAt: number;
+} | null = null;
+
+function stamp(
+  creations: CreationDTO[],
+  state: FeedState,
+  scanCompletedAt: number,
+): FeedPayload {
+  return {
+    chainId: robinhoodChain.id,
+    servedAt: Date.now(),
+    scanCompletedAt,
+    state,
+    creations,
+    unavailable: state === "unavailable",
+  };
+}
 
 /** One window, with retries. Returns null only after every attempt fails. */
 async function fetchCreatedLogs(
@@ -164,7 +194,7 @@ async function fetchVolumes(addresses: Address[]): Promise<Map<string, number>> 
 // once and kept for the process lifetime; only the active pad is re-scanned.
 let legacyTagged: PadTag[] | null = null;
 
-async function scan(): Promise<FeedPayload> {
+async function scan(): Promise<{ creations: CreationDTO[]; unavailable: boolean }> {
   const pads = padDeployments(robinhoodChain.id);
   if (pads.length === 0) return { creations: [], unavailable: false };
 
@@ -263,25 +293,35 @@ async function scan(): Promise<FeedPayload> {
 let inFlight: Promise<FeedPayload> | null = null;
 
 /**
- * Cached feed getter. Returns the last good payload on a scan failure (soft
- * degrade) so callers never throw; `unavailable` flags a cold-cache RPC miss.
- * Concurrent cold-cache callers share ONE scan (in-flight coalescing) so a fresh
- * process can't fire N parallel full sweeps and hammer the RPC into failure.
+ * Cached feed getter. Always stamps a fresh `servedAt` (incl. cache hits).
+ * Soft-degrades to stale/unavailable without throwing. Concurrent cold-cache
+ * callers share ONE scan (in-flight coalescing).
  */
 export async function loadFeed(): Promise<FeedPayload> {
   const now = Date.now();
-  if (cache && cache.expiresAt > now) return cache.payload;
+  if (cache && cache.expiresAt > now) {
+    return stamp(cache.creations, cache.state, cache.scanCompletedAt);
+  }
   if (inFlight) return inFlight;
   inFlight = (async () => {
     try {
-      const payload = await scan();
-      // Never cache a degraded scan — a gappy round would otherwise stick for the
-      // whole TTL and keep the client on skeletons. Cache only trustworthy feeds.
-      if (!payload.unavailable) cache = { payload, expiresAt: Date.now() + CACHE_TTL_MS };
-      return payload;
+      const result = await scan();
+      // Gappy scans: soft-degrade. Prefer warm cache as "stale" over a partial list.
+      if (result.unavailable) {
+        if (cache) return stamp(cache.creations, "stale", cache.scanCompletedAt);
+        return stamp([], "unavailable", 0);
+      }
+      const scanCompletedAt = Date.now();
+      cache = {
+        creations: result.creations,
+        scanCompletedAt,
+        state: "fresh",
+        expiresAt: scanCompletedAt + CACHE_TTL_MS,
+      };
+      return stamp(result.creations, "fresh", scanCompletedAt);
     } catch {
-      if (cache) return cache.payload;
-      return { creations: [], unavailable: true };
+      if (cache) return stamp(cache.creations, "stale", cache.scanCompletedAt);
+      return stamp([], "unavailable", 0);
     } finally {
       inFlight = null;
     }

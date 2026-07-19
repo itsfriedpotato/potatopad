@@ -1,10 +1,15 @@
 "use client";
 
 import { ConnectButton } from "@rainbow-me/rainbowkit";
-import { Search, Wallet } from "lucide-react";
+import { Search, User, Wallet } from "lucide-react";
 import Link from "next/link";
+import { useMemo } from "react";
 import { usePathname } from "next/navigation";
+import { getAddress } from "viem";
+import { useAccount } from "wagmi";
 import { useSearch } from "@/components/SearchContext";
+import { useLaunchActivity } from "@/lib/events";
+import { isPlanter } from "@/lib/padStats";
 
 // The chain-switcher pill is a dev convenience (hopping between localhost /
 // testnet / mainnet). Production builds serve one chain — never show it there.
@@ -14,6 +19,22 @@ const SHOW_CHAIN_SWITCHER = process.env.NODE_ENV === "development";
 export function Header() {
   const pathname = usePathname();
   const { query, setQuery } = useSearch();
+  const { address: connected } = useAccount();
+  // Use unfiltered creations so a planter whose only coin is list-hidden still
+  // gets My profile (existence is about plants, not Discover visibility).
+  const { allCreations, state: feedState, isLoading: feedLoading } = useLaunchActivity();
+  const myProfileHref = useMemo(() => {
+    if (!connected) return null;
+    // Only show once we know the feed is usable and this wallet has planted.
+    if (feedLoading && allCreations.length === 0) return null;
+    if (feedState === "unavailable" && allCreations.length === 0) return null;
+    if (!isPlanter(allCreations, connected)) return null;
+    try {
+      return `/creator/${getAddress(connected)}`;
+    } catch {
+      return null;
+    }
+  }, [connected, allCreations, feedState, feedLoading]);
 
   return (
     <header className="border-b border-neutral-800 bg-neutral-950/80 backdrop-blur-md">
@@ -107,6 +128,19 @@ export function Header() {
                   </button>
                 ) : (
                   <div className="flex items-center gap-2">
+                    {myProfileHref && (
+                      <Link
+                        href={myProfileHref}
+                        className={`hidden items-center gap-1.5 rounded-lg px-2.5 py-2 text-xs font-medium transition-colors sm:inline-flex ${
+                          pathname.startsWith("/creator/")
+                            ? "text-amber-500"
+                            : "text-neutral-400 hover:text-neutral-100"
+                        }`}
+                      >
+                        <User className="h-3.5 w-3.5" />
+                        My profile
+                      </Link>
+                    )}
                     {SHOW_CHAIN_SWITCHER && (
                       <button
                         type="button"
