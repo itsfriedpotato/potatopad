@@ -6,13 +6,14 @@ import { getDefaultConfig } from "@rainbow-me/rainbowkit";
 import { http } from "viem";
 import { baseSepolia, hardhat } from "wagmi/chains";
 import { PAD_ADDRESSES, ZERO_ADDRESS, robinhoodChain } from "./config";
+import { robinhoodServerTransport } from "./serverRpc";
 
 // Robinhood reads go through our same-origin /api/rpc proxy in the browser, so
 // the Alchemy key never ships to the client and can't be scraped. On the server
 // (SSR) we hit the Alchemy endpoint directly from the server-only env var.
 const robinhoodTransport =
   typeof window === "undefined"
-    ? http(process.env.ROBINHOOD_RPC_URL || "https://rpc.mainnet.chain.robinhood.com")
+    ? robinhoodServerTransport()
     : http(`${window.location.origin}/api/rpc`);
 
 // Chains with a configured PotatoPad deployment first: wagmi treats the first

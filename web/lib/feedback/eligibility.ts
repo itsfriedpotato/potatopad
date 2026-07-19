@@ -4,8 +4,9 @@
 //   - a wallet's current $ value across qualifying tokens,
 //   - the time-weighted "held >= $50 for >= 24h" check (from holdings_snapshots),
 //   - the 1-post-per-3-days cooldown.
-import { createPublicClient, http, erc20Abi, parseAbiItem, type Address } from "viem";
+import { createPublicClient, erc20Abi, parseAbiItem, type Address } from "viem";
 import { robinhoodChain, WETH_ADDRESSES, ZERO_ADDRESS } from "@/lib/config";
+import { robinhoodServerTransport } from "@/lib/serverRpc";
 import { loadFeed } from "@/lib/tokenFeed";
 import { requireSupabase } from "@/lib/supabase";
 import {
@@ -48,7 +49,7 @@ const DEV_BYPASS = process.env.FEEDBACK_DEV_BYPASS === "1";
 
 const client = createPublicClient({
   chain: robinhoodChain,
-  transport: http(process.env.ROBINHOOD_RPC_URL || "https://rpc.mainnet.chain.robinhood.com"),
+  transport: robinhoodServerTransport(),
 });
 
 const transferEvent = parseAbiItem(

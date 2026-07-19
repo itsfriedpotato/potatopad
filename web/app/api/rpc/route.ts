@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { robinhoodUpstreams } from "@/lib/serverRpc";
 
 /**
  * Server-side JSON-RPC proxy for Robinhood Chain.
@@ -22,12 +23,10 @@ import { NextRequest, NextResponse } from "next/server";
  * keys via ROBINHOOD_RPC_URL, ROBINHOOD_RPC_URL_2, ROBINHOOD_RPC_URL_3.
  */
 
-const UPSTREAMS = [
-  process.env.ROBINHOOD_RPC_URL,
-  process.env.ROBINHOOD_RPC_URL_2,
-  process.env.ROBINHOOD_RPC_URL_3,
-].filter((u): u is string => !!u && u.length > 0);
-if (UPSTREAMS.length === 0) UPSTREAMS.push("https://rpc.mainnet.chain.robinhood.com");
+// Ordered upstreams: primary first (Chainstack), then fallbacks (Alchemy), then the
+// public RPC. Keys live only in these server env vars, so they never ship to the
+// browser — which talks to this same-origin proxy, not the keyed endpoints.
+const UPSTREAMS = robinhoodUpstreams();
 
 // Denylist, not allowlist: block only the methods that could be abused to relay
 // transactions or open subscriptions through our key.
@@ -88,17 +87,15 @@ function rateLimited(ip: string, cost: number): boolean {
   return recent.length > MAX_PER_WINDOW;
 }
 
-// Round-robin starting point across upstreams; module-level so it persists warm.
-let rrCounter = 0;
-
 /**
- * Forward the JSON-RPC body to the upstreams. Starts at a round-robin offset and
- * fails over to the next upstream on a 429 or 5xx. Returns the first response
- * that is neither, or the last throttled/errored response if all are exhausted.
+ * Forward the JSON-RPC body to the upstreams IN ORDER: the primary (Chainstack)
+ * first, failing over to the next (Alchemy, then public) on a 429 or 5xx. Returns
+ * the first response that is neither, or the last throttled/errored one if all are
+ * exhausted.
  */
 async function forward(bodyStr: string): Promise<{ status: number; text: string }> {
   const n = UPSTREAMS.length;
-  const start = rrCounter++ % n;
+  const start = 0; // primary-first, not round-robin: Chainstack handles it, Alchemy backs up
   let last: { status: number; text: string } | null = null;
   for (let i = 0; i < n; i++) {
     const url = UPSTREAMS[(start + i) % n];
@@ -124,6 +121,20 @@ export async function POST(req: NextRequest) {
     req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
     req.headers.get("x-real-ip") ||
     "unknown";
+
+  // Same-origin guard: this proxy is for THIS app's browser. Block cross-origin
+  // browser callers so another site can't use our keyed upstreams as a free RPC.
+  // A missing Origin (server-to-server, curl) is allowed but still rate-limited.
+  const origin = req.headers.get("origin");
+  if (origin) {
+    try {
+      if (new URL(origin).host !== req.headers.get("host")) {
+        return NextResponse.json({ error: "forbidden origin" }, { status: 403 });
+      }
+    } catch {
+      return NextResponse.json({ error: "forbidden origin" }, { status: 403 });
+    }
+  }
 
   // Reject oversized bodies before reading them — a huge batch is the drain vector.
   if (Number(req.headers.get("content-length") || 0) > MAX_BODY_BYTES) {

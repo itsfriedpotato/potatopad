@@ -1,5 +1,6 @@
-import { createPublicClient, http, parseAbiItem, type Address } from "viem";
+import { createPublicClient, parseAbiItem, type Address } from "viem";
 import { padDeployments, robinhoodChain, ZERO_ADDRESS } from "@/lib/config";
+import { robinhoodServerTransport } from "@/lib/serverRpc";
 
 /**
  * Server-side, cached Discover feed — the single source the `/api/tokens` route,
@@ -62,7 +63,7 @@ export interface FeedPayload {
 
 const client = createPublicClient({
   chain: robinhoodChain,
-  transport: http(process.env.ROBINHOOD_RPC_URL || "https://rpc.mainnet.chain.robinhood.com"),
+  transport: robinhoodServerTransport(),
 });
 
 let cache: { payload: FeedPayload; expiresAt: number } | null = null;
