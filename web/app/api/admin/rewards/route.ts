@@ -3,7 +3,7 @@ import { isAddress } from "viem";
 import { requireSupabase } from "@/lib/supabase";
 import { verifyAction } from "@/lib/feedback/auth";
 import { isAdmin } from "@/lib/feedback/eligibility";
-import { currentIsoWeek, isoDate, potForWeekEth } from "@/lib/feedback/rewards";
+import { currentIsoWeek, isoDate, potUsd } from "@/lib/feedback/rewards";
 
 export const runtime = "nodejs";
 
@@ -33,8 +33,8 @@ interface OpenBody {
 }
 
 // POST /api/admin/rewards — admin opens a new reward round for the CURRENT ISO week.
-// pot_eth is a provisional snapshot (10% of this week's treasury fees so far) taken at
-// open time; the live, still-accruing pot is served by GET /api/feedback/rewards.
+// pot_eth records the fixed weekly pot (USD) that applied when the round opened; the
+// current pot is also served by GET /api/feedback/rewards.
 export async function POST(req: NextRequest) {
   let p: OpenBody;
   try {
@@ -75,10 +75,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "round already open for this week", round: existing }, { status: 409 });
   }
 
-  const potEth = await potForWeekEth();
+  const pot = potUsd();
   const { data: round, error } = await db
     .from("reward_rounds")
-    .insert({ week_start: weekStartDate, week_end: weekEndDate, pot_eth: potEth, status: "open" })
+    .insert({ week_start: weekStartDate, week_end: weekEndDate, pot_eth: pot, status: "open" })
     .select("id, week_start, week_end, pot_eth, status, created_at")
     .single();
   if (error || !round) return NextResponse.json({ error: "open failed" }, { status: 500 });

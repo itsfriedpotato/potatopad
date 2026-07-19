@@ -20,7 +20,7 @@ confirm before launch, not blockers.
 | Post rate limit | **1 post per wallet per 3 days** | Anti-spam / anti-flood. |
 | Votes | **Upvote-only**, 1 per wallet per post | No downvote brigading to bury rivals. |
 | Edits | Author may propose an edit; it goes live **only after admin approval** | Kills the "post nice, farm votes, then edit into spam/scam" bait-and-switch. |
-| Rewards | **Curated** weekly from the top-voted shortlist; pot = **% of that week's fees** | Padding votes only shortlists you, never pays. Self-funding, never drains treasury. |
+| Rewards | **Curated** weekly from the top-voted shortlist; pot = a **fixed operator-set amount** (default $50/week) | Padding votes only shortlists you, never pays. The operator controls the weekly budget directly. |
 | Admin | `0xd3358b1F39A6a71911c6e33717D185F99d43e80d` (the owner/treasury address) | Approves edits, moderates, marks "Adopted", picks reward winners. |
 | Auth | **Sign-In-With-Ethereum** (EIP-4361), gasless | Prove wallet control per action, no on-chain tx, no gas. |
 | Database | **Supabase** (hosted Postgres) | New dependency; everything else in PotatoPad is stateless. |
@@ -181,12 +181,12 @@ create table qualifying_tokens (
   updated_at    timestamptz not null default now()
 );
 
--- Weekly reward rounds (pot = % of that week's fees)
+-- Weekly reward rounds (pot = the fixed operator-set weekly amount, in USD)
 create table reward_rounds (
   id         uuid primary key default gen_random_uuid(),
   week_start date not null,
   week_end   date not null,
-  pot_eth    numeric,                             -- computed from weekly fees
+  pot_eth    numeric,                             -- the week's fixed pot (USD); legacy column name
   status     text not null default 'open',        -- open | finalized | paid
   created_at timestamptz not null default now()
 );
@@ -255,8 +255,9 @@ act → (admin) append `admin_actions`.
 
 ## 8. Rewards
 
-- **Pot** = **P%** of that week's protocol (treasury) fees (`TUNE`, default **10%**).
-  Weekly fees are derivable from `TreasuryPaid` events (see `contracts/scripts/treasury-sent.ts`).
+- **Pot** = a **fixed amount the operator commits each week** (`REWARD_POT_USD`, default **$50**),
+  funded and paid out manually. It is intentionally NOT a share of protocol fees (that was rejected
+  as too large a payout to run on autopilot).
 - **Selection**: at week end, admin reviews the **top-voted shortlist** (top 10) and picks
   winners with amounts. Curated, not automatic.
 - **Payout (v1)**: manual/multisig transfer from a rewards wallet; record `paid_tx`.
@@ -297,6 +298,6 @@ Almost everything reuses existing infra; the only new piece is Supabase:
 - Liquidity floor **$L = $3,000**, holders **H = 25**, age **D = 2 days**.
 - Eligibility **$50**, hold window **24h**.
 - Post limit **1 / 3 days** (locked by request).
-- Reward pot **P = 10%** of weekly fees; shortlist size **10**.
+- Reward pot: fixed **$50/week** (`REWARD_POT_USD`); shortlist size **10**.
 - Categories list.
 - Payout: manual/multisig (v1) vs claim contract (v2).

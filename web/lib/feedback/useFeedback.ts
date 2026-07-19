@@ -45,8 +45,8 @@ export interface RewardsInfo {
     pot_eth: number | null;
     status: string;
   } | null;
-  potEth: number;
-  policyPct: number;
+  potUsd: number;
+  cadence: string;
 }
 
 export function useRewards() {

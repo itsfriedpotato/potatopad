@@ -255,7 +255,7 @@ function ProposalRow({
 }
 
 function RewardPot({ rewards }: { rewards: RewardsInfo | null }) {
-  const pot = rewards?.potEth ?? 0;
+  const pot = rewards?.potUsd ?? 50;
   return (
     <div className="relative overflow-hidden rounded-xl border border-amber-900/30 bg-gradient-to-br from-[#181405] to-neutral-950 p-5 shadow-[inset_0_1px_1px_rgba(217,119,6,0.05)]">
       <div className="pointer-events-none absolute right-0 top-0 h-32 w-32 rounded-full bg-amber-500/10 blur-[50px]" />
@@ -264,13 +264,11 @@ function RewardPot({ rewards }: { rewards: RewardsInfo | null }) {
           Weekly Reward Pot
         </h3>
         <div className="text-2xl font-bold tracking-tight tabular-nums text-white">
-          {pot > 0 ? pot.toFixed(4) : "—"}{" "}
-          <span className="text-base font-normal text-neutral-500">ETH</span>
+          ${pot} <span className="text-base font-normal text-neutral-500">/ week</span>
         </div>
         <p className="mt-2 text-[11px] leading-relaxed text-neutral-400">
-          {rewards?.policyPct ?? 10}% of this week&apos;s protocol fees. The top-voted shortlist is
-          reviewed weekly and the best ideas are paid out. Curation keeps the pot safe from
-          vote-farming.
+          A fixed ${pot} pot each week. The top-voted shortlist is reviewed weekly and the best ideas
+          are paid out, curated to keep it safe from vote-farming.
         </p>
         {rewards?.round && (
           <div className="mt-4 flex items-center gap-2 border-t border-amber-900/20 pt-4 font-mono text-[10px] text-amber-500/80">

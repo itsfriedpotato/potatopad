@@ -327,7 +327,7 @@ function RewardsSection() {
 
   const rd = round.trim();
   // A row must have a post, an explicit amount, and a rank to be submitted, so a blank
-  // amount field is never silently sent as a 0 ETH payout (an intentional 0 still works).
+  // amount field is never silently sent as a 0 payout (an intentional 0 still works).
   const readyWinners = winners.filter((w) => w.postId.trim() && w.amountEth.trim() && w.rank.trim());
   const canFinalize = !!rd && readyWinners.length > 0;
 
@@ -391,7 +391,7 @@ function RewardsSection() {
                 value={w.amountEth}
                 onChange={(ev) => updateWinner(i, { amountEth: ev.target.value })}
                 inputMode="decimal"
-                placeholder="ETH"
+                placeholder="USD"
                 className={`${inputMono} w-24`}
               />
               <input
@@ -480,7 +480,7 @@ function RoundRow({
           </span>
         </div>
         <div className="flex items-center gap-3">
-          <span className="font-mono text-xs font-bold text-amber-500">{round.pot_eth} ETH</span>
+          <span className="font-mono text-xs font-bold text-amber-500">${round.pot_eth}</span>
           <button
             type="button"
             onClick={onSelect}
@@ -501,7 +501,7 @@ function RoundRow({
                 #{w.rank} · {shortId(w.post_id)}
               </span>
               <span className="flex items-center gap-2">
-                <span className="text-neutral-300">{w.amount_eth} ETH</span>
+                <span className="text-neutral-300">${w.amount_eth}</span>
                 {w.paid_tx ? (
                   <span className="text-[#CCFF00]">paid</span>
                 ) : (
