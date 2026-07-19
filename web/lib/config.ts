@@ -25,6 +25,17 @@ function envAddress(value: string | undefined): Address {
     : ZERO_ADDRESS;
 }
 
+/**
+ * Like {envAddress} but yields `undefined` rather than the zero address, for
+ * OPTIONAL config where "unset" must stay distinguishable from "set to zero" —
+ * an unset `swapRouter` disables in-app trading, whereas a zero address would
+ * be treated as a real contract and every swap would revert.
+ */
+function envAddressOpt(value: string | undefined): Address | undefined {
+  const a = envAddress(value);
+  return a === ZERO_ADDRESS ? undefined : a;
+}
+
 /** A single PotatoPad deployment: its address and the block to scan logs from. */
 export interface PadDeployment {
   address: Address;
@@ -109,6 +120,11 @@ export const CHAINS: ChainConfig[] = [
     padAddress: process.env.NEXT_PUBLIC_PAD_ADDRESS_LOCALHOST,
     weth: envAddress(process.env.NEXT_PUBLIC_WETH_ADDRESS_LOCALHOST),
     padStartBlock: 0n, // fresh local chain scans from genesis
+    // A local chain has no canonical Uniswap deployment, so the router and
+    // quoter are whatever `scripts/local-playground.ts` just deployed. Unset
+    // means no in-app trading, exactly as on any other unwired chain.
+    swapRouter: envAddressOpt(process.env.NEXT_PUBLIC_SWAP_ROUTER_LOCALHOST),
+    quoter: envAddressOpt(process.env.NEXT_PUBLIC_QUOTER_LOCALHOST),
   },
 ];
 

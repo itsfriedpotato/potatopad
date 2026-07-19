@@ -6,8 +6,14 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
+// PotatoToken is imported for the `setPool` cast only. The token CREATION
+// bytecode lives in {PotatoTokenFactory} — see there for why (EIP-170).
 import {PotatoToken} from "./PotatoToken.sol";
 import {PotatoFeeLocker} from "./PotatoFeeLocker.sol";
+// Declared rather than imported: the pad only needs the selector, and pulling in
+// the full contract risks the EIP-170 size ceiling this pad already sits near.
+import {IPotatoRewardTokenBind} from "./interfaces/IPotatoRewardTokenBind.sol";
+import {PotatoTokenFactory} from "./PotatoTokenFactory.sol";
 import {TickMath} from "./libraries/TickMath.sol";
 import {
     IUniswapV3Factory,
@@ -60,6 +66,18 @@ contract PotatoPad is ReentrancyGuard {
         string telegram;
     }
 
+    /// @notice Holder-rewards terms for a launched token.
+    /// @param enabled true for a {createRewardToken} launch. Required as its own
+    ///        field because `creatorFeeBps == 0` is a valid choice (creator takes
+    ///        nothing, holders take the whole creator half) and must stay
+    ///        distinguishable from a standard launch.
+    /// @param creatorFeeBps the creator's cut of TOTAL WETH fees; holders receive
+    ///        {CREATOR_FEE_SHARE_BPS} minus this.
+    struct RewardTerms {
+        bool enabled;
+        uint16 creatorFeeBps;
+    }
+
     // ------------------------------------------------------------ constants --
 
     uint256 public constant TOTAL_SUPPLY = 1_000_000_000e18;
@@ -108,11 +126,20 @@ contract PotatoPad is ReentrancyGuard {
     INonfungiblePositionManager public immutable positionManager;
     IWETH9 public immutable weth;
     PotatoFeeLocker public immutable locker;
+    /// @notice Deploys launch tokens on this pad's behalf, and the CREATE2 deployer
+    ///         every token address derives from. See {PotatoTokenFactory}.
+    PotatoTokenFactory public immutable tokenFactory;
 
     // -------------------------------------------------------------- storage --
 
     mapping(address => TokenInfo) public tokens;
     address[] public allTokens;
+
+    /// @notice token => holder-rewards terms. Empty for standard launches. Kept in
+    ///         its own mapping (rather than folded into {TokenInfo}) so the
+    ///         `tokens()` getter keeps its existing shape for already-deployed
+    ///         frontends reading legacy pads.
+    mapping(address => RewardTerms) public rewardTerms;
 
     /// @dev Set only for the duration of a dev-buy swap, to authenticate the callback.
     address internal _expectedPoolCallback;
@@ -152,6 +179,12 @@ contract PotatoPad is ReentrancyGuard {
         uint256 tokenSeeded
     );
     event DevBuy(address indexed token, address indexed creator, uint256 ethIn, uint256 tokensOut);
+    /// @dev Emitted IN ADDITION to {TokenCreated} for holder-rewards launches. A
+    ///      separate event, not extra fields on {TokenCreated}, so the existing
+    ///      Discover feed keeps decoding launches across legacy pads unchanged.
+    event RewardTokenLaunched(
+        address indexed token, address indexed creator, uint16 creatorFeeBps, uint16 holderFeeBps
+    );
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event BannedSet(bytes32 indexed wordHash, bool banned);
 
@@ -217,6 +250,16 @@ contract PotatoPad is ReentrancyGuard {
         actualTopFdv = _fdvFromSqrtPriceX96(TickMath.getSqrtRatioAtTick(ceil_));
 
         locker = new PotatoFeeLocker(positionManager_, weth_, treasury_);
+        // After the locker: the factory bakes its address into every token's
+        // constructor args (the locker must be anti-snipe/reward exempt).
+        tokenFactory = new PotatoTokenFactory(
+            address(positionManager_),
+            address(locker),
+            address(weth_),
+            TOTAL_SUPPLY,
+            MAX_WALLET,
+            antiSnipeBlocks_
+        );
 
         owner = owner_;
         emit OwnershipTransferred(address(0), owner_);
@@ -244,6 +287,55 @@ contract PotatoPad is ReentrancyGuard {
         TokenMeta calldata meta,
         bytes32 salt
     ) external payable nonReentrant returns (address token) {
+        return _launch(name, symbol, meta, salt, false, 0);
+    }
+
+    /// @notice Launches a HOLDER-REWARDS token: identical to {createToken} in every
+    ///         respect — same locked single-sided LP, same treasury cut, same
+    ///         anti-snipe, same ownerless token — except that the creator's half of
+    ///         the WETH fees is shared with the token's holders.
+    ///
+    ///         Holders earn pro-rata against the CIRCULATING supply (total minus the
+    ///         locked LP and launch infrastructure), so holding 1% of circulating
+    ///         earns 1% of the holder slice. Credit is derived from the locked
+    ///         position's LIVE Uniswap fee growth and lands as each swap does, so
+    ///         holders earn exactly the volume they held through and keep it even
+    ///         if they sell before anyone calls `collect()`.
+    ///
+    /// @param creatorFeeBps the creator's cut of TOTAL WETH fees, strictly less than
+    ///        {CREATOR_FEE_SHARE_BPS} (0 = creator takes nothing and holders receive
+    ///        the entire creator half). Fixed at launch and immutable thereafter —
+    ///        the split a buyer sees is the split they keep. The treasury's half is
+    ///        never affected.
+    /// @dev Rejects `creatorFeeBps == CREATOR_FEE_SHARE_BPS`. That value pays holders
+    ///      exactly zero while the token still reports {isHolderRewardToken} and
+    ///      carries the holder-rewards badge everywhere it is listed — on a
+    ///      permissionless pad the badge IS the marketing, so allowing it hands
+    ///      launchers a ready-made deceptive-launch vector. Anyone actually wanting
+    ///      that split already has {createToken}, which is the same thing without the
+    ///      misleading label.
+    function createRewardToken(
+        string calldata name,
+        string calldata symbol,
+        TokenMeta calldata meta,
+        bytes32 salt,
+        uint16 creatorFeeBps
+    ) external payable nonReentrant returns (address token) {
+        if (creatorFeeBps >= CREATOR_FEE_SHARE_BPS) revert InvalidConfig();
+        return _launch(name, symbol, meta, salt, true, creatorFeeBps);
+    }
+
+    /// @dev The whole launch, shared by both entry points. `isReward` selects which
+    ///      token contract is deployed and whether the locker splits the creator
+    ///      half with holders.
+    function _launch(
+        string calldata name,
+        string calldata symbol,
+        TokenMeta calldata meta,
+        bytes32 salt,
+        bool isReward,
+        uint16 creatorFeeBps
+    ) internal returns (address token) {
         // Anti-vampire shield: reject blacklisted names/symbols (normalized to
         // match the client's trim().toLowerCase()) before doing any work.
         if (banned[_normHash(bytes(name))] || banned[_normHash(bytes(symbol))]) revert Banned();
@@ -269,21 +361,13 @@ contract PotatoPad is ReentrancyGuard {
         //    retries with a fresh random salt — an entirely new candidate set. No
         //    attacker can poison every future candidate, so a clean launch is always
         //    one retry away: no permanent brick.
-        bytes32 initCodeHash = keccak256(
-            abi.encodePacked(
-                type(PotatoToken).creationCode,
-                abi.encode(
-                    name,
-                    symbol,
-                    TOTAL_SUPPLY,
-                    address(this),
-                    address(positionManager),
-                    address(locker),
-                    MAX_WALLET,
-                    antiSnipeBlocks
-                )
-            )
-        );
+        //
+        //    The token is deployed by {tokenFactory} (it carries the creation
+        //    bytecode; see that contract for why), so addresses derive from the
+        //    FACTORY as CREATE2 deployer. Everything above holds unchanged: the
+        //    salt is still the caller's random value, and the factory only
+        //    deploys for this pad.
+        bytes32 initCodeHash = tokenFactory.initCodeHash(name, symbol, isReward);
 
         // Seed from caller + their random salt, then walk past any taken candidate.
         uint256 seed = uint256(keccak256(abi.encode(msg.sender, salt)));
@@ -307,18 +391,7 @@ contract PotatoPad is ReentrancyGuard {
         // a fresh random salt for a brand-new (un-pre-poisonable) candidate set.
         if (tries == MAX_SALT_TRIES) revert LaunchGriefed();
 
-        token = address(
-            new PotatoToken{salt: bytes32(seed)}(
-                name,
-                symbol,
-                TOTAL_SUPPLY,
-                address(this),
-                address(positionManager),
-                address(locker),
-                MAX_WALLET,
-                antiSnipeBlocks
-            )
-        );
+        token = tokenFactory.deploy(name, symbol, isReward, bytes32(seed));
         // CREATE2 determinism: the deployed address is exactly the one we vetted.
         assert(token == predicted);
 
@@ -348,12 +421,30 @@ contract PotatoPad is ReentrancyGuard {
 
         tokens[token] = TokenInfo({creator: msg.sender, pool: pool, lpTokenId: lpTokenId});
         allTokens.push(token);
-        locker.register(lpTokenId, token, msg.sender);
+        // On a holder-rewards launch the token IS the reward sink: the locker pushes
+        // the holders' slice straight to it, to fund what holders have accrued.
+        locker.register(lpTokenId, token, msg.sender, isReward ? token : address(0), creatorFeeBps);
+
+        // Hand the reward token its position so it can read fee growth directly.
+        // Must come AFTER the mint — the position does not exist before it — and
+        // before any dev buy, so the very first swap's fee is already accounted.
+        if (isReward) {
+            IPotatoRewardTokenBind(token).bindPosition(
+                address(locker), lpTokenId, liquidity, tickLower, tickUpper, !tokenIs0, creatorFeeBps
+            );
+        }
 
         emit TokenCreated(
             token, msg.sender, name, symbol, pool, meta.imageURI, meta.website, meta.twitter, meta.telegram
         );
         emit Launched(token, pool, lpTokenId, liquidity, tokenSeeded);
+
+        if (isReward) {
+            rewardTerms[token] = RewardTerms({enabled: true, creatorFeeBps: creatorFeeBps});
+            emit RewardTokenLaunched(
+                token, msg.sender, creatorFeeBps, uint16(CREATOR_FEE_SHARE_BPS) - creatorFeeBps
+            );
+        }
 
         // 5. Optional atomic dev-buy with the attached ETH.
         if (msg.value > 0) {
@@ -540,12 +631,20 @@ contract PotatoPad is ReentrancyGuard {
         return Math.mulDiv(p * p, TOTAL_SUPPLY, 1 << 192);
     }
 
-    /// @dev The CREATE2 address a token with `initCodeHash` deploys to from this
-    ///      pad for a given `salt`. Lets {createToken} vet an address (no pool, no
-    ///      code) BEFORE committing the deploy.
+    /// @dev The CREATE2 address a token with `initCodeHash` deploys to for a given
+    ///      `salt`. Lets {_launch} vet an address (no pool, no code) BEFORE
+    ///      committing the deploy.
+    /// @dev The deployer is {tokenFactory}, not the pad — the factory carries the
+    ///      token creation bytecode and issues the CREATE2.
     function _computeTokenAddress(bytes32 salt, bytes32 initCodeHash) internal view returns (address) {
         return address(
-            uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, initCodeHash))))
+            uint160(
+                uint256(
+                    keccak256(
+                        abi.encodePacked(bytes1(0xff), address(tokenFactory), salt, initCodeHash)
+                    )
+                )
+            )
         );
     }
 
