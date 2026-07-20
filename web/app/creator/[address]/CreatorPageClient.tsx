@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { Share2, Sprout } from "lucide-react";
+import { Pencil, Share2, Sprout } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { getAddress, isAddress, type Address } from "viem";
@@ -19,6 +19,9 @@ import {
 import { priceWethPerToken, tokenIsToken0, TOTAL_SUPPLY_WHOLE } from "@/lib/pool";
 import { ANALYTICS_CHAIN_ID, robinhoodPublicClient } from "@/lib/robinhoodPublicClient";
 import { AddressChip } from "@/components/AddressChip";
+import { EditProfileModal } from "@/components/EditProfileModal";
+import { ProfileAvatar } from "@/components/ProfileAvatar";
+import { useProfile } from "@/lib/profile/useProfile";
 import { TokenCard, type TokenRow } from "@/components/TokenCard";
 import { TokenCardSkeleton } from "@/components/Skeletons";
 
@@ -78,6 +81,9 @@ export function CreatorPageClient({ address: raw }: { address: string }) {
 
   const [page, setPage] = useState(0);
   const [shareMsg, setShareMsg] = useState("");
+  const [editing, setEditing] = useState(false);
+  // Public identity: falls back to a derived name server-side, so this is never blank.
+  const { data: profile } = useProfile(address);
 
   // Newest first — feed scan order is not chronological; profiles should feel like a timeline.
   const mine = useMemo(() => {
@@ -308,34 +314,55 @@ export function CreatorPageClient({ address: raw }: { address: string }) {
 
   return (
     <div>
+      {editing && profile && (
+        <EditProfileModal profile={profile} onClose={() => setEditing(false)} />
+      )}
       <div className="card mb-6 p-5">
         <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <div className="flex flex-wrap items-center gap-2">
-              <h1 className="font-mono text-xl font-bold text-neutral-100">
-                {shortAddress(address)}
-              </h1>
-              {isYou && (
-                <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs font-semibold text-amber-400">
-                  You
+          <div className="flex min-w-0 items-start gap-4">
+            <ProfileAvatar address={address} avatarUrl={profile?.avatarUrl} size="lg" />
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="text-xl font-bold text-neutral-100">
+                  {profile?.username ?? shortAddress(address)}
+                </h1>
+                {isYou && (
+                  <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-xs font-semibold text-amber-400">
+                    You
+                  </span>
+                )}
+                <span className="rounded-full border border-neutral-800 bg-neutral-900 px-2 py-0.5 text-xs text-neutral-400">
+                  {chainName(ANALYTICS_CHAIN_ID)}
                 </span>
+              </div>
+              {profile?.bio && (
+                <p className="mt-1.5 max-w-prose text-sm text-neutral-400">{profile.bio}</p>
               )}
-              <span className="rounded-full border border-neutral-800 bg-neutral-900 px-2 py-0.5 text-xs text-neutral-400">
-                {chainName(ANALYTICS_CHAIN_ID)}
-              </span>
-            </div>
-            <div className="mt-3">
-              <AddressChip address={address} chainId={ANALYTICS_CHAIN_ID} />
+              <div className="mt-3">
+                <AddressChip address={address} chainId={ANALYTICS_CHAIN_ID} />
+              </div>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={shareProfile}
-            className="btn-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs"
-          >
-            <Share2 className="h-3.5 w-3.5" />
-            Share profile
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            {isYou && profile && (
+              <button
+                type="button"
+                onClick={() => setEditing(true)}
+                className="btn-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs"
+              >
+                <Pencil className="h-3.5 w-3.5" />
+                Edit profile
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={shareProfile}
+              className="btn-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs"
+            >
+              <Share2 className="h-3.5 w-3.5" />
+              Share profile
+            </button>
+          </div>
         </div>
         <p className="sr-only" aria-live="polite">
           {shareMsg}

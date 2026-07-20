@@ -15,6 +15,7 @@ import {
   TOTAL_SUPPLY_WHOLE,
 } from "@/lib/pool";
 import { ANALYTICS_CHAIN_ID } from "@/lib/robinhoodPublicClient";
+import { useProfiles } from "@/lib/profile/useProfile";
 import { NotDeployed } from "@/components/NotDeployed";
 import { useSearch } from "@/components/SearchContext";
 import { TokenCard, type TokenRow } from "@/components/TokenCard";
@@ -92,6 +93,10 @@ export default function DiscoverPage() {
     },
   });
 
+  const creatorAddresses = useMemo(() => creations.map((c) => c.creator), [creations]);
+  // ONE batched request resolves every planter name on this page, never one per card.
+  const { data: creatorProfiles } = useProfiles(creatorAddresses);
+
   const padRows = useMemo<TokenRow[]>(
     () =>
       creations.map((c, i) => {
@@ -108,6 +113,7 @@ export default function DiscoverPage() {
           name: c.name,
           symbol: c.symbol,
           creator: c.creator,
+          creatorName: creatorProfiles?.[c.creator.toLowerCase()]?.username,
           pool: c.pool,
           priceWeth,
           marketCapEth: priceWeth != null ? priceWeth * TOTAL_SUPPLY_WHOLE : null,
@@ -116,7 +122,7 @@ export default function DiscoverPage() {
           volume24Usd: c.volume24Usd,
         };
       }),
-    [creations, poolReads],
+    [creations, poolReads, creatorProfiles],
   );
 
   const ancientRows = useMemo<TokenRow[]>(

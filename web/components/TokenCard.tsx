@@ -11,6 +11,8 @@ export interface TokenRow {
   name: string;
   symbol: string;
   creator: Address;
+  /** The planter's profile name. Falls back to their short address when absent. */
+  creatorName?: string;
   pool: Address;
   /** WETH per whole token (float); null when price is unknown / failed. */
   priceWeth: number | null;
@@ -57,6 +59,12 @@ export function TokenCard({
       : 0;
   const mc = mcapUsd > 0 ? formatUsd(mcapUsd) : "—";
   const profile = !hideCreatorLink && !row.ancient ? creatorHref(row.creator) : null;
+  // Prefer the planter's profile name; fall back to the raw address in mono.
+  const byLabel = row.creatorName ? (
+    row.creatorName
+  ) : (
+    <span className="font-mono">{shortAddress(row.creator)}</span>
+  );
 
   // ── Ancient card: image, name, MC + 24h VOL, Ancient tag ──
   if (row.ancient) {
@@ -126,13 +134,13 @@ export function TokenCard({
             href={profile}
             className="block truncate text-[10px] text-neutral-500 transition-colors hover:text-amber-400 focus-visible:text-amber-400 focus-visible:outline-none"
           >
-            by <span className="font-mono">{shortAddress(row.creator)}</span>
+            by {byLabel}
           </Link>
         </div>
       ) : (
         <div className="border-t border-neutral-800/60 px-3 py-2">
           <span className="block truncate text-[10px] text-neutral-600">
-            by <span className="font-mono">{shortAddress(row.creator)}</span>
+            by {byLabel}
           </span>
         </div>
       )}
