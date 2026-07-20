@@ -6,7 +6,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { getAddress, isAddress, type Address } from "viem";
 import { useAccount } from "wagmi";
-import { chainName, WETH_ADDRESSES, ZERO_ADDRESS } from "@/lib/config";
+import { WETH_ADDRESSES, ZERO_ADDRESS } from "@/lib/config";
 import { useLaunchActivity } from "@/lib/events";
 import { formatUsd, shortAddress, shortDate, timeAgo } from "@/lib/format";
 import { useEthUsdPrice } from "@/lib/price";
@@ -328,9 +328,6 @@ export function CreatorPageClient({ address: raw }: { address: string }) {
                     You
                   </span>
                 )}
-                <span className="rounded-full border border-neutral-800 bg-neutral-900 px-2 py-0.5 text-xs text-neutral-400">
-                  {chainName(ANALYTICS_CHAIN_ID)}
-                </span>
               </div>
               {profile?.bio && (
                 <p className="mt-1.5 max-w-prose text-sm text-neutral-400">{profile.bio}</p>
