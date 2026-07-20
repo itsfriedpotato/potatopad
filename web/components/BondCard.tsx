@@ -8,12 +8,13 @@ import { ConnectGate } from "@/components/ConnectGate";
 import { TxStatus } from "@/components/TxStatus";
 
 /**
- * Shown once a curve has reached its bond price (~80% sold) but hasn't been
- * locked yet. Bonding is permissionless — any connected wallet can crank it — so
- * this surfaces the action in-app rather than waiting for an external keeper
- * (Robinhood Chain has none). It simply transfers the single-sided position's NFT
- * into the permanent fee locker: no liquidity is withdrawn or re-minted, the
- * whole raise stays put, and from then on swap fees split 50/50 creator/treasury.
+ * Shown once a curve has crossed its bond price (~80% sold). Bonding is a
+ * permissionless MILESTONE latch — any connected wallet can crank it, so this
+ * surfaces the action in-app rather than waiting for an external keeper
+ * (Robinhood Chain has none). The single-sided position has been locked in the
+ * permanent fee locker since LAUNCH; bonding moves no liquidity and mints nothing
+ * — it only records that the curve filled. Swap fees split 50/50 creator/treasury
+ * from day one.
  */
 export function BondCard({
   token,
@@ -32,9 +33,9 @@ export function BondCard({
         Ready to bond
       </h3>
       <p className="mt-2 text-sm text-neutral-400">
-        The curve hit its bonding price. Bonding permanently locks the liquidity
-        position into the fee locker — nothing moves out, the whole raise stays in
-        the pool, and swap fees start splitting 50/50 creator/treasury. Anyone can do it.
+        The curve crossed its bond price. Bonding is a milestone marker — the
+        liquidity has been locked in the fee locker since launch, so nothing moves.
+        Swap fees keep splitting 50/50 creator/treasury. Anyone can crank it.
       </p>
       <ConnectGate>
         <button
@@ -45,9 +46,9 @@ export function BondCard({
             bondTx.writeContract({ address: pad, abi: potatoCurvePadAbi, functionName: "bond", args: [token] })
           }
         >
-          {bondTx.isPending ? "Confirm in wallet…" : bondTx.isConfirming ? "Bonding…" : "Bond & lock liquidity"}
+          {bondTx.isPending ? "Confirm in wallet…" : bondTx.isConfirming ? "Bonding…" : "Mark as bonded"}
         </button>
-        <TxStatus tx={bondTx} chainId={chainId} successLabel="Bonded! Liquidity locked forever." />
+        <TxStatus tx={bondTx} chainId={chainId} successLabel="Bonded! Milestone recorded." />
       </ConnectGate>
     </div>
   );

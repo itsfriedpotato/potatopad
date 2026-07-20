@@ -48,8 +48,8 @@ contract PotatoCurvePad is ReentrancyGuard {
 
     uint256 internal constant BPS = 10_000;
 
-    /// @notice Anti-snipe max wallet: 5% of supply during the launch window.
-    uint256 public constant MAX_WALLET = TOTAL_SUPPLY / 20;
+    /// @notice Anti-snipe max wallet: 2% of supply during the launch window.
+    uint256 public constant MAX_WALLET = TOTAL_SUPPLY / 50;
 
     uint256 public constant MAX_SALT_TRIES = 64;
 
@@ -81,6 +81,17 @@ contract PotatoCurvePad is ReentrancyGuard {
     mapping(address => CurveInfo) public curves;
     address[] public allTokens;
 
+    /// @notice The pad admin — two powers: block NEW launches by name via {setBanned},
+    ///         and reassign a token's FUTURE creator-fee share via the locker's
+    ///         {redirectFees}. It cannot touch launched tokens, the locked principal,
+    ///         the treasury cut, already-accrued claimable balances, or pools, and holds
+    ///         no keys to any token. Renouncing to address(0) freezes both powers forever.
+    address public owner;
+
+    /// @notice Normalized name/symbol hashes that {createToken} rejects — the on-chain
+    ///         anti-vampire shield for curated "ancient" runners.
+    mapping(bytes32 => bool) public banned;
+
     /// @dev Set only during a dev-buy swap, to authenticate the callback.
     address internal _expectedPoolCallback;
 
@@ -100,6 +111,8 @@ contract PotatoCurvePad is ReentrancyGuard {
     event CurveOpened(address indexed token, address indexed pool, uint256 positionId, uint128 liquidity);
     event DevBuy(address indexed token, address indexed creator, uint256 ethIn, uint256 tokensOut);
     event Bonded(address indexed token, address indexed pool, uint256 positionId);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event BannedSet(bytes32 indexed wordHash, bool banned);
 
     // - errors --
 
@@ -114,6 +127,15 @@ contract PotatoCurvePad is ReentrancyGuard {
     error AlreadyBonded();
     error NotBonded();
     error DevBuyExceedsCap();
+    error Banned();
+    error OnlyOwner();
+
+    // - modifiers --
+
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert OnlyOwner();
+        _;
+    }
 
     // - constructor --
 
@@ -126,11 +148,13 @@ contract PotatoCurvePad is ReentrancyGuard {
         uint256 antiSnipeBlocks_,
         IUniswapV3Factory v3Factory_,
         INonfungiblePositionManager positionManager_,
-        IWETH9 weth_
+        IWETH9 weth_,
+        address owner_,
+        string[] memory initialBannedWords_
     ) {
         if (
-            treasury_ == address(0) || startFdvWei_ == 0 || bondFdvWei_ <= startFdvWei_
-                || address(v3Factory_) == address(0)
+            treasury_ == address(0) || owner_ == address(0) || startFdvWei_ == 0
+                || bondFdvWei_ <= startFdvWei_ || address(v3Factory_) == address(0)
                 || address(positionManager_) == address(0) || address(weth_) == address(0)
         ) revert InvalidConfig();
 
@@ -151,6 +175,13 @@ contract PotatoCurvePad is ReentrancyGuard {
         actualTopFdv = _fdvFromSqrtPriceX96(TickMath.getSqrtRatioAtTick(ceil_));
 
         locker = new PotatoFeeLocker(positionManager_, weth_, treasury_);
+
+        owner = owner_;
+        emit OwnershipTransferred(address(0), owner_);
+        // Seed the on-chain anti-vampire blacklist with the curated names/symbols.
+        for (uint256 i; i < initialBannedWords_.length; ++i) {
+            banned[_normHash(bytes(initialBannedWords_[i]))] = true;
+        }
     }
 
     // - create curve --
@@ -164,6 +195,10 @@ contract PotatoCurvePad is ReentrancyGuard {
         TokenMeta calldata meta,
         bytes32 salt
     ) external payable nonReentrant returns (address token) {
+        // Anti-vampire shield: reject blacklisted names/symbols (normalized to match
+        // the client's trim().toLowerCase()) before doing any work.
+        if (banned[_normHash(bytes(name))] || banned[_normHash(bytes(symbol))]) revert Banned();
+
         bytes32 initCodeHash = keccak256(
             abi.encodePacked(
                 type(PotatoToken).creationCode,
@@ -316,7 +351,10 @@ contract PotatoCurvePad is ReentrancyGuard {
 
     // - bond --
 
-    /// @notice Latches the bond milestone once the price has crossed the bond tick.
+    /// @notice Latches the bond milestone once the price crosses the bond tick. The LP
+    ///         position is ALREADY locked in the locker from launch, so this moves no
+    ///         funds or liquidity — it only flips the `bonded` progress flag and emits
+    ///         an event (a marker for the UI, not a state migration).
     function bond(address token) external nonReentrant {
         CurveInfo storage c = curves[token];
         if (c.creator == address(0)) revert UnknownToken();
@@ -376,6 +414,24 @@ contract PotatoCurvePad is ReentrancyGuard {
         }
     }
 
+    // - admin --
+
+    /// @notice Add/remove a name or symbol from the launch blacklist. Owner-only.
+    ///         Normalized (trim + ASCII-lowercase) before hashing, so it matches
+    ///         however a creator capitalizes/pads it.
+    function setBanned(string calldata word, bool isBanned) external onlyOwner {
+        bytes32 h = _normHash(bytes(word));
+        banned[h] = isBanned;
+        emit BannedSet(h, isBanned);
+    }
+
+    /// @notice Hand admin to a new address (e.g. a multisig), or to address(0) to
+    ///         renounce and freeze the blacklist + fee-redirect powers forever.
+    function transferOwnership(address newOwner) external onlyOwner {
+        emit OwnershipTransferred(owner, newOwner);
+        owner = newOwner;
+    }
+
     // - internals --
 
     /// @dev The single-sided curve position.
@@ -406,6 +462,25 @@ contract PotatoCurvePad is ReentrancyGuard {
         return address(
             uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, initCodeHash))))
         );
+    }
+
+    /// @dev keccak of a name/symbol normalized to match the client's trim().toLowerCase():
+    ///      strips surrounding ASCII spaces and lowercases ASCII A-Z. ASCII-only — Unicode
+    ///      look-alikes and non-exact variants (e.g. "CASHCAT2") are NOT caught, same
+    ///      limitation as the client check.
+    function _normHash(bytes memory b) internal pure returns (bytes32) {
+        uint256 len = b.length;
+        uint256 start = 0;
+        while (start < len && b[start] == 0x20) ++start;
+        uint256 end = len;
+        while (end > start && b[end - 1] == 0x20) --end;
+        bytes memory out = new bytes(end - start);
+        for (uint256 i = start; i < end; ++i) {
+            bytes1 c = b[i];
+            if (c >= 0x41 && c <= 0x5A) c = bytes1(uint8(c) + 32); // A-Z -> a-z
+            out[i - start] = c;
+        }
+        return keccak256(out);
     }
 
     function _alignToSpacing(int24 tick) internal pure returns (int24) {

@@ -9,7 +9,8 @@ import RouterArtifact from "@uniswap/v3-periphery/artifacts/contracts/SwapRouter
 
 const E = 10n ** 18n;
 const TOTAL_SUPPLY = 1_000_000_000n * E;
-const MAX_WALLET = TOTAL_SUPPLY / 20n;
+const MAX_WALLET = TOTAL_SUPPLY / 50n;
+const BANNED_NAME = "Scam"; // seeded into the pad blacklist by the fixture
 const POOL_FEE = 10_000;
 const START_FDV = 3n * E; // opening FDV
 const BOND_FDV = 75n * E; // bond FDV (25x start → ~80% sold at bond over the wide range)
@@ -38,7 +39,11 @@ async function deployFixture() {
   const { weth, v3Factory, npm, router } = await deployRealUniswap();
   const pad = await (
     await ethers.getContractFactory("PotatoCurvePad")
-  ).deploy(treasury.address, START_FDV, BOND_FDV, ANTI_SNIPE, v3Factory.target, npm.target, weth.target);
+  ).deploy(
+    treasury.address, START_FDV, BOND_FDV, ANTI_SNIPE,
+    v3Factory.target, npm.target, weth.target,
+    deployer.address, [BANNED_NAME],
+  );
   const locker = await ethers.getContractAt("PotatoFeeLocker", await pad.locker());
   return { deployer, treasury, creator, alice, bob, weth, v3Factory, npm, router, pad, locker };
 }
@@ -188,7 +193,7 @@ describe("PotatoCurvePad (single-sided-v3 curve, 100% in Uniswap, no migration)"
       expect(bal).to.be.lte(MAX_WALLET);
     });
 
-    it("reverts a dev-buy that would exceed the 5% cap with a clear error", async () => {
+    it("reverts a dev-buy that would exceed the 2% cap with a clear error", async () => {
       const ctx = await loadFixture(deployFixture);
       await expect(
         ctx.pad
@@ -216,7 +221,7 @@ describe("PotatoCurvePad (single-sided-v3 curve, 100% in Uniswap, no migration)"
       expect(await ctx.weth.balanceOf(alice.address)).to.be.gt(0);
     });
 
-    it("caps buys at 5% during the anti-snipe window", async () => {
+    it("caps buys at 2% during the anti-snipe window", async () => {
       const ctx = await loadFixture(createFixture);
       await expect(buy(ctx, ctx.alice, ctx.tokenAddr, ethers.parseEther("1"))).to.be.reverted;
     });
@@ -317,6 +322,58 @@ describe("PotatoCurvePad (single-sided-v3 curve, 100% in Uniswap, no migration)"
       if (feeW > 0n) {
         await expect(locker.connect(creator).claim(weth.target)).to.changeEtherBalance(creator, feeW);
       }
+    });
+  });
+
+  describe("admin: owner, moderation, fee redirect (restored regressions)", () => {
+    it("exposes owner() and supports owner-only transfer/renounce", async () => {
+      const { pad, deployer, alice } = await loadFixture(deployFixture);
+      expect(await pad.owner()).to.equal(deployer.address);
+      await expect(pad.connect(alice).transferOwnership(alice.address))
+        .to.be.revertedWithCustomError(pad, "OnlyOwner");
+      await expect(pad.transferOwnership(alice.address)).to.emit(pad, "OwnershipTransferred");
+      expect(await pad.owner()).to.equal(alice.address);
+    });
+
+    it("rejects a launch whose name OR symbol is blacklisted (normalized: case/space-insensitive)", async () => {
+      const { pad, creator } = await loadFixture(deployFixture);
+      await expect(pad.connect(creator).createToken(BANNED_NAME, "OK", NO_META, salt("m1")))
+        .to.be.revertedWithCustomError(pad, "Banned");
+      // seeded "Scam" as a symbol too, padded + lowercased, still caught by _normHash
+      await expect(pad.connect(creator).createToken("Fine", "  scam ", NO_META, salt("m2")))
+        .to.be.revertedWithCustomError(pad, "Banned");
+      await expect(pad.connect(creator).createToken("Clean", "CLN", NO_META, salt("m3"))).to.not.be
+        .reverted;
+    });
+
+    it("setBanned is owner-only and blocks future launches by name", async () => {
+      const { pad, creator, alice } = await loadFixture(deployFixture);
+      await expect(pad.connect(alice).setBanned("Villain", true))
+        .to.be.revertedWithCustomError(pad, "OnlyOwner");
+      await expect(pad.setBanned("Villain", true)).to.emit(pad, "BannedSet");
+      await expect(pad.connect(creator).createToken("Villain", "VIL", NO_META, salt("m4")))
+        .to.be.revertedWithCustomError(pad, "Banned");
+    });
+
+    it("redirectFees works for the pad owner (was bricked without owner()) and rejects non-owners", async () => {
+      const ctx = await loadFixture(createFixture);
+      const { pad, locker, creator, alice, bob, tokenAddr, weth } = ctx;
+      await mine(ANTI_SNIPE + 1);
+      const posId = (await pad.curves(tokenAddr)).positionId;
+
+      // Non-owner cannot redirect.
+      await expect(locker.connect(alice).redirectFees(posId, bob.address))
+        .to.be.revertedWithCustomError(locker, "OnlyOwner");
+
+      // The pad owner (deployer) redirects FUTURE creator fees to bob.
+      await expect(locker.redirectFees(posId, bob.address)).to.emit(locker, "FeesRedirected");
+      expect(await locker.beneficiaryOf(posId)).to.equal(bob.address);
+
+      // Fees accrued AFTER the redirect land with bob, not the creator.
+      await buy(ctx, alice, tokenAddr, ethers.parseEther("2"));
+      await locker.collect(posId);
+      expect(await locker.claimable(weth.target, bob.address)).to.be.gt(0);
+      expect(await locker.claimable(weth.target, creator.address)).to.equal(0);
     });
   });
 });

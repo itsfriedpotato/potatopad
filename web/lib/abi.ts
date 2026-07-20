@@ -1500,6 +1500,11 @@ export const potatoCurvePadAbi = [
       },
       {
         "internalType": "uint256",
+        "name": "bondFdvWei_",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
         "name": "antiSnipeBlocks_",
         "type": "uint256"
       },
@@ -1517,6 +1522,16 @@ export const potatoCurvePadAbi = [
         "internalType": "contract IWETH9",
         "name": "weth_",
         "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "owner_",
+        "type": "address"
+      },
+      {
+        "internalType": "string[]",
+        "name": "initialBannedWords_",
+        "type": "string[]"
       }
     ],
     "stateMutability": "nonpayable",
@@ -1525,6 +1540,11 @@ export const potatoCurvePadAbi = [
   {
     "inputs": [],
     "name": "AlreadyBonded",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "Banned",
     "type": "error"
   },
   {
@@ -1555,6 +1575,11 @@ export const potatoCurvePadAbi = [
   {
     "inputs": [],
     "name": "NotSingleSided",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "OnlyOwner",
     "type": "error"
   },
   {
@@ -1592,6 +1617,25 @@ export const potatoCurvePadAbi = [
     "inputs": [],
     "name": "UnknownToken",
     "type": "error"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "wordHash",
+        "type": "bytes32"
+      },
+      {
+        "indexed": false,
+        "internalType": "bool",
+        "name": "banned",
+        "type": "bool"
+      }
+    ],
+    "name": "BannedSet",
+    "type": "event"
   },
   {
     "anonymous": false,
@@ -1678,6 +1722,25 @@ export const potatoCurvePadAbi = [
       }
     ],
     "name": "DevBuy",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "previousOwner",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "newOwner",
+        "type": "address"
+      }
+    ],
+    "name": "OwnershipTransferred",
     "type": "event"
   },
   {
@@ -1782,19 +1845,6 @@ export const potatoCurvePadAbi = [
   },
   {
     "inputs": [],
-    "name": "SOLD_BPS",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
     "name": "TICK_SPACING",
     "outputs": [
       {
@@ -1872,6 +1922,25 @@ export const potatoCurvePadAbi = [
         "internalType": "uint256",
         "name": "",
         "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "name": "banned",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
       }
     ],
     "stateMutability": "view",
@@ -2057,6 +2126,19 @@ export const potatoCurvePadAbi = [
   },
   {
     "inputs": [],
+    "name": "owner",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "positionManager",
     "outputs": [
       {
@@ -2066,6 +2148,24 @@ export const potatoCurvePadAbi = [
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "string",
+        "name": "word",
+        "type": "string"
+      },
+      {
+        "internalType": "bool",
+        "name": "isBanned",
+        "type": "bool"
+      }
+    ],
+    "name": "setBanned",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -2131,6 +2231,19 @@ export const potatoCurvePadAbi = [
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "newOwner",
+        "type": "address"
+      }
+    ],
+    "name": "transferOwnership",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
