@@ -125,8 +125,13 @@ export const CHAINS: ChainConfig[] = [
       // token is lost — every pre-repoint launch is below the cap. (The cap on
       // 0x6722 has a small buffer past 13_221_549 to cover the deploy→repoint
       // window, so a token launched during it still shows.)
-      // v5 pad 0xe26e…9001 — the 2%/redirect/owner pad, superseded by the holder-rewards pad.
-      { address: "0xe26e17B552A3f0361b0546443FFe58F7cF509001", startBlock: 13_221_549n, endBlock: 14_073_506n },
+      // v5 pad 0xe26e…9001 — the 2%/redirect/owner pad. Deliberately UNCAPPED: a
+      // stale browser tab still had this address inlined as the write pad, so real
+      // launches landed here AFTER the repoint (DeepFryer, block 14992109) and were
+      // invisible behind the old cap. This pad carries the owner + banned list, so
+      // launches on it are still moderated and there is nothing to gain by hiding a
+      // creator's coin. Capping is for pads with NO blacklist, which this is not.
+      { address: "0xe26e17B552A3f0361b0546443FFe58F7cF509001", startBlock: 13_221_549n },
       // v4 pad 0x6722…63E8 — the burn+blacklist pad, superseded by the redirect pad.
       { address: "0x67225AC6ba037aA220F68e5aAA2b49Be4B0863E8", startBlock: 12_757_281n, endBlock: 13_230_000n },
       // v3 pad 0x12A0…D91F — held all launches before the burn+blacklist upgrade.
