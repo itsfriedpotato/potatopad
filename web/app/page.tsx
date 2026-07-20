@@ -6,7 +6,7 @@ import { useMemo, useState } from "react";
 import type { Address } from "viem";
 import { useReadContracts } from "wagmi";
 import { potatoCurvePadAbi } from "@/lib/abi";
-import { ZERO_ADDRESS } from "@/lib/config";
+import { WETH_ADDRESSES, ZERO_ADDRESS } from "@/lib/config";
 import { useAncientTokens } from "@/lib/ancient";
 import { useLaunchActivity } from "@/lib/events";
 import { usePad } from "@/lib/hooks";
@@ -16,9 +16,14 @@ import {
   uniswapV3PoolAbi,
   TOTAL_SUPPLY_WHOLE,
 } from "@/lib/pool";
+import { ANALYTICS_CHAIN_ID } from "@/lib/robinhoodPublicClient";
+import { useProfiles } from "@/lib/profile/useProfile";
 import { NotDeployed } from "@/components/NotDeployed";
 import { useSearch } from "@/components/SearchContext";
 import { TokenCard, type TokenRow } from "@/components/TokenCard";
+
+/** Discover feed is Robinhood-pinned; price with RH WETH, not wallet-chain WETH. */
+const RH_WETH = WETH_ADDRESSES[ANALYTICS_CHAIN_ID] ?? ZERO_ADDRESS;
 
 type TabId = "growing" | "ancient";
 type SortId = "recent" | "new" | "old" | "mcap";
@@ -49,13 +54,15 @@ function CardSkeleton() {
 }
 
 export default function DiscoverPage() {
-  const { weth, chainId, curvePad, isDeployed } = usePad();
+  // `weth` is intentionally NOT taken from usePad: the feed is Robinhood-pinned,
+  // so pricing uses RH_WETH rather than the connected wallet's chain WETH.
+  const { chainId, curvePad, isDeployed } = usePad();
   const { query, setQuery } = useSearch();
   const [tab, setTab] = useState<TabId>("growing");
   const [sort, setSort] = useState<SortId>("recent");
   const isAncientTab = tab === "ancient";
 
-  // PotatoPad launches — span ALL pads (curve + direct/legacy).
+  // PotatoPad launches — span ALL pads (curve + direct/legacy). Robinhood-pinned.
   const { creations, unavailable: launchUnavailable, isLoading: launchLoading } =
     useLaunchActivity();
   // Pre-existing Robinhood "ancient" runners (Noxa etc.), served by /api/ancient.
@@ -101,12 +108,14 @@ export default function DiscoverPage() {
   );
 
   // Pass 2: pool slot0 for each effective pool, index-aligned to `creations`.
+  // Priced with RH_WETH so a wallet on another chain doesn't mis-price RH pools.
   const poolContracts = useMemo(
     () =>
       effectivePools.map((address) => ({
         address,
         abi: uniswapV3PoolAbi,
-        functionName: "slot0",
+        functionName: "slot0" as const,
+        chainId: ANALYTICS_CHAIN_ID,
       })),
     [effectivePools],
   );
@@ -116,8 +125,16 @@ export default function DiscoverPage() {
     allowFailure: true,
     query: {
       enabled: isDeployed && effectivePools.some((p) => p !== ZERO_ADDRESS),
+      // These ~39 pool reads multiply per visitor. Hold them 60s and don't refetch on
+      // every window focus, to cut proxy/RPC load.
+      staleTime: 60_000,
+      refetchOnWindowFocus: false,
     },
   });
+
+  const creatorAddresses = useMemo(() => creations.map((c) => c.creator), [creations]);
+  // ONE batched request resolves every planter name on this page, never one per card.
+  const { data: creatorProfiles } = useProfiles(creatorAddresses);
 
   const padRows = useMemo<TokenRow[]>(
     () =>
@@ -134,19 +151,22 @@ export default function DiscoverPage() {
         // from its pool's slot0 — continuous across migration.
         const slot0 = poolReads?.[i]?.result as Slot0 | undefined;
         const sqrtPriceX96 = slot0?.[0];
-        const priceWeth =
-          sqrtPriceX96 !== undefined
-            ? priceWethPerToken(sqrtPriceX96, tokenIsToken0(c.token, weth))
-            : 0;
-
+        // Failed / missing slot0 → null (never coerce unknown price to 0 ETH).
+        let priceWeth: number | null = null;
+        if (sqrtPriceX96 !== undefined && sqrtPriceX96 > 0n) {
+          const p = priceWethPerToken(sqrtPriceX96, tokenIsToken0(c.token, RH_WETH));
+          priceWeth = Number.isFinite(p) && p > 0 ? p : null;
+        }
         return {
           address: c.token,
           name: c.name,
           symbol: c.symbol,
           creator: c.creator,
+          creatorName: creatorProfiles?.[c.creator.toLowerCase()]?.username,
+          // Curve tokens price from curves().pool; direct tokens from the event pool.
           pool: effectivePools[i],
           priceWeth,
-          marketCapEth: priceWeth * TOTAL_SUPPLY_WHOLE,
+          marketCapEth: priceWeth != null ? priceWeth * TOTAL_SUPPLY_WHOLE : null,
           createdAt: c.timestamp,
           imageURI: c.imageURI,
           volume24Usd: c.volume24Usd,
@@ -155,7 +175,7 @@ export default function DiscoverPage() {
           curveProgressBps: onCurve ? (curveProg ?? 0n) : undefined,
         };
       }),
-    [creations, curveReads, poolReads, effectivePools, weth],
+    [creations, curveReads, poolReads, effectivePools, creatorProfiles],
   );
 
   const ancientRows = useMemo<TokenRow[]>(
@@ -166,8 +186,8 @@ export default function DiscoverPage() {
         symbol: t.symbol,
         creator: ZERO_ADDRESS,
         pool: t.tradePool,
-        priceWeth: 0,
-        marketCapEth: 0,
+        priceWeth: null,
+        marketCapEth: null,
         imageURI: t.imageUrl,
         ancient: true,
         marketCapUsd: t.fdvUsd,
@@ -201,7 +221,8 @@ export default function DiscoverPage() {
       case "old":
         return [...list].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
       case "mcap":
-        return [...list].sort((a, b) => b.marketCapEth - a.marketCapEth);
+        // Null FDVs sort last (unknown ≠ zero).
+        return [...list].sort((a, b) => (b.marketCapEth ?? -1) - (a.marketCapEth ?? -1));
       default:
         return list;
     }

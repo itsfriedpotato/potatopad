@@ -377,6 +377,70 @@ describe("PotatoCurvePad (single-sided-v3 curve, 100% in Uniswap, no migration)"
     });
   });
 
+  describe("holder rewards ON the curve", () => {
+    /** Launch a reward-token curve and return its handles. */
+    async function rewardFixture(creatorFeeBps = 2500) {
+      const ctx = await loadFixture(deployFixture);
+      const args = ["Rewarded", "RWD", NO_META, salt("Rewarded"), creatorFeeBps] as const;
+      const tokenAddr: string = await ctx.pad
+        .connect(ctx.creator)
+        .createRewardToken.staticCall(...args);
+      await ctx.pad.connect(ctx.creator).createRewardToken(...args);
+      const token = await ethers.getContractAt("PotatoRewardToken", tokenAddr);
+      const info = await ctx.pad.curves(tokenAddr);
+      return { ...ctx, token, tokenAddr, info };
+    }
+
+    it("launches a reward token through the factory and records its terms", async () => {
+      const { pad, tokenAddr, info, creator, locker, npm } = await rewardFixture();
+      const terms = await pad.rewardTerms(tokenAddr);
+      expect(terms.enabled).to.equal(true);
+      expect(terms.creatorFeeBps).to.equal(2500);
+      // Same curve mechanics as a plain launch: whole supply locked in the locker.
+      expect(info.creator).to.equal(creator.address);
+      expect(info.bonded).to.equal(false);
+      expect(await npm.ownerOf(info.positionId)).to.equal(await locker.getAddress());
+    });
+
+    it("rejects a creator cut at or above the whole creator half", async () => {
+      const ctx = await loadFixture(deployFixture);
+      const half = await ctx.locker.CREATOR_FEE_SHARE_BPS();
+      await expect(
+        ctx.pad.connect(ctx.creator).createRewardToken("X", "X", NO_META, salt("X"), half),
+      ).to.be.revertedWithCustomError(ctx.pad, "InvalidConfig");
+    });
+
+    it("credits holders as the curve is bought, with NO collect() needed", async () => {
+      const ctx = await rewardFixture();
+      await mine(ANTI_SNIPE + 1);
+      await buy(ctx, ctx.alice, ctx.tokenAddr, ethers.parseEther("1"));
+      // Alice holds a slice of circulating supply, so swap fees accrue to her
+      // straight off the locked position's fee growth.
+      expect(await ctx.token.pendingRewards(ctx.alice.address)).to.be.gt(0n);
+    });
+
+    it("keeps crediting ABOVE the bond price (the curve runs to maxTick)", async () => {
+      const ctx = await rewardFixture();
+      await mine(ANTI_SNIPE + 1);
+      await buy(ctx, ctx.alice, ctx.tokenAddr, FILL_ETH); // cross the bond tick
+      expect(await ctx.pad.bondable(ctx.tokenAddr)).to.equal(true);
+      await ctx.pad.bond(ctx.tokenAddr);
+
+      const before = await ctx.token.pendingRewards(ctx.alice.address);
+      // Trade well past the bond price: an unbounded upper range means the position
+      // is still in range, so holders keep earning instead of stopping at bond.
+      await buy(ctx, ctx.bob, ctx.tokenAddr, ethers.parseEther("5"));
+      expect(await ctx.token.pendingRewards(ctx.alice.address)).to.be.gt(before);
+    });
+
+    it("a plain curve launch has no reward terms and pays the creator the whole half", async () => {
+      const ctx = await loadFixture(createFixture);
+      const terms = await ctx.pad.rewardTerms(ctx.tokenAddr);
+      expect(terms.enabled).to.equal(false);
+      expect(terms.creatorFeeBps).to.equal(0);
+    });
+  });
+
   describe("security + edge cases (adversarial)", () => {
     it("rejects a forged swap callback from anyone who is not the mid-swap pool", async () => {
       const { pad, alice, tokenAddr } = await loadFixture(createFixture);

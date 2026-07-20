@@ -1,9 +1,12 @@
 "use client";
 
 import { ConnectButton } from "@rainbow-me/rainbowkit";
-import { Search, Wallet } from "lucide-react";
+import { Search, User, Wallet } from "lucide-react";
 import Link from "next/link";
+import { useMemo } from "react";
 import { usePathname } from "next/navigation";
+import { getAddress } from "viem";
+import { useAccount } from "wagmi";
 import { useSearch } from "@/components/SearchContext";
 
 // The chain-switcher pill is a dev convenience (hopping between localhost /
@@ -14,6 +17,18 @@ const SHOW_CHAIN_SWITCHER = process.env.NODE_ENV === "development";
 export function Header() {
   const pathname = usePathname();
   const { query, setQuery } = useSearch();
+  const { address: connected } = useAccount();
+  // EVERY connected wallet has a profile now (auto-named until claimed, editable
+  // there), so this no longer waits on the launch feed or requires having planted
+  // a coin — that older gate left non-planters with no way to reach their profile.
+  const myProfileHref = useMemo(() => {
+    if (!connected) return null;
+    try {
+      return `/creator/${getAddress(connected)}`;
+    } catch {
+      return null;
+    }
+  }, [connected]);
 
   return (
     <header className="border-b border-neutral-800 bg-neutral-950/80 backdrop-blur-md">
@@ -53,6 +68,16 @@ export function Header() {
             }`}
           >
             Discover
+          </Link>
+          <Link
+            href="/feedback"
+            className={`rounded-lg px-3 py-1.5 text-sm transition-colors ${
+              pathname === "/feedback"
+                ? "text-amber-500"
+                : "text-neutral-400 hover:text-neutral-100"
+            }`}
+          >
+            Feedback
           </Link>
           <Link
             href="/create"
@@ -97,6 +122,20 @@ export function Header() {
                   </button>
                 ) : (
                   <div className="flex items-center gap-2">
+                    {myProfileHref && (
+                      <Link
+                        href={myProfileHref}
+                        className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-2 text-xs font-medium transition-colors ${
+                          pathname.toLowerCase() === myProfileHref.toLowerCase()
+                            ? "text-amber-500"
+                            : "text-neutral-400 hover:text-neutral-100"
+                        }`}
+                        aria-label="My profile"
+                      >
+                        <User className="h-3.5 w-3.5" />
+                        <span className="hidden sm:inline">My profile</span>
+                      </Link>
+                    )}
                     {SHOW_CHAIN_SWITCHER && (
                       <button
                         type="button"

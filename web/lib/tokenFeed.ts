@@ -1,5 +1,6 @@
-import { createPublicClient, http, parseAbiItem, type Address } from "viem";
+import { createPublicClient, parseAbiItem, type Address } from "viem";
 import { allPadDeployments, robinhoodChain, ZERO_ADDRESS, type PadKind } from "@/lib/config";
+import { robinhoodServerTransport } from "@/lib/serverRpc";
 
 /**
  * Server-side, cached Discover feed — the single source the `/api/tokens` route,
@@ -16,7 +17,7 @@ const tokenCreatedEvent = parseAbiItem(
 
 const LOG_CHUNK = 9_000n; // Alchemy on Robinhood caps eth_getLogs at 10k blocks.
 const SCAN_CONCURRENCY = 6; // windows fetched at once — fast without a CU spike.
-const CACHE_TTL_MS = 45_000;
+const CACHE_TTL_MS = 90_000;
 const CHUNK_RETRIES = 3; // a window survives transient RPC blips instead of aborting the scan.
 // If more than this fraction of a pad's windows never succeed, the scan is too
 // incomplete to trust — flag `unavailable` so the client retries (vs. caching a
@@ -57,17 +58,51 @@ export interface CreationDTO {
   /** Which pad kind launched it: "curve" (bonding curve) or "direct" (legacy). */
   kind: PadKind;
 }
+export type FeedState = "fresh" | "stale" | "unavailable";
+
 export interface FeedPayload {
+  chainId: number;
+  /** unix ms — stamped on every loadFeed return (incl. cache hits). */
+  servedAt: number;
+  /** unix ms — last successful scan; 0 if never. */
+  scanCompletedAt: number;
+  state: FeedState;
   creations: CreationDTO[];
+  /** @deprecated prefer `state`; true iff state === "unavailable" */
   unavailable: boolean;
 }
 
 const client = createPublicClient({
   chain: robinhoodChain,
-  transport: http(process.env.ROBINHOOD_RPC_URL || "https://rpc.mainnet.chain.robinhood.com"),
+  transport: robinhoodServerTransport(),
 });
 
-let cache: { payload: FeedPayload; expiresAt: number } | null = null;
+/** In-process content cache (not the full response — servedAt is always re-stamped). */
+let cache: {
+  creations: CreationDTO[];
+  scanCompletedAt: number;
+  state: Exclude<FeedState, "unavailable">;
+  expiresAt: number;
+} | null = null;
+
+/** Short cooldown after a cold unavailable so /api/tokens can't force full rescans. */
+const UNAVAILABLE_COOLDOWN_MS = 15_000;
+let unavailableUntil = 0;
+
+function stamp(
+  creations: CreationDTO[],
+  state: FeedState,
+  scanCompletedAt: number,
+): FeedPayload {
+  return {
+    chainId: robinhoodChain.id,
+    servedAt: Date.now(),
+    scanCompletedAt,
+    state,
+    creations,
+    unavailable: state === "unavailable",
+  };
+}
 
 /** One window, with retries. Returns null only after every attempt fails. */
 async function fetchCreatedLogs(
@@ -166,8 +201,11 @@ async function fetchVolumes(addresses: Address[]): Promise<Map<string, number>> 
 let legacyTagged: PadTag[] | null = null;
 
 async function scan(): Promise<FeedPayload> {
+  // Kind-tagged: the curve pad AND the direct pads, so a token resolves to the
+  // right launcher and the feed can tell the UI which stage to render.
   const pads = allPadDeployments(robinhoodChain.id);
-  if (pads.length === 0) return { creations: [], unavailable: false };
+  // No pads configured for this chain is a VALID empty result, not an outage.
+  if (pads.length === 0) return stamp([], "fresh", Date.now());
 
   const latest = await client.getBlockNumber();
   // The active (write) pad has no endBlock; legacy pads carry the repoint block.
@@ -260,31 +298,50 @@ async function scan(): Promise<FeedPayload> {
   } catch {
     /* leave volumes at 0 */
   }
-  return { creations, unavailable };
+  // A partial scan (some window failed) surfaces as "unavailable" so the client
+  // shows a warm cache rather than treating a truncated list as complete.
+  return stamp(creations, unavailable ? "unavailable" : "fresh", Date.now());
 }
 
 let inFlight: Promise<FeedPayload> | null = null;
 
 /**
- * Cached feed getter. Returns the last good payload on a scan failure (soft
- * degrade) so callers never throw; `unavailable` flags a cold-cache RPC miss.
- * Concurrent cold-cache callers share ONE scan (in-flight coalescing) so a fresh
- * process can't fire N parallel full sweeps and hammer the RPC into failure.
+ * Cached feed getter. Always stamps a fresh `servedAt` (incl. cache hits).
+ * Soft-degrades to stale/unavailable without throwing. Concurrent cold-cache
+ * callers share ONE scan (in-flight coalescing).
  */
 export async function loadFeed(): Promise<FeedPayload> {
   const now = Date.now();
-  if (cache && cache.expiresAt > now) return cache.payload;
+  if (cache && cache.expiresAt > now) {
+    return stamp(cache.creations, cache.state, cache.scanCompletedAt);
+  }
+  // Cold failure backoff: avoid hammering RPC with full multi-pad scans.
+  if (!cache && now < unavailableUntil) {
+    return stamp([], "unavailable", 0);
+  }
   if (inFlight) return inFlight;
   inFlight = (async () => {
     try {
-      const payload = await scan();
-      // Never cache a degraded scan — a gappy round would otherwise stick for the
-      // whole TTL and keep the client on skeletons. Cache only trustworthy feeds.
-      if (!payload.unavailable) cache = { payload, expiresAt: Date.now() + CACHE_TTL_MS };
-      return payload;
+      const result = await scan();
+      // Gappy scans: soft-degrade. Prefer warm cache as "stale" over a partial list.
+      if (result.unavailable) {
+        if (cache) return stamp(cache.creations, "stale", cache.scanCompletedAt);
+        unavailableUntil = Date.now() + UNAVAILABLE_COOLDOWN_MS;
+        return stamp([], "unavailable", 0);
+      }
+      const scanCompletedAt = Date.now();
+      unavailableUntil = 0;
+      cache = {
+        creations: result.creations,
+        scanCompletedAt,
+        state: "fresh",
+        expiresAt: scanCompletedAt + CACHE_TTL_MS,
+      };
+      return stamp(result.creations, "fresh", scanCompletedAt);
     } catch {
-      if (cache) return cache.payload;
-      return { creations: [], unavailable: true };
+      if (cache) return stamp(cache.creations, "stale", cache.scanCompletedAt);
+      unavailableUntil = Date.now() + UNAVAILABLE_COOLDOWN_MS;
+      return stamp([], "unavailable", 0);
     } finally {
       inFlight = null;
     }

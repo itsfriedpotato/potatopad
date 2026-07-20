@@ -1,5 +1,6 @@
 import { ImageResponse } from "next/og";
-import { createPublicClient, http, isAddress, type Address } from "viem";
+import { createPublicClient, isAddress, type Address } from "viem";
+import { robinhoodServerTransport } from "@/lib/serverRpc";
 import { robinhoodChain, WETH_ADDRESSES, ZERO_ADDRESS } from "@/lib/config";
 import { resolveImageUri, shortAddress } from "@/lib/format";
 import { getCreation } from "@/lib/tokenFeed";
@@ -88,7 +89,7 @@ async function fetchFdvEth(token: Address, pool: Address | undefined): Promise<n
   try {
     const client = createPublicClient({
       chain: robinhoodChain,
-      transport: http(process.env.ROBINHOOD_RPC_URL || "https://rpc.mainnet.chain.robinhood.com"),
+      transport: robinhoodServerTransport(),
     });
     const slot0 = (await client.readContract({
       address: pool,

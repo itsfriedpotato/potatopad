@@ -6,8 +6,14 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
+// PotatoToken is imported for the `setPool` cast only. The token CREATION bytecode
+// lives in {PotatoTokenFactory} — see there for why (EIP-170).
 import {PotatoToken} from "./PotatoToken.sol";
 import {PotatoFeeLocker} from "./PotatoFeeLocker.sol";
+import {PotatoTokenFactory} from "./PotatoTokenFactory.sol";
+// Declared rather than imported: the pad only needs the selector, and pulling in the
+// full reward token risks the EIP-170 size ceiling.
+import {IPotatoRewardTokenBind} from "./interfaces/IPotatoRewardTokenBind.sol";
 import {TickMath} from "./libraries/TickMath.sol";
 import {
     IUniswapV3Factory,
@@ -37,6 +43,18 @@ contract PotatoCurvePad is ReentrancyGuard {
         string website;
         string twitter;
         string telegram;
+    }
+
+    /// @notice Holder-rewards terms for a launched curve token.
+    /// @param enabled true for a {createRewardToken} launch. Needed as its own field
+    ///        because `creatorFeeBps == 0` is a valid choice (creator takes nothing,
+    ///        holders take the whole creator half) and must stay distinguishable from
+    ///        a plain launch.
+    /// @param creatorFeeBps the creator's cut of TOTAL WETH fees; holders receive the
+    ///        locker's CREATOR_FEE_SHARE_BPS minus this.
+    struct RewardTerms {
+        bool enabled;
+        uint16 creatorFeeBps;
     }
 
     // -constants --
@@ -75,11 +93,19 @@ contract PotatoCurvePad is ReentrancyGuard {
     INonfungiblePositionManager public immutable positionManager;
     IWETH9 public immutable weth;
     PotatoFeeLocker public immutable locker;
+    /// @notice Deploys launch tokens on this pad's behalf, and the CREATE2 deployer
+    ///         every token address derives from. Carries both the plain and the
+    ///         reward token bytecode, which this pad cannot hold without exceeding
+    ///         the EIP-170 contract size limit. See {PotatoTokenFactory}.
+    PotatoTokenFactory public immutable tokenFactory;
 
     // - storage --
 
     mapping(address => CurveInfo) public curves;
     address[] public allTokens;
+
+    /// @notice token => holder-rewards terms. Empty for a plain curve launch.
+    mapping(address => RewardTerms) public rewardTerms;
 
     /// @notice The pad admin — two powers: block NEW launches by name via {setBanned},
     ///         and reassign a token's FUTURE creator-fee share via the locker's
@@ -111,6 +137,11 @@ contract PotatoCurvePad is ReentrancyGuard {
     event CurveOpened(address indexed token, address indexed pool, uint256 positionId, uint128 liquidity);
     event DevBuy(address indexed token, address indexed creator, uint256 ethIn, uint256 tokensOut);
     event Bonded(address indexed token, address indexed pool, uint256 positionId);
+    /// @dev Emitted IN ADDITION to {TokenCreated} for holder-rewards launches, so the
+    ///      existing Discover feed keeps decoding launches unchanged.
+    event RewardTokenLaunched(
+        address indexed token, address indexed creator, uint16 creatorFeeBps, uint16 holderFeeBps
+    );
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event BannedSet(bytes32 indexed wordHash, bool banned);
 
@@ -175,6 +206,16 @@ contract PotatoCurvePad is ReentrancyGuard {
         actualTopFdv = _fdvFromSqrtPriceX96(TickMath.getSqrtRatioAtTick(ceil_));
 
         locker = new PotatoFeeLocker(positionManager_, weth_, treasury_);
+        // After the locker: the factory bakes its address into every token's
+        // constructor args (the locker must be anti-snipe exempt).
+        tokenFactory = new PotatoTokenFactory(
+            address(positionManager_),
+            address(locker),
+            address(weth_),
+            TOTAL_SUPPLY,
+            MAX_WALLET,
+            antiSnipeBlocks_
+        );
 
         owner = owner_;
         emit OwnershipTransferred(address(0), owner_);
@@ -187,7 +228,6 @@ contract PotatoCurvePad is ReentrancyGuard {
     // - create curve --
 
     /// @notice Launches a token and opens its single-sided-v3 bonding curve.
-
     /// @param salt Fresh random entropy to make ca unique
     function createToken(
         string calldata name,
@@ -195,25 +235,57 @@ contract PotatoCurvePad is ReentrancyGuard {
         TokenMeta calldata meta,
         bytes32 salt
     ) external payable nonReentrant returns (address token) {
+        return _launch(name, symbol, meta, salt, false, 0);
+    }
+
+    /// @notice Launches a HOLDER-REWARDS curve token: identical to {createToken} in
+    ///         every respect — same single-sided curve, same locked LP, same treasury
+    ///         cut, same anti-snipe, same bond milestone — except that the creator's
+    ///         half of the WETH fees is shared with the token's holders.
+    ///
+    ///         Holders earn pro-rata against circulating supply, credited from the
+    ///         locked position's LIVE Uniswap fee growth as each swap lands, so they
+    ///         keep what they earned even if they sell before anyone calls collect().
+    ///         The curve's range runs to maxTick, so credit keeps accruing above the
+    ///         bond price rather than stopping at it.
+    ///
+    /// @param creatorFeeBps the creator's cut of TOTAL WETH fees, strictly less than
+    ///        {PotatoFeeLocker.CREATOR_FEE_SHARE_BPS} (0 = creator takes nothing and
+    ///        holders receive the entire creator half). Fixed at launch.
+    /// @dev Rejects `creatorFeeBps == CREATOR_FEE_SHARE_BPS`: that pays holders exactly
+    ///      zero while the token still advertises holder rewards everywhere it is
+    ///      listed, which is a ready-made deceptive-launch vector on a permissionless
+    ///      pad. Anyone wanting that split already has {createToken}.
+    function createRewardToken(
+        string calldata name,
+        string calldata symbol,
+        TokenMeta calldata meta,
+        bytes32 salt,
+        uint16 creatorFeeBps
+    ) external payable nonReentrant returns (address token) {
+        if (creatorFeeBps >= locker.CREATOR_FEE_SHARE_BPS()) revert InvalidConfig();
+        return _launch(name, symbol, meta, salt, true, creatorFeeBps);
+    }
+
+    /// @dev The whole launch, shared by both entry points. `isReward` selects which
+    ///      token contract the factory deploys and whether the locker splits the
+    ///      creator half with holders.
+    function _launch(
+        string calldata name,
+        string calldata symbol,
+        TokenMeta calldata meta,
+        bytes32 salt,
+        bool isReward,
+        uint16 creatorFeeBps
+    ) internal returns (address token) {
         // Anti-vampire shield: reject blacklisted names/symbols (normalized to match
         // the client's trim().toLowerCase()) before doing any work.
         if (banned[_normHash(bytes(name))] || banned[_normHash(bytes(symbol))]) revert Banned();
 
-        bytes32 initCodeHash = keccak256(
-            abi.encodePacked(
-                type(PotatoToken).creationCode,
-                abi.encode(
-                    name,
-                    symbol,
-                    TOTAL_SUPPLY,
-                    address(this),
-                    address(positionManager),
-                    address(locker),
-                    MAX_WALLET,
-                    antiSnipeBlocks
-                )
-            )
-        );
+        // The token is deployed by {tokenFactory} (it carries BOTH token creation
+        // bytecodes; this pad cannot embed them without breaking EIP-170), so the
+        // CREATE2 address derives from the FACTORY — see {_computeTokenAddress}.
+        bytes32 initCodeHash = tokenFactory.initCodeHash(name, symbol, isReward);
 
         uint256 seed = uint256(keccak256(abi.encode(msg.sender, salt)));
         uint256 tries;
@@ -231,18 +303,8 @@ contract PotatoCurvePad is ReentrancyGuard {
         }
         if (tries == MAX_SALT_TRIES) revert LaunchGriefed();
 
-        token = address(
-            new PotatoToken{salt: bytes32(seed)}(
-                name,
-                symbol,
-                TOTAL_SUPPLY,
-                address(this),
-                address(positionManager),
-                address(locker),
-                MAX_WALLET,
-                antiSnipeBlocks
-            )
-        );
+        token = tokenFactory.deploy(name, symbol, isReward, bytes32(seed));
+        // CREATE2 determinism: the deployed address is exactly the one we vetted.
         assert(token == predicted);
 
         bool tokenIs0 = token < address(weth);
@@ -256,7 +318,18 @@ contract PotatoCurvePad is ReentrancyGuard {
         }
 
         (uint256 positionId, uint128 liquidity) = _mintCurve(token, tokenIs0, tickLower, tickUpper);
-        locker.register(positionId, token, msg.sender);
+        // On a holder-rewards launch the token IS the reward sink: the locker pushes
+        // the holders' slice straight to it, funding what holders have accrued.
+        locker.register(positionId, token, msg.sender, isReward ? token : address(0), creatorFeeBps);
+
+        // Hand the reward token its position so it can read fee growth directly.
+        // Must come AFTER the mint (the position does not exist before it) and BEFORE
+        // any dev buy, so the very first swap's fee is already accounted for.
+        if (isReward) {
+            IPotatoRewardTokenBind(token).bindPosition(
+                address(locker), positionId, liquidity, tickLower, tickUpper, !tokenIs0, creatorFeeBps
+            );
+        }
 
         curves[token] = CurveInfo({creator: msg.sender, pool: pool, positionId: positionId, bonded: false});
         allTokens.push(token);
@@ -265,6 +338,13 @@ contract PotatoCurvePad is ReentrancyGuard {
             token, msg.sender, name, symbol, pool, meta.imageURI, meta.website, meta.twitter, meta.telegram
         );
         emit CurveOpened(token, pool, positionId, liquidity);
+
+        if (isReward) {
+            rewardTerms[token] = RewardTerms({enabled: true, creatorFeeBps: creatorFeeBps});
+            emit RewardTokenLaunched(
+                token, msg.sender, creatorFeeBps, uint16(locker.CREATOR_FEE_SHARE_BPS()) - creatorFeeBps
+            );
+        }
 
         if (msg.value > 0) {
             _devBuy(token, pool, tokenIs0, msg.value);
@@ -458,9 +538,15 @@ contract PotatoCurvePad is ReentrancyGuard {
         return Math.mulDiv(p * p, TOTAL_SUPPLY, 1 << 192);
     }
 
+    /// @dev The deployer is {tokenFactory}, NOT the pad — the factory carries the token
+    ///      creation bytecode and issues the CREATE2, so the address derives from it.
     function _computeTokenAddress(bytes32 salt, bytes32 initCodeHash) internal view returns (address) {
         return address(
-            uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, initCodeHash))))
+            uint160(
+                uint256(
+                    keccak256(abi.encodePacked(bytes1(0xff), address(tokenFactory), salt, initCodeHash))
+                )
+            )
         );
     }
 

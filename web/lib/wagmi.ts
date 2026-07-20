@@ -6,13 +6,14 @@ import { getDefaultConfig } from "@rainbow-me/rainbowkit";
 import { http } from "viem";
 import { baseSepolia, hardhat } from "wagmi/chains";
 import { isChainDeployed, robinhoodChain } from "./config";
+import { robinhoodServerTransport } from "./serverRpc";
 
 // Robinhood reads go through our same-origin /api/rpc proxy in the browser, so
 // the Alchemy key never ships to the client and can't be scraped. On the server
 // (SSR) we hit the Alchemy endpoint directly from the server-only env var.
 const robinhoodTransport =
   typeof window === "undefined"
-    ? http(process.env.ROBINHOOD_RPC_URL || "https://rpc.mainnet.chain.robinhood.com")
+    ? robinhoodServerTransport()
     : http(`${window.location.origin}/api/rpc`);
 
 // Chains with a deployed pad (curve OR direct) first: wagmi treats the first
@@ -34,6 +35,6 @@ export const wagmiConfig = getDefaultConfig({
   // Every browser RPC read tunnels through /api/rpc → Alchemy. wagmi's 4s default
   // block-poll (balances, block number) multiplies that; 15s is plenty fresh for a
   // launchpad and cuts proxy/Alchemy load ~4x.
-  pollingInterval: 15_000,
+  pollingInterval: 30_000,
   ssr: true,
 });

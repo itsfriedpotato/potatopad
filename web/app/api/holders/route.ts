@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { createPublicClient, http, parseAbiItem, type Address } from "viem";
+import { createPublicClient, parseAbiItem, type Address } from "viem";
+import { robinhoodServerTransport } from "@/lib/serverRpc";
 import { allPadDeployments, robinhoodChain, ZERO_ADDRESS } from "@/lib/config";
 
 /**
@@ -69,7 +70,7 @@ function scanRateLimited(ip: string): boolean {
 
 const client = createPublicClient({
   chain: robinhoodChain,
-  transport: http(process.env.ROBINHOOD_RPC_URL || "https://rpc.mainnet.chain.robinhood.com"),
+  transport: robinhoodServerTransport(),
 });
 
 const cache = new Map<string, { payload: HoldersPayload; expiresAt: number }>();

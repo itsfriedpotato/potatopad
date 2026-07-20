@@ -12,3 +12,25 @@ contract RevertingTreasury {
     }
 }
 
+/// @dev Test-only: a contract that can hold an ERC-20 but refuses plain ETH.
+///      Used to prove a holder who cannot receive ETH fails its OWN claim
+///      cleanly, without stranding or bricking anyone else's rewards.
+contract EthRejectingHolder {
+    error Nope();
+
+    /// @notice Forwards an arbitrary call (e.g. `claim()`) to the token.
+    function call(address target, bytes calldata data) external returns (bytes memory) {
+        (bool ok, bytes memory ret) = target.call(data);
+        if (!ok) {
+            // Bubble the original revert reason up to the test.
+            assembly {
+                revert(add(ret, 0x20), mload(ret))
+            }
+        }
+        return ret;
+    }
+
+    receive() external payable {
+        revert Nope();
+    }
+}

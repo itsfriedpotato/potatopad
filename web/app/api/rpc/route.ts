@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { robinhoodPrimaryPool, robinhoodFallbacks, PUBLIC_RPC } from "@/lib/serverRpc";
 
 /**
  * Server-side JSON-RPC proxy for Robinhood Chain.
@@ -16,18 +17,20 @@ import { NextRequest, NextResponse } from "next/server";
  *      for multi-instance or serious protection, put Cloudflare / a shared store
  *      in front.
  *
- * Multiple upstreams: requests are round-robined across every configured Alchemy
- * endpoint and fail over to the next on a 429 (compute-unit limit) or 5xx, so a
- * spike on one key spills to another instead of surfacing as an error. Add more
- * keys via ROBINHOOD_RPC_URL, ROBINHOOD_RPC_URL_2, ROBINHOOD_RPC_URL_3.
+ * Two tiers: the PRIMARY POOL (Chainstack nodes in ROBINHOOD_RPC_URL, _2, _3) is
+ * round-robined so load spreads evenly and no single node hits its ~250 req/s limit;
+ * FALLBACKS (Alchemy in ROBINHOOD_RPC_FALLBACK_URL, _2) then the public RPC catch a
+ * 429/5xx spillover. Add pool nodes or fallbacks via those env vars.
  */
 
-const UPSTREAMS = [
-  process.env.ROBINHOOD_RPC_URL,
-  process.env.ROBINHOOD_RPC_URL_2,
-  process.env.ROBINHOOD_RPC_URL_3,
-].filter((u): u is string => !!u && u.length > 0);
-if (UPSTREAMS.length === 0) UPSTREAMS.push("https://rpc.mainnet.chain.robinhood.com");
+// The Chainstack pool is round-robined (spread load); Alchemy + public back it up.
+// Keys live only in these server env vars, so they never ship to the browser — which
+// talks to this same-origin proxy, not the keyed endpoints.
+const POOL = robinhoodPrimaryPool();
+const FALLBACKS = [...robinhoodFallbacks(), PUBLIC_RPC];
+// Round-robin cursor across the pool (module-level; approximate under concurrency,
+// which is fine — the goal is spreading load, not perfect fairness).
+let rrCursor = 0;
 
 // Denylist, not allowlist: block only the methods that could be abused to relay
 // transactions or open subscriptions through our key.
@@ -88,20 +91,28 @@ function rateLimited(ip: string, cost: number): boolean {
   return recent.length > MAX_PER_WINDOW;
 }
 
-// Round-robin starting point across upstreams; module-level so it persists warm.
-let rrCounter = 0;
-
 /**
- * Forward the JSON-RPC body to the upstreams. Starts at a round-robin offset and
- * fails over to the next upstream on a 429 or 5xx. Returns the first response
- * that is neither, or the last throttled/errored response if all are exhausted.
+ * Forward the JSON-RPC body: round-robin the primary pool so each Chainstack node
+ * takes ~1/N of traffic (staying under its per-node rate limit), then fall through
+ * the rest of the pool and the fallbacks (Alchemy, then public) on a 429 or 5xx.
+ * Returns the first response that is neither, or the last throttled/errored one if
+ * every upstream is exhausted.
  */
 async function forward(bodyStr: string): Promise<{ status: number; text: string }> {
-  const n = UPSTREAMS.length;
-  const start = rrCounter++ % n;
+  // This request's try-order: a round-robin start within the pool, then the rest of
+  // the pool, then the fallbacks. De-duped, and falls back to public if pool empty.
+  const order: string[] = [];
+  const n = POOL.length;
+  if (n > 0) {
+    const start = rrCursor;
+    rrCursor = (rrCursor + 1) % n;
+    for (let i = 0; i < n; i++) order.push(POOL[(start + i) % n]);
+  }
+  order.push(...FALLBACKS);
+  const tryList = [...new Set(order)];
+
   let last: { status: number; text: string } | null = null;
-  for (let i = 0; i < n; i++) {
-    const url = UPSTREAMS[(start + i) % n];
+  for (const url of tryList) {
     try {
       const res = await fetch(url, {
         method: "POST",
@@ -124,6 +135,20 @@ export async function POST(req: NextRequest) {
     req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
     req.headers.get("x-real-ip") ||
     "unknown";
+
+  // Same-origin guard: this proxy is for THIS app's browser. Block cross-origin
+  // browser callers so another site can't use our keyed upstreams as a free RPC.
+  // A missing Origin (server-to-server, curl) is allowed but still rate-limited.
+  const origin = req.headers.get("origin");
+  if (origin) {
+    try {
+      if (new URL(origin).host !== req.headers.get("host")) {
+        return NextResponse.json({ error: "forbidden origin" }, { status: 403 });
+      }
+    } catch {
+      return NextResponse.json({ error: "forbidden origin" }, { status: 403 });
+    }
+  }
 
   // Reject oversized bodies before reading them — a huge batch is the drain vector.
   if (Number(req.headers.get("content-length") || 0) > MAX_BODY_BYTES) {

@@ -3,7 +3,7 @@
 import { ExternalLink, TrendingUp } from "lucide-react";
 import { useState } from "react";
 import { encodeFunctionData, formatEther, parseEther, type Address } from "viem";
-import { useAccount, useBalance, useReadContract } from "wagmi";
+import { useAccount, useBalance, usePublicClient, useReadContract } from "wagmi";
 import { potatoTokenAbi } from "@/lib/abi";
 import {
   POOL_FEE_TIER,
@@ -31,8 +31,29 @@ const GAS_BUFFER = parseEther("0.01");
  */
 const SWAP_DEADLINE_SECONDS = 600n; // 10 minutes
 
-function swapDeadline(): bigint {
-  return BigInt(Math.floor(Date.now() / 1000)) + SWAP_DEADLINE_SECONDS;
+/**
+ * Deadline measured against the CHAIN's clock, not the browser's.
+ *
+ * The router compares against `block.timestamp`, so a browser clock that is
+ * behind the chain produces a deadline already in the chain's past and every
+ * swap reverts `Transaction too old`. That is easy to hit on a local or forked
+ * node (Hardhat stamps each auto-mined block at least a second after the last,
+ * so a burst of activity runs the chain clock ahead of real time), and it can
+ * also bite a user whose system clock is simply wrong.
+ *
+ * Taking the max of the two is safe in both directions: the chain's own
+ * timestamp when it is ahead, wall-clock when the latest block is stale.
+ *
+ * NOTE: this makes the window an UPPER bound, not an exact one. When the chain
+ * clock lags wall-clock, the effective allowance measured against
+ * `block.timestamp` is longer than SWAP_DEADLINE_SECONDS by however far it lags.
+ * Immaterial on an L2 with real blocktimes, but do not later tighten this
+ * constant on the assumption that it is exact.
+ */
+function swapDeadline(latestBlockTs?: bigint): bigint {
+  const wall = BigInt(Math.floor(Date.now() / 1000));
+  const base = latestBlockTs && latestBlockTs > wall ? latestBlockTs : wall;
+  return base + SWAP_DEADLINE_SECONDS;
 }
 
 const SLIPPAGE_OPTIONS: Array<{ label: string; bps: bigint }> = [
@@ -66,6 +87,18 @@ export function TradeWidget({
   const sellTx = useTx();
 
   const router = SWAP_ROUTER_ADDRESSES[chainId];
+  // Chain clock for the swap deadline, read ON DEMAND at submit rather than
+  // polled. A poller would add a recurring hit to the rate-limited /api/rpc proxy
+  // on every open token page, and the value is only ever needed at the moment a
+  // swap is signed.
+  const publicClient = usePublicClient();
+  async function chainNow(): Promise<bigint | undefined> {
+    try {
+      return (await publicClient?.getBlock())?.timestamp;
+    } catch {
+      return undefined; // fall back to wall-clock inside swapDeadline()
+    }
+  }
   const quoter = QUOTER_ADDRESSES[chainId];
   // Every token — curve (pre- and post-migration), direct, ancient — trades
   // through Uniswap: the single-sided-v3 curve is a live Uniswap pool from
@@ -173,7 +206,7 @@ export function TradeWidget({
     setAmountIn(formatEther((tokenBalance * bps) / 10000n));
   }
 
-  function onBuy() {
+  async function onBuy() {
     if (amount === undefined || !user || minOut === 0n || !router || exceedsBalance) return;
     const swapData = encodeFunctionData({
       abi: swapRouter02Abi,
@@ -195,7 +228,7 @@ export function TradeWidget({
       address: router,
       abi: swapRouter02Abi,
       functionName: "multicall",
-      args: [swapDeadline(), [swapData]],
+      args: [swapDeadline(await chainNow()), [swapData]],
       value: amount,
     });
   }
@@ -211,9 +244,8 @@ export function TradeWidget({
     });
   }
 
-  function onSell() {
-    if (amount === undefined || !user || minOut === 0n || exceedsBalance) return;
-    if (!router) return;
+  async function onSell() {
+    if (amount === undefined || !user || minOut === 0n || !router || exceedsBalance) return;
     const swapData = encodeFunctionData({
       abi: swapRouter02Abi,
       functionName: "exactInputSingle",
@@ -234,7 +266,7 @@ export function TradeWidget({
       address: router,
       abi: swapRouter02Abi,
       functionName: "multicall",
-      args: [swapDeadline(), [swapData]],
+      args: [swapDeadline(await chainNow()), [swapData]],
     });
   }
 

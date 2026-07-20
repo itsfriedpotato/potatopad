@@ -14,6 +14,13 @@ export const robinhoodChain = defineChain({
   blockExplorers: {
     default: { name: "Robinscan", url: "https://robinhoodchain.blockscout.com" },
   },
+  contracts: {
+    // Canonical Multicall3, verified live on Robinhood via eth_getCode. Lets
+    // wagmi/viem batch the Discover slot0 fan-out (~39 pool reads per visitor)
+    // into ONE eth_call (multicall3.aggregate3) instead of 39, which is the
+    // single biggest cut to burst RPC volume — bigger than adding nodes.
+    multicall3: { address: "0xcA11bde05977b3631167028862bE2a173976CA11" },
+  },
 });
 
 export const ZERO_ADDRESS =
@@ -23,6 +30,17 @@ function envAddress(value: string | undefined): Address {
   return value && /^0x[0-9a-fA-F]{40}$/.test(value)
     ? (value as Address)
     : ZERO_ADDRESS;
+}
+
+/**
+ * Like {envAddress} but yields `undefined` rather than the zero address, for
+ * OPTIONAL config where "unset" must stay distinguishable from "set to zero" —
+ * an unset `swapRouter` disables in-app trading, whereas a zero address would
+ * be treated as a real contract and every swap would revert.
+ */
+function envAddressOpt(value: string | undefined): Address | undefined {
+  const a = envAddress(value);
+  return a === ZERO_ADDRESS ? undefined : a;
 }
 
 /** Whether a pad is the bonding-curve launcher or the direct-to-Uniswap one. */
@@ -94,13 +112,15 @@ export const CHAINS: ChainConfig[] = [
     // Only Robinhood is wired for in-app trading (router + quoter present).
     swapRouter: "0xcaf681a66d020601342297493863e78c959e5cb2",
     quoter: "0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7",
-    padStartBlock: 13_221_549n, // deploy block of the 2%/redirect/owner() pad 0xe26e…9001
+    padStartBlock: 14_072_000n, // deploy block of the holder-rewards pad 0x88eB…A338
     legacyPads: [
       // Superseded pads, CAPPED at the block their successor took over: existing
       // tokens still render, but launches after the repoint do not surface. No
       // token is lost — every pre-repoint launch is below the cap. (The cap on
       // 0x6722 has a small buffer past 13_221_549 to cover the deploy→repoint
       // window, so a token launched during it still shows.)
+      // v5 pad 0xe26e…9001 — the 2%/redirect/owner pad, superseded by the holder-rewards pad.
+      { address: "0xe26e17B552A3f0361b0546443FFe58F7cF509001", startBlock: 13_221_549n, endBlock: 14_073_506n },
       // v4 pad 0x6722…63E8 — the burn+blacklist pad, superseded by the redirect pad.
       { address: "0x67225AC6ba037aA220F68e5aAA2b49Be4B0863E8", startBlock: 12_757_281n, endBlock: 13_230_000n },
       // v3 pad 0x12A0…D91F — held all launches before the burn+blacklist upgrade.
@@ -128,6 +148,11 @@ export const CHAINS: ChainConfig[] = [
     curvePadStartBlock: 0n, // fresh local chain scans from genesis
     weth: envAddress(process.env.NEXT_PUBLIC_WETH_ADDRESS_LOCALHOST),
     padStartBlock: 0n, // fresh local chain scans from genesis
+    // A local chain has no canonical Uniswap deployment, so the router and
+    // quoter are whatever `scripts/local-playground.ts` just deployed. Unset
+    // means no in-app trading, exactly as on any other unwired chain.
+    swapRouter: envAddressOpt(process.env.NEXT_PUBLIC_SWAP_ROUTER_LOCALHOST),
+    quoter: envAddressOpt(process.env.NEXT_PUBLIC_QUOTER_LOCALHOST),
   },
 ];
 
@@ -317,3 +342,8 @@ export function geckoTerminalPoolUrl(chainId: number, pool: string): string | un
 }
 
 export const PROOF_OF_POTATO_URL = "https://proofofpotato.com";
+
+/** Canonical public origin. Also the website a coin gets when its creator leaves
+ *  the field blank, so explorers reading the launch metadata link somewhere real
+ *  instead of showing nothing. */
+export const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || "https://potato.fm";

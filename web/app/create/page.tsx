@@ -1,11 +1,13 @@
 "use client";
 
+import { useQueryClient } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent } from "react";
-import { bytesToHex, decodeEventLog } from "viem";
+import { bytesToHex, decodeEventLog, parseEther } from "viem";
 import { useReadContracts } from "wagmi";
 import { potatoCurvePadAbi } from "@/lib/abi";
+import { SITE_URL } from "@/lib/config";
 import { usePad, useTx } from "@/lib/hooks";
 import { useAncientTokens } from "@/lib/ancient";
 import { formatEth, resolveImageUri, tryParseEther } from "@/lib/format";
@@ -13,12 +15,37 @@ import { ConnectGate } from "@/components/ConnectGate";
 import { NotDeployed } from "@/components/NotDeployed";
 import { TxStatus } from "@/components/TxStatus";
 
+/**
+ * Anti-snipe cap: during the launch window a dev-buy is limited to MAX_WALLET
+ * (2% of supply). At the ~3 ETH open FDV that's ~0.06 ETH; a larger attached ETH
+ * value would make createToken revert, so block it in the UI.
+ */
+const MAX_DEV_BUY_WEI = parseEther("0.06");
+
+/**
+ * The treasury always takes half the WETH fees; the other half is the creator's.
+ * A holder-rewards launch splits THAT half between the creator and holders, so
+ * the creator's cut of total fees runs 0…50%.
+ */
+const CREATOR_HALF_PCT = 50;
+/**
+ * Largest creator cut a reward launch accepts. The pad rejects exactly
+ * CREATOR_HALF_PCT (`creatorFeeBps >= CREATOR_FEE_SHARE_BPS -> InvalidConfig`),
+ * because that pays holders zero while the token still carries the holder-rewards
+ * badge. Keep the slider strictly inside the contract's bound so the form cannot
+ * offer a launch that reverts.
+ */
+const MAX_CREATOR_CUT_PCT = CREATOR_HALF_PCT - 5;
+
 const inputCls =
   "w-full rounded-lg border border-neutral-800 bg-black px-3 py-2.5 text-sm text-neutral-100 placeholder-neutral-700 outline-none transition-colors focus:border-neutral-600";
 const labelCls = "text-[10px] font-bold uppercase tracking-wider text-neutral-500";
 
 export default function CreatePage() {
   const router = useRouter();
+  const queryClient = useQueryClient();
+  // Curve pad is the PRIMARY launcher: every new launch (plain or holder-rewards)
+  // goes here. The direct pad stays read-only for coins already launched on it.
   const { curvePad, chainId, canLaunch } = usePad();
   const tx = useTx();
   const { tokens: ancientTokens } = useAncientTokens();
@@ -66,6 +93,11 @@ export default function CreatePage() {
   const [devBuy, setDevBuy] = useState("");
   const [uploading, setUploading] = useState(false);
   const [uploadErr, setUploadErr] = useState("");
+
+  // Holder rewards: share the creator's half of the fees with everyone holding.
+  const [rewardsOn, setRewardsOn] = useState(false);
+  const [creatorCutPct, setCreatorCutPct] = useState(0);
+  const holderCutPct = CREATOR_HALF_PCT - creatorCutPct;
 
   async function handleUpload(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -136,9 +168,12 @@ export default function CreatePage() {
         // not a TokenCreated log (e.g. a dev-buy's Buy log) — keep scanning
       }
     }
+    // Kick the Discover/profile feed so "My profile" / planter pages pick up the
+    // new plant sooner (server cache may still lag one TTL).
+    void queryClient.invalidateQueries({ queryKey: ["launch-activity"] });
     const timer = setTimeout(() => router.push(target), 800);
     return () => clearTimeout(timer);
-  }, [tx.confirmed, tx.receipt, router]);
+  }, [tx.confirmed, tx.receipt, router, queryClient]);
 
   if (!canLaunch) {
     return <NotDeployed chainId={chainId} />;
@@ -150,22 +185,33 @@ export default function CreatePage() {
     // Random CREATE2 salt: makes the token address unpredictable so a griefer
     // can't pre-initialize its Uniswap pool to brick the launch.
     const salt = bytesToHex(crypto.getRandomValues(new Uint8Array(32)));
+    const meta = {
+      imageURI: image.trim(),
+      // A coin with no site of its own gets Potato Pad as its website, so explorers
+      // and aggregators reading this launch metadata link somewhere real instead of
+      // rendering a blank. Creators who supply a site keep theirs untouched.
+      website: website.trim() || SITE_URL,
+      twitter: twitter.trim(),
+      telegram: telegram.trim(),
+    };
+    const common = { address: curvePad, abi: potatoCurvePadAbi, value: devBuyWei } as const;
+    const trimmedName = name.trim();
+    const ticker = symbol.trim().toUpperCase();
+
+    // Both entry points launch identically — same locked LP, same treasury cut.
+    // createRewardToken additionally splits the creator half with holders.
+    if (rewardsOn) {
+      tx.writeContract({
+        ...common,
+        functionName: "createRewardToken",
+        args: [trimmedName, ticker, meta, salt, creatorCutPct * 100],
+      });
+      return;
+    }
     tx.writeContract({
-      address: curvePad,
-      abi: potatoCurvePadAbi,
+      ...common,
       functionName: "createToken",
-      args: [
-        name.trim(),
-        symbol.trim().toUpperCase(),
-        {
-          imageURI: image.trim(),
-          website: website.trim(),
-          twitter: twitter.trim(),
-          telegram: telegram.trim(),
-        },
-        salt,
-      ],
-      value: devBuyWei,
+      args: [trimmedName, ticker, meta, salt],
     });
   }
 
@@ -290,6 +336,9 @@ export default function CreatePage() {
                   value={website}
                   onChange={(e) => setWebsite(e.target.value)}
                 />
+                <p className="text-[9px] text-neutral-600">
+                  Leave blank and your coin links to {SITE_URL.replace(/^https?:\/\//, "")}.
+                </p>
               </div>
 
               <div className="space-y-1.5">
@@ -318,6 +367,94 @@ export default function CreatePage() {
                       ? `Capped at ${formatEth(maxDevBuyWei)} ETH (5% of supply) during the anti-snipe window.`
                       : "Loading the dev-buy cap…"}
                   </p>
+                )}
+              </div>
+
+              <div className="space-y-3 border-t border-neutral-800/60 pt-4">
+                <label className={labelCls}>Fee model</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setRewardsOn(false)}
+                    className={`rounded-lg border px-3 py-2.5 text-left transition-colors ${
+                      rewardsOn
+                        ? "border-neutral-800 bg-black hover:border-neutral-700"
+                        : "border-amber-500/60 bg-amber-500/10"
+                    }`}
+                  >
+                    <span className="block text-xs font-bold text-neutral-100">Standard</span>
+                    <span className="mt-0.5 block text-[10px] leading-tight text-neutral-500">
+                      You keep the creator half of fees.
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRewardsOn(true)}
+                    className={`rounded-lg border px-3 py-2.5 text-left transition-colors ${
+                      rewardsOn
+                        ? "border-amber-500/60 bg-amber-500/10"
+                        : "border-neutral-800 bg-black hover:border-neutral-700"
+                    }`}
+                  >
+                    <span className="block text-xs font-bold text-neutral-100">Holder rewards</span>
+                    <span className="mt-0.5 block text-[10px] leading-tight text-neutral-500">
+                      Holders earn the fees, in ETH.
+                    </span>
+                  </button>
+                </div>
+
+                {rewardsOn && (
+                  <div className="space-y-3 rounded-lg border border-neutral-800/60 bg-black p-3.5">
+                    <div className="flex items-baseline justify-between">
+                      <label htmlFor="creatorcut" className={labelCls}>
+                        Your cut
+                      </label>
+                      <span className="font-mono text-xs tabular-nums text-neutral-400">
+                        {creatorCutPct}% of all fees
+                      </span>
+                    </div>
+                    <input
+                      id="creatorcut"
+                      type="range"
+                      min={0}
+                      max={MAX_CREATOR_CUT_PCT}
+                      step={5}
+                      value={creatorCutPct}
+                      onChange={(e) => setCreatorCutPct(Number(e.target.value))}
+                      className="w-full accent-amber-500"
+                    />
+
+                    {/* Live split preview: the three ways a fee can go. */}
+                    <div className="flex h-1.5 overflow-hidden rounded-full bg-neutral-900">
+                      <div className="bg-neutral-700" style={{ width: "50%" }} />
+                      <div className="bg-amber-500" style={{ width: `${creatorCutPct}%` }} />
+                      <div className="bg-emerald-500" style={{ width: `${holderCutPct}%` }} />
+                    </div>
+                    <dl className="grid grid-cols-3 gap-2 text-center">
+                      {[
+                        ["Treasury", "50%", "bg-neutral-700"],
+                        ["You", `${creatorCutPct}%`, "bg-amber-500"],
+                        ["Holders", `${holderCutPct}%`, "bg-emerald-500"],
+                      ].map(([label, pct, dot]) => (
+                        <div key={label}>
+                          <dt className="flex items-center justify-center gap-1 text-[9px] uppercase tracking-wider text-neutral-500">
+                            <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
+                            {label}
+                          </dt>
+                          <dd className="mt-0.5 font-mono text-xs tabular-nums text-neutral-200">
+                            {pct}
+                          </dd>
+                        </div>
+                      ))}
+                    </dl>
+
+                    <p className="text-[10px] leading-relaxed text-neutral-600">
+                      Holders earn pro-rata against circulating supply — hold 1%, earn 1% of the
+                      holder share. Credit lands as each swap happens, so holders earn exactly the
+                      volume they held through, and keep it even if they sell before anyone
+                      harvests. Fixed at launch; it can never be changed afterwards.
+                    </p>
+                  </div>
                 )}
               </div>
             </form>

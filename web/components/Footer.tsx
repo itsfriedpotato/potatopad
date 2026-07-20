@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ShieldCheck } from "lucide-react";
+import { Send, ShieldCheck } from "lucide-react";
 import { PROOF_OF_POTATO_URL } from "@/lib/config";
 
 export function Footer() {
@@ -37,6 +37,15 @@ export function Footer() {
           </p>
         </div>
         <div className="flex flex-col items-center gap-1 sm:items-end">
+          <a
+            href="https://t.me/potatopad"
+            target="_blank"
+            rel="noreferrer noopener"
+            className="inline-flex items-center gap-1.5 transition-colors hover:text-neutral-200"
+          >
+            <Send className="h-3.5 w-3.5 text-amber-500/70" />
+            Community Telegram
+          </a>
           {/* Attribution required by the project license — keep this credit visible. */}
           <a
             href={PROOF_OF_POTATO_URL}
