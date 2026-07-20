@@ -9,10 +9,11 @@ import { potatoTokenAbi } from "@/lib/abi";
 import { ZERO_ADDRESS } from "@/lib/config";
 import { useAncientTokens } from "@/lib/ancient";
 import { usePad, useTokenPad } from "@/lib/hooks";
-import { usePoolStats } from "@/lib/pool";
+import { useCurveStats, usePoolStats } from "@/lib/pool";
 import { formatUsd } from "@/lib/format";
 import { ActivityTabs } from "@/components/ActivityTabs";
 import { HarvestCard } from "@/components/HarvestCard";
+import { BondCard } from "@/components/BondCard";
 import { HolderRewardsCard } from "@/components/HolderRewardsCard";
 import { NotDeployed } from "@/components/NotDeployed";
 import { TokenChart } from "@/components/TokenChart";
@@ -29,16 +30,22 @@ export default function TokenPageClient() {
 
   const { chainId, isDeployed } = usePad();
 
-  // Resolve which pad (primary or legacy) launched this token, and its info.
+  // Resolve which pad (curve, direct, or legacy) launched this token, and its info.
   const resolved = useTokenPad(token);
+  // Live curve state (price / progress) for a bonding-curve token.
+  const curve = useCurveStats(token);
   // If no pad claims it, it may be a pre-existing "ancient" Robinhood token.
   const { byAddress: ancientByAddress, isLoading: ancientLoading } = useAncientTokens();
   const ancient = token ? ancientByAddress.get(token.toLowerCase()) : undefined;
 
+  const isCurve = resolved.kind === "curve";
+  const onCurve = isCurve && !resolved.bonded; // pre-bond curve phase (still trades on Uniswap)
   const isAncient = !resolved.resolved && !!ancient;
   const creator = resolved.creator;
   const lpTokenId = resolved.lpTokenId;
-  const pool = isAncient ? ancient.tradePool : resolved.pool;
+  // Effective Uniswap pool: curve and direct tokens both have a live pool from
+  // creation; ancient tokens use their pre-existing trade pool.
+  const pool = isAncient && ancient ? ancient.tradePool : resolved.pool;
 
   // Queries are disabled unless the address is valid; ZERO_ADDRESS is a typed placeholder.
   const queryToken = token ?? ZERO_ADDRESS;
@@ -54,9 +61,13 @@ export default function TokenPageClient() {
   const name = data?.[0] as string | undefined;
   const symbol = data?.[1] as string | undefined;
 
-  // Price / market cap / liquidity from the Uniswap pool (hook always called;
-  // no-ops until the pool resolves). Only used by the PotatoPad StatsCard.
+  // Price / market cap / liquidity from the Uniswap pool. Curve tokens have a
+  // live pool from block one, so this is continuous across migration; {curve}
+  // only supplies the migration flag + progress for the curve UI.
   const poolStats = usePoolStats(token, pool !== ZERO_ADDRESS ? pool : undefined);
+  const priceWeth = poolStats.priceWeth;
+  const marketCapEth = poolStats.marketCapEth;
+  const liquidityProxy = poolStats.wethInPool;
 
   if (!isDeployed) return <NotDeployed chainId={chainId} />;
 
@@ -89,7 +100,8 @@ export default function TokenPageClient() {
   }
 
   // Wait for pad resolution; if it's not a pad token, also wait for the ancient list.
-  const stillResolving = resolved.isLoading || (!resolved.resolved && ancientLoading);
+  const stillResolving =
+    resolved.isLoading || curve.isLoading || (!resolved.resolved && ancientLoading);
   if (isLoading || stillResolving || !data || name === undefined || symbol === undefined) {
     return (
       <div className="grid gap-6 lg:grid-cols-3">
@@ -196,7 +208,7 @@ export default function TokenPageClient() {
     );
   }
 
-  // ── PotatoPad token: full page with LP-fees card ──
+  // ── PotatoPad token (curve or direct): full page with LP-fees card ──
   return (
     <div className="grid gap-6 lg:grid-cols-3">
       {/* LEFT (2/3) */}
@@ -208,18 +220,35 @@ export default function TokenPageClient() {
           creator={creator}
           chainId={chainId}
         />
-        <TokenChart token={token} pool={pool} />
+        <TokenChart
+          token={token}
+          pool={pool}
+          isCurve={isCurve}
+          bonded={resolved.bonded}
+          progressBps={curve.progressBps}
+        />
         <ActivityTabs token={token} creator={creator} pool={pool} />
       </div>
 
       {/* RIGHT (1/3) */}
       <div className="space-y-6">
-        <TradeWidget token={token} symbol={symbol} pool={pool} />
+        {isCurve && curve.bondable && !resolved.bonded && (
+          <BondCard token={token} pad={resolved.pad} chainId={chainId} />
+        )}
+        <TradeWidget
+          token={token}
+          symbol={symbol}
+          pool={pool}
+          isCurve={isCurve}
+          bonded={resolved.bonded}
+        />
         <StatsCard
           token={token}
-          priceWeth={poolStats.priceWeth}
-          marketCapEth={poolStats.marketCapEth}
-          wethInPool={poolStats.wethInPool}
+          priceWeth={priceWeth}
+          marketCapEth={marketCapEth}
+          wethInPool={liquidityProxy}
+          onCurve={onCurve}
+          progressBps={curve.progressBps}
         />
         {/* Renders only for holder-rewards launches; a no-op otherwise. */}
         <HolderRewardsCard token={token} symbol={symbol} pad={resolved.pad} chainId={chainId} />

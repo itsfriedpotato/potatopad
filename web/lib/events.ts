@@ -4,10 +4,12 @@
 // Transfer logs). v2 has no Trade or Graduated events — price/liquidity come
 // from the Uniswap pool (see lib/pool). All fetchers degrade gracefully.
 
-import { useQuery } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo } from "react";
 import type { Address } from "viem";
-import { isHiddenToken } from "@/lib/config";
+import { useWatchContractEvent } from "wagmi";
+import { potatoCurvePadAbi, potatoPadAbi } from "@/lib/abi";
+import { allPadDeployments, isHiddenToken, ZERO_ADDRESS, type PadKind } from "@/lib/config";
 import { usePad } from "@/lib/hooks";
 import type { FeedState } from "@/lib/tokenFeed";
 import { ANALYTICS_CHAIN_ID } from "@/lib/robinhoodPublicClient";
@@ -16,6 +18,8 @@ import { ANALYTICS_CHAIN_ID } from "@/lib/robinhoodPublicClient";
 // localStorage cache for the launch feed (bigint-safe).
 // ---------------------------------------------------------------------------
 
+// v3: CreationEvent gained a `kind` field (curve vs direct); bump so stale v2
+// caches (which lack it) are ignored rather than painting kind-less rows.
 const LAUNCH_CACHE_PREFIX = "potatopad:launch:v3:";
 /** Age a seeded fresh payload into "stale" after this (2 × server ~90s TTL). */
 const CLIENT_FRESH_MAX_MS = 180_000;
@@ -40,6 +44,7 @@ export interface CreationEvent {
   creator: Address;
   name: string;
   symbol: string;
+  /** The token's Uniswap pool — non-zero from creation for both curve and direct tokens. */
   pool: Address;
   imageURI: string;
   website: string;
@@ -47,10 +52,12 @@ export interface CreationEvent {
   telegram: string;
   timestamp: number;
   blockNumber: bigint;
-  /** The pad (primary or legacy) that launched this token. */
+  /** The pad (curve, direct, or legacy) that launched this token. */
   pad: Address;
   /** 24h USD volume (from the server feed); 0 if unindexed. */
   volume24Usd: number;
+  /** "curve" (bonding curve) or "direct" (legacy direct-to-Uniswap). */
+  kind: PadKind;
 }
 
 export interface LaunchActivity {
@@ -125,8 +132,19 @@ const EMPTY_LAUNCH: LaunchActivity = {
  * the connected wallet chain. Discover, ticker, and creator profiles share this.
  */
 export function useLaunchActivity() {
-  const queryKey = useMemo(() => ["launch-activity", ANALYTICS_CHAIN_ID] as const, []);
-  const cacheKey = LAUNCH_CACHE_PREFIX + ANALYTICS_CHAIN_ID;
+  // Pad addresses come from the CONNECTED chain purely to drive the live event
+  // watches below; the feed itself stays pinned to Robinhood (see docstring) so
+  // profiles and the ticker work no matter what chain the wallet is on.
+  const { curvePad, directPad } = usePad();
+  const queryClient = useQueryClient();
+  // Pads are part of the key so a repoint invalidates cached rows from the old pad.
+  const pads = useMemo(() => allPadDeployments(ANALYTICS_CHAIN_ID), []);
+  const queryKey = useMemo(
+    () => ["launch-activity", ANALYTICS_CHAIN_ID, pads.map((p) => p.address).join(",")] as const,
+    [pads],
+  );
+  const cacheKey =
+    LAUNCH_CACHE_PREFIX + ANALYTICS_CHAIN_ID + ":" + pads.map((p) => p.address).join(",");
 
   const query = useQuery<LaunchActivity>({
     queryKey,
@@ -189,6 +207,7 @@ export function useLaunchActivity() {
           blockNumber: BigInt(c.blockNumber),
           pad: c.pad,
           volume24Usd: c.volume24Usd ?? 0,
+          kind: c.kind ?? "direct", // backward-compat for any kind-less payload
         }));
         const state: FeedState =
           json.state ?? (json.unavailable ? "unavailable" : "fresh");
@@ -216,6 +235,37 @@ export function useLaunchActivity() {
         };
       }
     },
+  });
+
+  // localStorage is unavailable during SSR. Seed React Query only after the
+  // initial hydration render so the server and browser produce the same tree
+  // (fix courtesy of #14). Cached refreshes still paint immediately after mount
+  // while the API request revalidates in the background.
+  useEffect(() => {
+    const cached = readLaunchCache(cacheKey);
+    if (!cached) return;
+    queryClient.setQueryData<LaunchActivity>(
+      queryKey,
+      (current) => current ?? cached.data,
+      { updatedAt: cached.updatedAt },
+    );
+  }, [cacheKey, queryClient, queryKey]);
+
+  // Live updates: watch the curve pad (primary, all new launches) and the direct
+  // pad (legacy but harmless). Each watch is enabled only when its address is set.
+  useWatchContractEvent({
+    address: curvePad,
+    abi: potatoCurvePadAbi,
+    eventName: "TokenCreated",
+    enabled: curvePad !== ZERO_ADDRESS,
+    onLogs: () => queryClient.invalidateQueries({ queryKey }),
+  });
+  useWatchContractEvent({
+    address: directPad,
+    abi: potatoPadAbi,
+    eventName: "TokenCreated",
+    enabled: directPad !== ZERO_ADDRESS,
+    onLogs: () => queryClient.invalidateQueries({ queryKey }),
   });
 
   const raw = query.data ?? EMPTY_LAUNCH;

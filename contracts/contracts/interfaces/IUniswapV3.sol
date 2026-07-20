@@ -85,12 +85,27 @@ interface INonfungiblePositionManager {
         uint128 amount1Max;
     }
 
+    struct DecreaseLiquidityParams {
+        uint256 tokenId;
+        uint128 liquidity;
+        uint256 amount0Min;
+        uint256 amount1Min;
+        uint256 deadline;
+    }
+
     function mint(MintParams calldata params)
         external
         payable
         returns (uint256 tokenId, uint128 liquidity, uint256 amount0, uint256 amount1);
 
     function collect(CollectParams calldata params)
+        external
+        payable
+        returns (uint256 amount0, uint256 amount1);
+
+    /// @dev Removes liquidity from a position (owner/approved only); the freed
+    ///      principal is added to the position's owed balance, harvested via {collect}.
+    function decreaseLiquidity(DecreaseLiquidityParams calldata params)
         external
         payable
         returns (uint256 amount0, uint256 amount1);
@@ -112,6 +127,10 @@ interface INonfungiblePositionManager {
             uint128 tokensOwed0,
             uint128 tokensOwed1
         );
+
+    function ownerOf(uint256 tokenId) external view returns (address owner);
+
+    function safeTransferFrom(address from, address to, uint256 tokenId) external;
 }
 
 interface IWETH9 {

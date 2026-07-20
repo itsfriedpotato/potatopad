@@ -22,13 +22,17 @@ export async function generateMetadata({
     : undefined;
   const name = creation?.name?.trim();
   const symbol = creation?.symbol?.trim();
+  const isCurve = creation?.kind === "curve";
 
   const title = name
     ? `${name}${symbol ? ` ($${symbol})` : ""} · PotatoPad`
     : "Token · PotatoPad";
+  const label = symbol ? ` ($${symbol})` : "";
   const description = name
-    ? `Trade ${name}${symbol ? ` ($${symbol})` : ""} on PotatoPad. Launched direct-to-Uniswap V3, single-sided liquidity locked forever.`
-    : "A token launched on PotatoPad, direct-to-Uniswap V3, with single-sided liquidity locked forever.";
+    ? isCurve
+      ? `Trade ${name}${label} on PotatoPad — a bonding-curve launch, live on Uniswap V3 with liquidity locked forever.`
+      : `Trade ${name}${label} on PotatoPad — launched direct-to-Uniswap V3, single-sided liquidity locked forever.`
+    : "A token on PotatoPad — bonding-curve launch, live on Uniswap V3, liquidity locked forever.";
 
   return {
     title,

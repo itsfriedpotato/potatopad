@@ -3,7 +3,9 @@
 import { Hourglass, Search, Sprout } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
+import type { Address } from "viem";
 import { useReadContracts } from "wagmi";
+import { potatoCurvePadAbi } from "@/lib/abi";
 import { WETH_ADDRESSES, ZERO_ADDRESS } from "@/lib/config";
 import { useAncientTokens } from "@/lib/ancient";
 import { useLaunchActivity } from "@/lib/events";
@@ -52,13 +54,15 @@ function CardSkeleton() {
 }
 
 export default function DiscoverPage() {
-  const { chainId, isDeployed } = usePad();
+  // `weth` is intentionally NOT taken from usePad: the feed is Robinhood-pinned,
+  // so pricing uses RH_WETH rather than the connected wallet's chain WETH.
+  const { chainId, curvePad, isDeployed } = usePad();
   const { query, setQuery } = useSearch();
   const [tab, setTab] = useState<TabId>("growing");
   const [sort, setSort] = useState<SortId>("recent");
   const isAncientTab = tab === "ancient";
 
-  // PotatoPad launches — span ALL pads (primary + legacy). Feed is Robinhood-pinned.
+  // PotatoPad launches — span ALL pads (curve + direct/legacy). Robinhood-pinned.
   const { creations, unavailable: launchUnavailable, isLoading: launchLoading } =
     useLaunchActivity();
   // Pre-existing Robinhood "ancient" runners (Noxa etc.), served by /api/ancient.
@@ -68,24 +72,59 @@ export default function DiscoverPage() {
     isLoading: ancientLoading,
   } = useAncientTokens();
 
-  // Price each PotatoPad token from its pool's slot0, index-aligned to `creations`.
-  // chainId is forced to Robinhood so wallet-on-testnet doesn't mis-price RH pools.
+  // Pass 1: curve metadata (curves + progress) for every creation. Non-curve
+  // tokens return zeros (allowFailure) — harmless. 2 reads per token, index-aligned
+  // so creation i is at [2i, 2i+1].
+  const hasCurve = curvePad !== ZERO_ADDRESS && creations.some((c) => c.kind === "curve");
+  const curveContracts = useMemo(
+    () =>
+      creations.flatMap((c) => [
+        { address: curvePad, abi: potatoCurvePadAbi, functionName: "curves", args: [c.token] },
+        { address: curvePad, abi: potatoCurvePadAbi, functionName: "curveProgressBps", args: [c.token] },
+      ]),
+    [creations, curvePad],
+  );
+  const { data: curveReads } = useReadContracts({
+    contracts: curveContracts as never[],
+    allowFailure: true,
+    query: { enabled: isDeployed && hasCurve },
+  });
+
+  // The Uniswap pool to price each token from. Curve tokens (single-sided-v3) have
+  // a live pool from block one — pre- AND post-migration — so use curves().pool;
+  // direct tokens use their own pool from the creation event.
+  const effectivePools = useMemo<Address[]>(
+    () =>
+      creations.map((c, i) => {
+        if (c.kind === "curve") {
+          const cv = curveReads?.[2 * i]?.result as
+            | readonly [Address, Address, bigint, bigint, boolean]
+            | undefined;
+          return cv?.[1] ?? c.pool ?? ZERO_ADDRESS;
+        }
+        return c.pool ?? ZERO_ADDRESS;
+      }),
+    [creations, curveReads],
+  );
+
+  // Pass 2: pool slot0 for each effective pool, index-aligned to `creations`.
+  // Priced with RH_WETH so a wallet on another chain doesn't mis-price RH pools.
   const poolContracts = useMemo(
     () =>
-      creations.map((c) => ({
-        address: c.pool ?? ZERO_ADDRESS,
+      effectivePools.map((address) => ({
+        address,
         abi: uniswapV3PoolAbi,
         functionName: "slot0" as const,
         chainId: ANALYTICS_CHAIN_ID,
       })),
-    [creations],
+    [effectivePools],
   );
 
   const { data: poolReads } = useReadContracts({
     contracts: poolContracts as never[],
     allowFailure: true,
     query: {
-      enabled: isDeployed && creations.some((c) => !!c.pool && c.pool !== ZERO_ADDRESS),
+      enabled: isDeployed && effectivePools.some((p) => p !== ZERO_ADDRESS),
       // These ~39 pool reads multiply per visitor. Hold them 60s and don't refetch on
       // every window focus, to cut proxy/RPC load.
       staleTime: 60_000,
@@ -100,6 +139,16 @@ export default function DiscoverPage() {
   const padRows = useMemo<TokenRow[]>(
     () =>
       creations.map((c, i) => {
+        const isCurveTok = c.kind === "curve";
+        const cv = curveReads?.[2 * i]?.result as
+          | readonly [Address, Address, bigint, boolean]
+          | undefined;
+        const curveProg = curveReads?.[2 * i + 1]?.result as bigint | undefined;
+        const bonded = isCurveTok ? (cv?.[3] ?? false) : true;
+        const onCurve = isCurveTok && !bonded;
+
+        // Curve tokens have a live pool from block one, so every token prices
+        // from its pool's slot0 — continuous across migration.
         const slot0 = poolReads?.[i]?.result as Slot0 | undefined;
         const sqrtPriceX96 = slot0?.[0];
         // Failed / missing slot0 → null (never coerce unknown price to 0 ETH).
@@ -114,15 +163,19 @@ export default function DiscoverPage() {
           symbol: c.symbol,
           creator: c.creator,
           creatorName: creatorProfiles?.[c.creator.toLowerCase()]?.username,
-          pool: c.pool,
+          // Curve tokens price from curves().pool; direct tokens from the event pool.
+          pool: effectivePools[i],
           priceWeth,
           marketCapEth: priceWeth != null ? priceWeth * TOTAL_SUPPLY_WHOLE : null,
           createdAt: c.timestamp,
           imageURI: c.imageURI,
           volume24Usd: c.volume24Usd,
+          curve: isCurveTok,
+          bonded,
+          curveProgressBps: onCurve ? (curveProg ?? 0n) : undefined,
         };
       }),
-    [creations, poolReads, creatorProfiles],
+    [creations, curveReads, poolReads, effectivePools, creatorProfiles],
   );
 
   const ancientRows = useMemo<TokenRow[]>(

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createPublicClient, parseAbiItem, type Address } from "viem";
 import { robinhoodServerTransport } from "@/lib/serverRpc";
-import { padDeployments, robinhoodChain, ZERO_ADDRESS } from "@/lib/config";
+import { allPadDeployments, robinhoodChain, ZERO_ADDRESS } from "@/lib/config";
 
 /**
  * Server-side, cached holder list for a single token.
@@ -100,7 +100,7 @@ async function scan(token: Address): Promise<HoldersPayload> {
   const latest = await client.getBlockNumber();
   // Scan from the EARLIEST pad's deploy block so a legacy token's full Transfer
   // history is covered, not truncated at the newest pad's block.
-  const deployments = padDeployments(robinhoodChain.id);
+  const deployments = allPadDeployments(robinhoodChain.id); // include the curve pad block
   const startBlock = deployments.length
     ? deployments.reduce(
         (m, p) => (p.startBlock < m ? p.startBlock : m),

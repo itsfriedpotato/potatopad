@@ -1,5 +1,5 @@
 import { createPublicClient, parseAbiItem, type Address } from "viem";
-import { padDeployments, robinhoodChain, ZERO_ADDRESS } from "@/lib/config";
+import { allPadDeployments, robinhoodChain, ZERO_ADDRESS, type PadKind } from "@/lib/config";
 import { robinhoodServerTransport } from "@/lib/serverRpc";
 
 /**
@@ -55,6 +55,8 @@ export interface CreationDTO {
   pad: Address;
   /** 24h USD volume from GeckoTerminal (0 if unindexed) — drives "Recent buys". */
   volume24Usd: number;
+  /** Which pad kind launched it: "curve" (bonding curve) or "direct" (legacy). */
+  kind: PadKind;
 }
 export type FeedState = "fresh" | "stale" | "unavailable";
 
@@ -198,9 +200,12 @@ async function fetchVolumes(addresses: Address[]): Promise<Map<string, number>> 
 // once and kept for the process lifetime; only the active pad is re-scanned.
 let legacyTagged: PadTag[] | null = null;
 
-async function scan(): Promise<{ creations: CreationDTO[]; unavailable: boolean }> {
-  const pads = padDeployments(robinhoodChain.id);
-  if (pads.length === 0) return { creations: [], unavailable: false };
+async function scan(): Promise<FeedPayload> {
+  // Kind-tagged: the curve pad AND the direct pads, so a token resolves to the
+  // right launcher and the feed can tell the UI which stage to render.
+  const pads = allPadDeployments(robinhoodChain.id);
+  // No pads configured for this chain is a VALID empty result, not an outage.
+  if (pads.length === 0) return stamp([], "fresh", Date.now());
 
   const latest = await client.getBlockNumber();
   // The active (write) pad has no endBlock; legacy pads carry the repoint block.
@@ -260,6 +265,7 @@ async function scan(): Promise<{ creations: CreationDTO[]; unavailable: boolean 
   }
 
   // A token belongs to exactly one pad; dedupe by token address.
+  const kindByPad = new Map(pads.map((p) => [p.address.toLowerCase(), p.kind ?? "direct"] as const));
   const byToken = new Map<string, CreationDTO>();
   for (const { log, pad } of tagged) {
     const token = log.args.token;
@@ -281,6 +287,7 @@ async function scan(): Promise<{ creations: CreationDTO[]; unavailable: boolean 
       blockNumber: bn !== null ? bn.toString() : "0",
       pad,
       volume24Usd: 0,
+      kind: kindByPad.get(pad.toLowerCase()) ?? "direct",
     });
   }
   // Enrich with 24h volume (best-effort) so the client can offer a "Recent buys" sort.
@@ -291,7 +298,9 @@ async function scan(): Promise<{ creations: CreationDTO[]; unavailable: boolean 
   } catch {
     /* leave volumes at 0 */
   }
-  return { creations, unavailable };
+  // A partial scan (some window failed) surfaces as "unavailable" so the client
+  // shows a warm cache rather than treating a truncated list as complete.
+  return stamp(creations, unavailable ? "unavailable" : "fresh", Date.now());
 }
 
 let inFlight: Promise<FeedPayload> | null = null;

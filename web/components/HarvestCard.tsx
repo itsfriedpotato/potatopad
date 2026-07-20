@@ -77,9 +77,11 @@ export function HarvestCard({
   /** Launched token address — fees also accrue on this side of the pool. */
   token: Address;
   symbol: string;
-  /** The pad that launched this token (primary or legacy) — its locker holds the fees. */
+  /** The pad that launched this token (curve, primary, or legacy) — its locker holds the fees. */
   pad: Address;
 }) {
+  // Lock-at-launch: the single-sided position is minted straight into the locker,
+  // so its swap fees are collectable/claimable from block one — even pre-bond.
   const { address: user, isConnected } = useAccount();
   const { weth, chainId } = usePad();
   const collectTx = useTx();
@@ -433,3 +435,4 @@ export function HarvestCard({
     </div>
   );
 }
+

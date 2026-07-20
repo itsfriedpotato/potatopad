@@ -3,7 +3,7 @@
 import { Activity } from "lucide-react";
 import type { Address } from "viem";
 import { useTokenHolders } from "@/lib/events";
-import { formatEth, formatFloatPrice, formatUsd, formatUsdPrice } from "@/lib/format";
+import { bpsToPercent, formatEth, formatFloatPrice, formatUsd, formatUsdPrice } from "@/lib/format";
 import { useEthUsdPrice } from "@/lib/price";
 
 export function StatsCard({
@@ -11,14 +11,20 @@ export function StatsCard({
   priceWeth,
   marketCapEth,
   wethInPool,
+  onCurve = false,
+  progressBps = 0n,
 }: {
   token: Address;
-  /** WETH per whole token (float) from the pool */
+  /** WETH per whole token (float) — from the pool, or the curve when onCurve */
   priceWeth: number;
   /** fully-diluted valuation in ETH (float) */
   marketCapEth: number;
-  /** WETH held by the pool (rough TVL proxy) */
+  /** WETH held by the pool, or ETH collected on the curve when onCurve */
   wethInPool: bigint | undefined;
+  /** True while the token is in the pre-migration bonding-curve phase. */
+  onCurve?: boolean;
+  /** Curve progress toward the fill/migration price, 0–10000 bps (only when onCurve). */
+  progressBps?: bigint;
 }) {
   const { holders, unavailable: holdersUnavailable } = useTokenHolders(token);
   const { usd: ethUsd } = useEthUsdPrice();
@@ -54,9 +60,9 @@ export function StatsCard({
           : undefined,
     },
     {
-      label: "Liquidity",
+      label: onCurve ? "Collected" : "Liquidity",
       value:
-        wethInPool === undefined ? "…" : `${formatEth(wethInPool)} WETH`,
+        wethInPool === undefined ? "…" : `${formatEth(wethInPool)} ${onCurve ? "ETH" : "WETH"}`,
     },
     {
       label: "Holders",
@@ -87,7 +93,9 @@ export function StatsCard({
         ))}
       </div>
       <p className="mt-3 text-[11px] text-neutral-600">
-        Price &amp; market cap from the Uniswap V3 pool. Live on Uniswap since launch.
+        {onCurve
+          ? `Live on Uniswap · ${bpsToPercent(progressBps)} of the curve sold toward bond.`
+          : "Price & market cap from the Uniswap V3 pool. Live on Uniswap."}
       </p>
     </div>
   );

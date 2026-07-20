@@ -2,13 +2,13 @@
 
 import { Moon } from "lucide-react";
 import { useSwitchChain } from "wagmi";
-import { PAD_ADDRESSES, SUPPORTED_CHAINS, ZERO_ADDRESS, chainName } from "@/lib/config";
+import { SUPPORTED_CHAINS, chainName, isChainDeployed } from "@/lib/config";
 
 /** Friendly empty state when PotatoPad has no address configured for this chain. */
 export function NotDeployed({ chainId }: { chainId: number }) {
   const { switchChain } = useSwitchChain();
   const alternatives = SUPPORTED_CHAINS.filter(
-    (c) => c.id !== chainId && (PAD_ADDRESSES[c.id] ?? ZERO_ADDRESS) !== ZERO_ADDRESS,
+    (c) => c.id !== chainId && isChainDeployed(c.id),
   );
 
   return (
@@ -20,7 +20,7 @@ export function NotDeployed({ chainId }: { chainId: number }) {
       <p className="mt-2 text-sm text-neutral-400">
         No contract address is configured for this network. Set{" "}
         <code className="rounded bg-neutral-800 px-1 py-0.5 font-mono text-xs">
-          NEXT_PUBLIC_PAD_ADDRESS_*
+          NEXT_PUBLIC_CURVE_PAD_ADDRESS_*
         </code>{" "}
         in <code className="rounded bg-neutral-800 px-1 py-0.5 font-mono text-xs">.env.local</code>{" "}
         or switch to a network where it lives.
