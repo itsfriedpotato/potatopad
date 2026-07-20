@@ -8,8 +8,6 @@ import { usePathname } from "next/navigation";
 import { getAddress } from "viem";
 import { useAccount } from "wagmi";
 import { useSearch } from "@/components/SearchContext";
-import { useLaunchActivity } from "@/lib/events";
-import { isPlanter } from "@/lib/padStats";
 
 // The chain-switcher pill is a dev convenience (hopping between localhost /
 // testnet / mainnet). Production builds serve one chain — never show it there.
@@ -20,21 +18,17 @@ export function Header() {
   const pathname = usePathname();
   const { query, setQuery } = useSearch();
   const { address: connected } = useAccount();
-  // Use unfiltered creations so a planter whose only coin is list-hidden still
-  // gets My profile (existence is about plants, not Discover visibility).
-  const { allCreations, state: feedState, isLoading: feedLoading } = useLaunchActivity();
+  // EVERY connected wallet has a profile now (auto-named until claimed, editable
+  // there), so this no longer waits on the launch feed or requires having planted
+  // a coin — that older gate left non-planters with no way to reach their profile.
   const myProfileHref = useMemo(() => {
     if (!connected) return null;
-    // Only show once we know the feed is usable and this wallet has planted.
-    if (feedLoading && allCreations.length === 0) return null;
-    if (feedState === "unavailable" && allCreations.length === 0) return null;
-    if (!isPlanter(allCreations, connected)) return null;
     try {
       return `/creator/${getAddress(connected)}`;
     } catch {
       return null;
     }
-  }, [connected, allCreations, feedState, feedLoading]);
+  }, [connected]);
 
   return (
     <header className="border-b border-neutral-800 bg-neutral-950/80 backdrop-blur-md">

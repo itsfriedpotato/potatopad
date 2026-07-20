@@ -244,11 +244,14 @@ export function CreatorPageClient({ address: raw }: { address: string }) {
     );
   }
 
-  // Planter-scoped: non-planters do not get the full profile chrome.
+  // Personal profiles belong to EVERY wallet, so a wallet with no plants still gets
+  // the full profile chrome (picture, name, bio, Edit). Only the COIN LIST is replaced
+  // by this empty state, which renders below the header instead of replacing the page —
+  // otherwise a non-planter has no way to reach their own profile to edit it.
   // Journey note: right after a plant, the server feed can lag (~TTL). Never tell the
   // connected planter "you never launched" when the feed is empty — that is indexing lag.
-  if (mine.length === 0) {
-    return (
+  const emptyState =
+    mine.length === 0 ? (
       <div className="card mx-auto max-w-lg p-10 text-center">
         {isYou ? (
           <>
@@ -290,24 +293,18 @@ export function CreatorPageClient({ address: raw }: { address: string }) {
         ) : (
           <>
             <Sprout className="mx-auto h-10 w-10 text-green-500/70" aria-hidden />
-            <h2 className="mt-4 text-lg font-bold text-neutral-100">
-              Not a PotatoPad planter
-            </h2>
+            <h2 className="mt-4 text-lg font-bold text-neutral-100">No coins planted yet</h2>
             <p className="mt-2 text-sm text-neutral-400">
               {shortAddress(address)} hasn&apos;t planted a coin on PotatoPad (Robinhood)
-              yet. Profiles are for wallets that have launched at least once.
+              yet. Anything they launch will show up here.
             </p>
-            <div className="mt-4 flex justify-center">
-              <AddressChip address={address} chainId={ANALYTICS_CHAIN_ID} />
-            </div>
             <Link href="/" className="btn-secondary mt-6 inline-flex">
               Back to Discover
             </Link>
           </>
         )}
       </div>
-    );
-  }
+    ) : null;
 
   const first = firstPlantTimestamp(mine);
   const latest = latestPlantTimestamp(mine);
@@ -459,11 +456,13 @@ export function CreatorPageClient({ address: raw }: { address: string }) {
         )}
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-        {rows.map((row) => (
-          <TokenCard key={row.address} row={row} hideCreatorLink />
-        ))}
-      </div>
+      {emptyState ?? (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          {rows.map((row) => (
+            <TokenCard key={row.address} row={row} hideCreatorLink />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
