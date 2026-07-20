@@ -81,6 +81,16 @@ export const CHAINS: ChainConfig[] = [
     quoter: "0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7",
     padStartBlock: 13_221_549n, // deploy block of the 2%/redirect/owner() pad 0xe26e…9001
     legacyPads: [
+      // NOTE: this list is "additional pads to READ", not strictly older ones.
+      // The holder-rewards pad below is NEWER than the primary and deliberately
+      // uncapped; everything after it is a superseded pad with an end block.
+      //
+      // Holder-rewards pad 0x88eB…A338 — first pad with createRewardToken. Indexed
+      // here so its launches (and their REWARDS badge) surface in Discover while
+      // NEXT_PUBLIC_PAD_ADDRESS_ROBINHOOD still points new launches at the primary.
+      // Promote it by flipping that env var; no code change needed, and this entry
+      // then dedupes against the primary automatically in {padDeployments}.
+      { address: "0x88eB8F4aC925C0a6b5501da0eb7E202a036EA338", startBlock: 14_072_104n },
       // Superseded pads, CAPPED at the block their successor took over: existing
       // tokens still render, but launches after the repoint do not surface. No
       // token is lost — every pre-repoint launch is below the cap. (The cap on

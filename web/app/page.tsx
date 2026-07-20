@@ -102,6 +102,7 @@ export default function DiscoverPage() {
           createdAt: c.timestamp,
           imageURI: c.imageURI,
           volume24Usd: c.volume24Usd,
+          holderFeeBps: c.holderFeeBps,
         };
       }),
     [creations, poolReads, weth],

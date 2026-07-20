@@ -89,6 +89,8 @@ export interface CreationEvent {
   pad: Address;
   /** 24h USD volume (from the server feed); 0 if unindexed. */
   volume24Usd: number;
+  /** Holders' share of total fees in bps on a holder-rewards launch; undefined otherwise. */
+  holderFeeBps?: number;
 }
 
 interface LaunchActivity {
@@ -143,6 +145,7 @@ export function useLaunchActivity() {
           blockNumber: BigInt(c.blockNumber),
           pad: c.pad,
           volume24Usd: c.volume24Usd ?? 0,
+          holderFeeBps: c.holderFeeBps,
         }));
         const result: LaunchActivity = { creations, unavailable: !!json.unavailable };
         writeLaunchCache(cacheKey, result);

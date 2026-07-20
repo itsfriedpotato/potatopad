@@ -1,5 +1,6 @@
 "use client";
 
+import { Coins } from "lucide-react";
 import Link from "next/link";
 import type { Address } from "viem";
 import { formatUsd, shortAddress, timeAgo } from "@/lib/format";
@@ -26,6 +27,13 @@ export interface TokenRow {
   marketCapUsd?: number;
   /** Ancient 24h volume (USD) from GeckoTerminal. */
   volume24Usd?: number;
+  /**
+   * Holders' share of total trading fees in bps on a holder-rewards launch;
+   * undefined for a standard launch. Drives the REWARDS badge — without it the
+   * two launch types are visually identical in the feed, which is exactly the
+   * thing a buyer needs to be able to tell apart at a glance.
+   */
+  holderFeeBps?: number;
 }
 
 export function TokenCard({ row }: { row: TokenRow }) {
@@ -83,6 +91,15 @@ export function TokenCard({ row }: { row: TokenRow }) {
         {row.createdAt !== undefined && row.createdAt > 0 && (
           <span className="absolute right-2 top-2 rounded bg-black/60 px-1.5 py-0.5 font-mono text-[9px] text-neutral-300 backdrop-blur-md">
             {timeAgo(row.createdAt)}
+          </span>
+        )}
+        {row.holderFeeBps !== undefined && row.holderFeeBps > 0 && (
+          <span
+            className="absolute left-2 top-2 flex items-center gap-1 rounded bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-emerald-400 ring-1 ring-inset ring-emerald-400/30 backdrop-blur-md"
+            title={`Holders earn ${(row.holderFeeBps / 100).toFixed(row.holderFeeBps % 100 === 0 ? 0 : 1)}% of every trade's fees, in ETH`}
+          >
+            <Coins className="h-2.5 w-2.5" />
+            {(row.holderFeeBps / 100).toFixed(row.holderFeeBps % 100 === 0 ? 0 : 1)}% rewards
           </span>
         )}
       </div>

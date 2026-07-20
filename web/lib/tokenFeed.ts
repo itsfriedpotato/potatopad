@@ -14,6 +14,16 @@ const tokenCreatedEvent = parseAbiItem(
   "event TokenCreated(address indexed token, address indexed creator, string name, string symbol, address pool, string imageURI, string website, string twitter, string telegram)",
 );
 
+/**
+ * Holder-rewards launches emit this ALONGSIDE {TokenCreated}, in the same
+ * transaction. Scanned in the same `getLogs` call rather than a second pass, so
+ * marking the feed costs no extra RPC round trips. Legacy pads never emitted it
+ * and simply yield none.
+ */
+const rewardTokenLaunchedEvent = parseAbiItem(
+  "event RewardTokenLaunched(address indexed token, address indexed creator, uint16 creatorFeeBps, uint16 holderFeeBps)",
+);
+
 const LOG_CHUNK = 9_000n; // Alchemy on Robinhood caps eth_getLogs at 10k blocks.
 const SCAN_CONCURRENCY = 6; // windows fetched at once — fast without a CU spike.
 const CACHE_TTL_MS = 45_000;
@@ -36,7 +46,11 @@ interface TokenCreatedArgs {
   twitter: string;
   telegram: string;
 }
-type CreatedLog = { blockNumber: bigint | null; args: Partial<TokenCreatedArgs> };
+type CreatedLog = {
+  blockNumber: bigint | null;
+  eventName?: string;
+  args: Partial<TokenCreatedArgs> & { holderFeeBps?: number };
+};
 
 export interface CreationDTO {
   token: Address;
@@ -54,6 +68,12 @@ export interface CreationDTO {
   pad: Address;
   /** 24h USD volume from GeckoTerminal (0 if unindexed) — drives "Recent buys". */
   volume24Usd: number;
+  /**
+   * Holders' share of TOTAL trading fees, in bps, for a holder-rewards launch;
+   * undefined for a standard launch. Carried as the number rather than a flag so
+   * the badge can state the actual share — the part a buyer actually cares about.
+   */
+  holderFeeBps?: number;
 }
 export interface FeedPayload {
   creations: CreationDTO[];
@@ -77,7 +97,7 @@ async function fetchCreatedLogs(
     try {
       const logs = await client.getLogs({
         address: pad,
-        event: tokenCreatedEvent,
+        events: [tokenCreatedEvent, rewardTokenLaunchedEvent],
         fromBlock: from,
         toBlock: to,
       });
@@ -224,9 +244,23 @@ async function scan(): Promise<FeedPayload> {
     for (const b of blocks) if (b) tsByBlock.set(b.number, Number(b.timestamp));
   }
 
+  // Two event types share this scan, so partition before building rows. A
+  // RewardTokenLaunched log carries a `token` too — folding it into the same loop
+  // would mint a DTO with no name or symbol, and (since the first log per token
+  // wins) could shadow the real TokenCreated row entirely.
+  const holderBpsByToken = new Map<string, number>();
+  for (const { log } of tagged) {
+    if (log.eventName !== "RewardTokenLaunched") continue;
+    const token = log.args.token;
+    if (token && log.args.holderFeeBps !== undefined) {
+      holderBpsByToken.set(token.toLowerCase(), Number(log.args.holderFeeBps));
+    }
+  }
+
   // A token belongs to exactly one pad; dedupe by token address.
   const byToken = new Map<string, CreationDTO>();
   for (const { log, pad } of tagged) {
+    if (log.eventName !== undefined && log.eventName !== "TokenCreated") continue;
     const token = log.args.token;
     if (!token) continue;
     const key = token.toLowerCase();
@@ -246,6 +280,7 @@ async function scan(): Promise<FeedPayload> {
       blockNumber: bn !== null ? bn.toString() : "0",
       pad,
       volume24Usd: 0,
+      holderFeeBps: holderBpsByToken.get(key),
     });
   }
   // Enrich with 24h volume (best-effort) so the client can offer a "Recent buys" sort.
