@@ -81,6 +81,8 @@ let cache: {
   scanCompletedAt: number;
   state: Exclude<FeedState, "unavailable">;
   expiresAt: number;
+  /** Zero failed windows — safe for create force-min-interval reuse. */
+  complete: boolean;
 } | null = null;
 
 /** Short cooldown after a cold unavailable so /api/tokens can't force full rescans. */
@@ -196,11 +198,21 @@ async function fetchVolumes(addresses: Address[]): Promise<Map<string, number>> 
 
 // Legacy pads are capped at their repoint endBlock — immutable history. Scanned
 // once and kept for the process lifetime; only the active pad is re-scanned.
+// `legacyComplete` is true only when that scan had zero failed windows — create
+// force-validation refuses to reuse an incomplete legacy history.
 let legacyTagged: PadTag[] | null = null;
+let legacyComplete = false;
 
-async function scan(): Promise<{ creations: CreationDTO[]; unavailable: boolean }> {
+type ScanResult = {
+  creations: CreationDTO[];
+  unavailable: boolean;
+  /** True only when every log window succeeded (no tolerated gaps). */
+  complete: boolean;
+};
+
+async function scan(opts: { strict?: boolean } = {}): Promise<ScanResult> {
   const pads = padDeployments(robinhoodChain.id);
-  if (pads.length === 0) return { creations: [], unavailable: false };
+  if (pads.length === 0) return { creations: [], unavailable: false, complete: true };
 
   const latest = await client.getBlockNumber();
   // The active (write) pad has no endBlock; legacy pads carry the repoint block.
@@ -208,12 +220,17 @@ async function scan(): Promise<{ creations: CreationDTO[]; unavailable: boolean 
   const activePads = pads.filter((p) => p.endBlock === undefined);
 
   let unavailable = false;
+  let windowsFailed = 0;
+  let windowsTotal = 0;
+  /** True when we reused a soft-locked legacy history that had tolerated gaps. */
+  let inheritedIncompleteLegacy = false;
 
-  // Legacy history: scan once, reuse forever. Lock the cache in only if it came
-  // back near-complete, otherwise use this round's result but retry next time.
+  // Legacy history: scan once, reuse forever for Discover. Create force/strict
+  // only reuses a fully complete legacy cache.
   let legacyRound: PadTag[];
-  if (legacyTagged !== null) {
+  if (legacyTagged !== null && (legacyComplete || !opts.strict)) {
     legacyRound = legacyTagged;
+    if (!legacyComplete) inheritedIncompleteLegacy = true;
   } else {
     const acc: PadTag[] = [];
     let failed = 0;
@@ -226,8 +243,18 @@ async function scan(): Promise<{ creations: CreationDTO[]; unavailable: boolean 
       total += r.total;
     }
     legacyRound = acc;
-    if (total === 0 || failed / total <= 0.1) legacyTagged = acc;
-    else unavailable = true; // gappy legacy scan — don't lock it in; retry next round
+    windowsFailed += failed;
+    windowsTotal += total;
+    if (total === 0 || failed === 0) {
+      legacyTagged = acc;
+      legacyComplete = true;
+    } else if (failed / total <= 0.1 && !opts.strict) {
+      // Soft path: lock near-complete history; mark incomplete for create.
+      legacyTagged = acc;
+      legacyComplete = false;
+    } else {
+      unavailable = true; // gappy legacy scan — don't lock it in; retry next round
+    }
   }
 
   // Active pad(s): always fresh.
@@ -241,8 +268,21 @@ async function scan(): Promise<{ creations: CreationDTO[]; unavailable: boolean 
       failed += r.failed;
       total += r.total;
     }
-    if (total > 0 && failed / total > MAX_FAILED_FRACTION) unavailable = true;
+    windowsFailed += failed;
+    windowsTotal += total;
+    if (opts.strict) {
+      // Create validation: any missed window means the blacklist is incomplete.
+      if (failed > 0) unavailable = true;
+    } else if (total > 0 && failed / total > MAX_FAILED_FRACTION) {
+      unavailable = true;
+    }
   }
+
+  const complete =
+    !inheritedIncompleteLegacy &&
+    !unavailable &&
+    (windowsTotal === 0 || windowsFailed === 0);
+  if (opts.strict && !complete) unavailable = true;
 
   const tagged = [...legacyRound, ...activeRound];
 
@@ -284,59 +324,126 @@ async function scan(): Promise<{ creations: CreationDTO[]; unavailable: boolean 
     });
   }
   // Enrich with 24h volume (best-effort) so the client can offer a "Recent buys" sort.
+  // Skip on strict/create scans — volumes are unrelated to name/ticker completeness
+  // and would burn the create form's 8s timeout budget.
   const creations = [...byToken.values()];
-  try {
-    const vols = await fetchVolumes(creations.map((c) => c.token));
-    for (const c of creations) c.volume24Usd = vols.get(c.token.toLowerCase()) ?? 0;
-  } catch {
-    /* leave volumes at 0 */
+  if (!opts.strict) {
+    try {
+      const vols = await fetchVolumes(creations.map((c) => c.token));
+      for (const c of creations) c.volume24Usd = vols.get(c.token.toLowerCase()) ?? 0;
+    } catch {
+      /* leave volumes at 0 */
+    }
   }
-  return { creations, unavailable };
+  return { creations, unavailable, complete: complete && !unavailable };
 }
 
 let inFlight: Promise<FeedPayload> | null = null;
+/** Separate coalescing queue for strict force scans (create validation). */
+let forceInFlight: Promise<FeedPayload> | null = null;
+
+export type LoadFeedOptions = {
+  /**
+   * Bypass the normal 90s TTL and run a new strict scan. Used by Plant create
+   * validation (`/api/tokens?force=1`). Discover omits this.
+   *
+   * Force enables **strict** completeness: any failed log window makes the
+   * payload unavailable so create never plants against a gappy blacklist.
+   * Force does **not** reuse the shared Discover cache (a concurrent soft scan
+   * must never become create's verified blacklist); concurrent force callers
+   * only coalesce via `forceInFlight`.
+   */
+  force?: boolean;
+  /**
+   * Called only when a *new* forced scan would start (after forceInFlight
+   * coalesce). Return true to reject (rate limited).
+   */
+  consumeForceQuota?: () => boolean;
+};
 
 /**
  * Cached feed getter. Always stamps a fresh `servedAt` (incl. cache hits).
  * Soft-degrades to stale/unavailable without throwing. Concurrent cold-cache
  * callers share ONE scan (in-flight coalescing).
+ *
+ * `force: true` uses a strict scan (zero tolerated gaps) for create fail-closed
+ * semantics and skips the 90s TTL / cold backoff. Force never reuses the
+ * Discover soft-cache (avoids a later soft scan overwriting a strict result).
  */
-export async function loadFeed(): Promise<FeedPayload> {
+export async function loadFeed(options: LoadFeedOptions = {}): Promise<FeedPayload> {
   const now = Date.now();
-  if (cache && cache.expiresAt > now) {
+  if (!options.force && cache && cache.expiresAt > now) {
     return stamp(cache.creations, cache.state, cache.scanCompletedAt);
   }
   // Cold failure backoff: avoid hammering RPC with full multi-pad scans.
-  if (!cache && now < unavailableUntil) {
+  // Forced create checks skip this so a recent cold failure still re-attempts.
+  if (!options.force && !cache && now < unavailableUntil) {
     return stamp([], "unavailable", 0);
   }
-  if (inFlight) return inFlight;
-  inFlight = (async () => {
+  // Force scans do not coalesce with a non-force in-flight Discover scan —
+  // they need strict completeness. They do coalesce with another force.
+  if (!options.force && inFlight) return inFlight;
+  if (options.force && forceInFlight) return forceInFlight;
+
+  // Charge force quota only when we are about to start a new expensive scan.
+  if (options.force && options.consumeForceQuota?.()) {
+    return stamp([], "unavailable", 0);
+  }
+
+  const run = async (): Promise<FeedPayload> => {
     try {
-      const result = await scan();
-      // Gappy scans: soft-degrade. Prefer warm cache as "stale" over a partial list.
+      const result = await scan({ strict: !!options.force });
+      // Gappy scans: Discover soft-degrades to stale; create force fails closed.
       if (result.unavailable) {
+        if (options.force) {
+          // Never hand create a warm incomplete list as "verified".
+          return stamp([], "unavailable", 0);
+        }
         if (cache) return stamp(cache.creations, "stale", cache.scanCompletedAt);
         unavailableUntil = Date.now() + UNAVAILABLE_COOLDOWN_MS;
         return stamp([], "unavailable", 0);
       }
       const scanCompletedAt = Date.now();
       unavailableUntil = 0;
-      cache = {
-        creations: result.creations,
-        scanCompletedAt,
-        state: "fresh",
-        expiresAt: scanCompletedAt + CACHE_TTL_MS,
-      };
+      // Force/create results never write the shared Discover cache:
+      // strict scans skip volume enrichment and would zero "Recent buys".
+      // Discover soft scans own the shared cache only.
+      if (!options.force) {
+        // Incomplete soft scan → always stale (first response AND TTL hits).
+        const state: Exclude<FeedState, "unavailable"> = result.complete
+          ? "fresh"
+          : "stale";
+        // Never demote a complete cache with an incomplete soft scan.
+        if (!(cache?.complete && !result.complete)) {
+          cache = {
+            creations: result.creations,
+            scanCompletedAt,
+            state,
+            expiresAt: scanCompletedAt + CACHE_TTL_MS,
+            complete: result.complete,
+          };
+        }
+        return stamp(result.creations, state, scanCompletedAt);
+      }
       return stamp(result.creations, "fresh", scanCompletedAt);
     } catch {
+      if (options.force) return stamp([], "unavailable", 0);
       if (cache) return stamp(cache.creations, "stale", cache.scanCompletedAt);
       unavailableUntil = Date.now() + UNAVAILABLE_COOLDOWN_MS;
       return stamp([], "unavailable", 0);
-    } finally {
-      inFlight = null;
     }
-  })();
+  };
+
+  if (options.force) {
+    forceInFlight = run().finally(() => {
+      forceInFlight = null;
+    });
+    return forceInFlight;
+  }
+
+  inFlight = run().finally(() => {
+    inFlight = null;
+  });
   return inFlight;
 }
 

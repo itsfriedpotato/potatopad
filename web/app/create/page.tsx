@@ -1,11 +1,19 @@
 "use client";
 
 import { useQueryClient } from "@tanstack/react-query";
-import { Loader2 } from "lucide-react";
+import { AlertTriangle, Loader2 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type FormEvent,
+} from "react";
 import { bytesToHex, decodeEventLog, parseEther } from "viem";
 import { potatoPadAbi } from "@/lib/abi";
+import { robinhoodChain } from "@/lib/config";
 import { usePad, useTx } from "@/lib/hooks";
 import { useAncientTokens } from "@/lib/ancient";
 import { formatEth, resolveImageUri, tryParseEther } from "@/lib/format";
@@ -35,6 +43,172 @@ const CREATOR_HALF_PCT = 50;
  */
 const MAX_CREATOR_CUT_PCT = CREATOR_HALF_PCT - 5;
 
+/** Per-attempt timeout for the existing-ticker feed. */
+const TAKEN_FEED_TIMEOUT_MS = 8_000;
+
+/** Attempts before fail-closed: initial fetch + one silent retry. */
+const TAKEN_FEED_MAX_ATTEMPTS = 2;
+
+/** Cap creations processed client-side (malicious / oversized feed DoS bound). */
+const MAX_FEED_CREATIONS = 10_000;
+
+/**
+ * Max source length for a name/symbol key from the feed.
+ * Form name max is 48; historical on-chain symbols may exceed the form's 12-char
+ * symbol input — still index them so they cannot be reused as a new name.
+ */
+const MAX_KEY_SOURCE_LEN = 64;
+
+/**
+ * Canonical comparison key for name/ticker blacklist.
+ * NFC + en-US uppercasing folds case more reliably than raw toLowerCase
+ * (e.g. Greek sigma forms that lower differently but upper the same).
+ */
+function foldKey(value: string): string {
+  return value.trim().normalize("NFC").toLocaleUpperCase("en-US");
+}
+
+/**
+ * Combined name+symbol key set. Issue #30: every existing name and ticker is
+ * blocked "when used" — so a new symbol cannot reuse an existing name and vice versa.
+ */
+type TakenKeys = { keys: Set<string> };
+
+/**
+ * Ready snapshot, still loading, or hard-failed after retries.
+ * Fail-closed: we never plant against an unverified empty blacklist.
+ */
+type TakenFeedState =
+  | { status: "loading" }
+  | { status: "ready"; chainId: number; taken: TakenKeys }
+  | { status: "failed" };
+
+type FeedJson = {
+  creations?: unknown;
+  unavailable?: unknown;
+  state?: unknown;
+  scanCompletedAt?: unknown;
+};
+
+/**
+ * Parse + sanitize a /api/tokens payload for create validation.
+ * Fail closed unless state is exactly "fresh" (reject stale + unavailable).
+ */
+function parseTakenFromFeed(json: FeedJson): TakenKeys {
+  if (json.unavailable === true) {
+    throw new Error("ticker feed unavailable");
+  }
+  // Create must not treat warm soft-degrade as verified.
+  if (json.state !== "fresh") {
+    throw new Error(
+      `ticker feed not fresh (state=${String(json.state ?? "missing")})`,
+    );
+  }
+  const raw = Array.isArray(json.creations) ? json.creations : [];
+  // Fail closed if the feed is larger than we are willing to verify — truncation
+  // would accept an incomplete blacklist as "fresh".
+  if (raw.length > MAX_FEED_CREATIONS) {
+    throw new Error(`ticker feed too large (${raw.length})`);
+  }
+  const keys = new Set<string>();
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const c = entry as { name?: unknown; symbol?: unknown };
+    if (
+      typeof c.name === "string" &&
+      c.name.length > 0 &&
+      c.name.length <= MAX_KEY_SOURCE_LEN
+    ) {
+      const k = foldKey(c.name);
+      if (k) keys.add(k);
+    }
+    if (
+      typeof c.symbol === "string" &&
+      c.symbol.length > 0 &&
+      c.symbol.length <= MAX_KEY_SOURCE_LEN
+    ) {
+      const k = foldKey(c.symbol);
+      if (k) keys.add(k);
+    }
+  }
+  return { keys };
+}
+
+/**
+ * Fresh name/ticker snapshot for create validation.
+ * `/api/tokens` only indexes Robinhood — callers must only enable on that chain.
+ *
+ * Throws on timeout, network error, non-OK, unavailable, or non-fresh state so
+ * the caller can retry once then fail closed (utility over soft-open create).
+ *
+ * `force` hits `/api/tokens?force=1` to bypass the server 90s TTL (submit path).
+ */
+async function fetchTakenTickers(
+  signal: AbortSignal,
+  opts: { force?: boolean } = {},
+): Promise<TakenKeys> {
+  const qs = new URLSearchParams();
+  qs.set("createCheck", String(Date.now()));
+  if (opts.force) qs.set("force", "1");
+  const res = await fetch(`/api/tokens?${qs.toString()}`, {
+    cache: "no-store",
+    signal,
+  });
+  if (!res.ok) throw new Error(`ticker feed HTTP ${res.status}`);
+  const json = (await res.json()) as FeedJson;
+  return parseTakenFromFeed(json);
+}
+
+/** One timed attempt; aborts after TAKEN_FEED_TIMEOUT_MS. */
+async function fetchTakenTickersOnce(
+  parentSignal?: AbortSignal,
+  opts: { force?: boolean } = {},
+): Promise<TakenKeys> {
+  const controller = new AbortController();
+  const onParentAbort = () => controller.abort();
+  if (parentSignal) {
+    if (parentSignal.aborted) {
+      controller.abort();
+    } else {
+      parentSignal.addEventListener("abort", onParentAbort, { once: true });
+    }
+  }
+  const timer = setTimeout(() => controller.abort(), TAKEN_FEED_TIMEOUT_MS);
+  try {
+    return await fetchTakenTickers(controller.signal, opts);
+  } finally {
+    clearTimeout(timer);
+    parentSignal?.removeEventListener("abort", onParentAbort);
+  }
+}
+
+/**
+ * Timed fetch with one silent retry. Unmount/chain-change aborts via parentSignal.
+ * Second failure propagates so the UI can fail closed.
+ */
+async function fetchTakenTickersWithRetry(
+  parentSignal?: AbortSignal,
+  opts: { force?: boolean } = {},
+): Promise<TakenKeys> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= TAKEN_FEED_MAX_ATTEMPTS; attempt++) {
+    if (parentSignal?.aborted) throw new DOMException("Aborted", "AbortError");
+    try {
+      return await fetchTakenTickersOnce(parentSignal, opts);
+    } catch (err) {
+      lastError = err;
+      if (parentSignal?.aborted) throw err;
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("ticker feed failed");
+}
+
+function isKeyTaken(taken: TakenKeys | null, key: string): boolean {
+  return !!taken && key.length > 0 && taken.keys.has(key);
+}
+
 const inputCls =
   "w-full rounded-lg border border-neutral-800 bg-black px-3 py-2.5 text-sm text-neutral-100 placeholder-neutral-700 outline-none transition-colors focus:border-neutral-600";
 const labelCls = "text-[10px] font-bold uppercase tracking-wider text-neutral-500";
@@ -45,6 +219,9 @@ export default function CreatePage() {
   const { pad, chainId, isDeployed } = usePad();
   const tx = useTx();
   const { tokens: ancientTokens } = useAncientTokens();
+  // /api/tokens only indexes Robinhood; on other chains skip the soft blacklist
+  // so we never false-block against the wrong network's tickers.
+  const feedApplies = chainId === robinhoodChain.id;
 
   const [name, setName] = useState("");
   const [symbol, setSymbol] = useState("");
@@ -55,6 +232,52 @@ export default function CreatePage() {
   const [devBuy, setDevBuy] = useState("");
   const [uploading, setUploading] = useState(false);
   const [uploadErr, setUploadErr] = useState("");
+  // loading → ready | failed. Never open create against an empty blacklist
+  // when the feed could not be verified (timeout / network / unavailable / stale).
+  const [takenFeed, setTakenFeed] = useState<TakenFeedState>({
+    status: "loading",
+  });
+  /** True while submit is force-revalidating the ticker feed. */
+  const [revalidating, setRevalidating] = useState(false);
+  /** Sync lock so double-clicks cannot start two force scans / writes. */
+  const submitLockRef = useRef(false);
+
+  // Mount / chain-change: strict force revalidation (same completeness bar as
+  // submit). Attempt 1 → silent retry → fail closed (toast + force restart).
+  // Submit force-revalidates again immediately before write.
+  useEffect(() => {
+    if (!feedApplies) {
+      setTakenFeed({
+        status: "ready",
+        chainId,
+        taken: { keys: new Set() },
+      });
+      return;
+    }
+    let cancelled = false;
+    setTakenFeed({ status: "loading" });
+    const controller = new AbortController();
+
+    void (async () => {
+      try {
+        const next = await fetchTakenTickersWithRetry(controller.signal, {
+          force: true,
+        });
+        if (!cancelled) {
+          setTakenFeed({ status: "ready", chainId, taken: next });
+        }
+      } catch {
+        if (!cancelled && !controller.signal.aborted) {
+          setTakenFeed({ status: "failed" });
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [feedApplies, chainId]);
 
   // Holder rewards: share the creator's half of the fees with everyone holding.
   const [rewardsOn, setRewardsOn] = useState(false);
@@ -81,6 +304,18 @@ export default function CreatePage() {
     }
   }
 
+  const taken =
+    takenFeed.status === "ready" && takenFeed.chainId === chainId
+      ? takenFeed.taken
+      : null;
+  const feedFailed = feedApplies && takenFeed.status === "failed";
+  const waitingOnFeed = feedApplies && takenFeed.status === "loading";
+
+  const nameKey = foldKey(name);
+  const symbolKey = foldKey(symbol);
+  const nameTaken = feedApplies && isKeyTaken(taken, nameKey);
+  const symbolTaken = feedApplies && isKeyTaken(taken, symbolKey);
+
   const devBuyWei = devBuy.trim() === "" ? 0n : tryParseEther(devBuy);
   const devBuyTooLarge = devBuyWei !== undefined && devBuyWei > MAX_DEV_BUY_WEI;
 
@@ -105,6 +340,11 @@ export default function CreatePage() {
     symbol.trim().length > 0 &&
     image.trim().length > 0 &&
     !vampBlocked &&
+    !nameTaken &&
+    !symbolTaken &&
+    !waitingOnFeed &&
+    !feedFailed &&
+    !revalidating &&
     devBuyWei !== undefined &&
     !devBuyTooLarge;
 
@@ -136,37 +376,66 @@ export default function CreatePage() {
     return <NotDeployed chainId={chainId} />;
   }
 
-  function onSubmit(e: FormEvent) {
+  async function onSubmit(e: FormEvent) {
     e.preventDefault();
-    if (!formValid || devBuyWei === undefined) return;
-    // Random CREATE2 salt: makes the token address unpredictable so a griefer
-    // can't pre-initialize its Uniswap pool to brick the launch.
-    const salt = bytesToHex(crypto.getRandomValues(new Uint8Array(32)));
-    const meta = {
-      imageURI: image.trim(),
-      website: website.trim(),
-      twitter: twitter.trim(),
-      telegram: telegram.trim(),
-    };
-    const common = { address: pad, abi: potatoPadAbi, value: devBuyWei } as const;
-    const trimmedName = name.trim();
-    const ticker = symbol.trim().toUpperCase();
+    if (!formValid || devBuyWei === undefined || revalidating || tx.busy) return;
+    if (submitLockRef.current) return;
+    submitLockRef.current = true;
 
-    // Both entry points launch identically — same locked LP, same treasury cut.
-    // createRewardToken additionally splits the creator half with holders.
-    if (rewardsOn) {
+    try {
+      // Pre-submit revalidation (Robinhood only): force a fresh scan so we do not
+      // plant against a mount-time or 90s-TTL snapshot. Soft-guard only — contract
+      // still does not enforce uniqueness.
+      if (feedApplies) {
+        setRevalidating(true);
+        try {
+          const next = await fetchTakenTickersWithRetry(undefined, { force: true });
+          setTakenFeed({ status: "ready", chainId, taken: next });
+          const nk = foldKey(name);
+          const sk = foldKey(symbol);
+          if (isKeyTaken(next, nk) || isKeyTaken(next, sk)) {
+            // Snapshot updated → UI shows taken; do not write.
+            return;
+          }
+        } catch {
+          setTakenFeed({ status: "failed" });
+          return;
+        } finally {
+          setRevalidating(false);
+        }
+      }
+
+      // Random CREATE2 salt: makes the token address unpredictable so a griefer
+      // can't pre-initialize its Uniswap pool to brick the launch.
+      const salt = bytesToHex(crypto.getRandomValues(new Uint8Array(32)));
+      const meta = {
+        imageURI: image.trim(),
+        website: website.trim(),
+        twitter: twitter.trim(),
+        telegram: telegram.trim(),
+      };
+      const common = { address: pad, abi: potatoPadAbi, value: devBuyWei } as const;
+      const trimmedName = name.trim();
+      const ticker = symbol.trim().toUpperCase();
+
+      // Both entry points launch identically — same locked LP, same treasury cut.
+      // createRewardToken additionally splits the creator half with holders.
+      if (rewardsOn) {
+        tx.writeContract({
+          ...common,
+          functionName: "createRewardToken",
+          args: [trimmedName, ticker, meta, salt, creatorCutPct * 100],
+        });
+        return;
+      }
       tx.writeContract({
         ...common,
-        functionName: "createRewardToken",
-        args: [trimmedName, ticker, meta, salt, creatorCutPct * 100],
+        functionName: "createToken",
+        args: [trimmedName, ticker, meta, salt],
       });
-      return;
+    } finally {
+      submitLockRef.current = false;
     }
-    tx.writeContract({
-      ...common,
-      functionName: "createToken",
-      args: [trimmedName, ticker, meta, salt],
-    });
   }
 
   const previewSrc = resolveImageUri(image);
@@ -176,12 +445,57 @@ export default function CreatePage() {
       ? "Planting…"
       : tx.confirmed
         ? "Planted"
-        : vampBlocked
-          ? "Deployment restricted"
-          : "Plant token";
+        : feedFailed
+          ? "Verification failed"
+          : revalidating
+            ? "Re-checking tickers…"
+            : waitingOnFeed
+              ? "Checking tickers…"
+              : vampBlocked
+                ? "Deployment restricted"
+                : nameTaken || symbolTaken
+                  ? "Name or ticker taken"
+                  : "Plant token";
+
+  const nameFieldBlocked = nameBlocked || nameTaken;
+  const symbolFieldBlocked = symbolBlocked || symbolTaken;
+  const fieldsDisabled = feedFailed || revalidating;
+  const canSubmit = formValid && !tx.busy && !tx.confirmed && !revalidating;
 
   return (
     <div className="mx-auto max-w-4xl">
+      {/* Fail-closed toast: utility > journey when the ticker feed can't be verified. */}
+      {feedFailed && (
+        <div
+          role="alert"
+          className="fixed inset-x-0 top-0 z-50 flex justify-center px-4 pt-4"
+        >
+          <div className="flex w-full max-w-md items-start gap-3 rounded-xl border border-rose-500/40 bg-neutral-950/95 p-4 shadow-lg shadow-black/40 backdrop-blur">
+            <AlertTriangle
+              className="mt-0.5 h-5 w-5 shrink-0 text-rose-400"
+              aria-hidden
+            />
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-semibold text-rose-300">
+                Couldn&apos;t verify existing tickers
+              </p>
+              <p className="mt-1 text-xs text-neutral-400">
+                The name/ticker check failed twice (timeout, stale, or feed error).
+                Plant is blocked so we never ship a duplicate under an unverified
+                list. Reload to restart the process.
+              </p>
+              <button
+                type="button"
+                className="mt-3 rounded-lg bg-rose-500/20 px-3 py-1.5 text-xs font-semibold text-rose-200 transition-colors hover:bg-rose-500/30"
+                onClick={() => window.location.reload()}
+              >
+                Reload page
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <ConnectGate>
         <div className="grid grid-cols-1 items-start gap-6 md:grid-cols-5">
           {/* LEFT: input matrix */}
@@ -194,18 +508,32 @@ export default function CreatePage() {
             </div>
 
             <form id="plant-form" onSubmit={onSubmit} className="space-y-4">
+              {feedFailed && (
+                <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-400">
+                  Name/ticker verification failed. Reload the page to try again —
+                  create stays blocked until a fresh feed is confirmed.
+                </div>
+              )}
+
               <div className="space-y-1.5">
                 <label htmlFor="name" className={labelCls}>
                   Token name
                 </label>
                 <input
                   id="name"
-                  className={`${inputCls} ${nameBlocked ? "border-rose-900/60 bg-rose-950/10 text-rose-300" : ""}`}
+                  className={`${inputCls} ${nameFieldBlocked ? "border-rose-900/60 bg-rose-950/10 text-rose-300" : ""}`}
                   placeholder="Mashed Potato"
                   value={name}
                   maxLength={48}
                   onChange={(e) => setName(e.target.value)}
+                  aria-invalid={nameFieldBlocked || undefined}
+                  disabled={fieldsDisabled}
                 />
+                {nameTaken && (
+                  <p className="mt-1 text-xs text-rose-400">
+                    That name or ticker is already used on the pad feed. Pick another.
+                  </p>
+                )}
               </div>
 
               <div className="space-y-1.5">
@@ -214,12 +542,27 @@ export default function CreatePage() {
                 </label>
                 <input
                   id="symbol"
-                  className={`${inputCls} font-mono uppercase ${symbolBlocked ? "border-rose-900/60 bg-rose-950/10 text-rose-300" : ""}`}
+                  className={`${inputCls} font-mono uppercase ${symbolFieldBlocked ? "border-rose-900/60 bg-rose-950/10 text-rose-300" : ""}`}
                   placeholder="MASH"
                   value={symbol}
                   maxLength={12}
                   onChange={(e) => setSymbol(e.target.value)}
+                  aria-invalid={symbolFieldBlocked || undefined}
+                  disabled={fieldsDisabled}
                 />
+                {symbolTaken && (
+                  <p className="mt-1 text-xs text-rose-400">
+                    ${symbolKey || "That ticker"} is already used as a name or
+                    ticker on the pad feed. Pick another.
+                  </p>
+                )}
+                {(waitingOnFeed || revalidating) && (
+                  <p className="mt-1 text-xs text-neutral-500">
+                    {revalidating
+                      ? "Re-checking existing tickers before plant…"
+                      : "Checking existing tickers…"}
+                  </p>
+                )}
               </div>
 
               <div className="space-y-1.5">
@@ -235,13 +578,19 @@ export default function CreatePage() {
                       <span className="text-neutral-700">—</span>
                     )}
                   </div>
-                  <label className="flex flex-1 cursor-pointer items-center justify-center rounded-lg border border-neutral-800 bg-neutral-900 text-xs font-medium text-neutral-300 transition-colors hover:bg-neutral-800">
+                  <label
+                    className={`flex flex-1 items-center justify-center rounded-lg border border-neutral-800 bg-neutral-900 text-xs font-medium text-neutral-300 transition-colors ${
+                      uploading || fieldsDisabled
+                        ? "cursor-not-allowed opacity-60"
+                        : "cursor-pointer hover:bg-neutral-800"
+                    }`}
+                  >
                     {uploading ? "Uploading…" : "Upload image"}
                     <input
                       type="file"
                       accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
                       className="hidden"
-                      disabled={uploading}
+                      disabled={uploading || fieldsDisabled}
                       onChange={handleUpload}
                     />
                   </label>
@@ -263,6 +612,7 @@ export default function CreatePage() {
                     placeholder="https://x.com/…"
                     value={twitter}
                     onChange={(e) => setTwitter(e.target.value)}
+                    disabled={fieldsDisabled}
                   />
                 </div>
                 <div className="space-y-1.5">
@@ -275,6 +625,7 @@ export default function CreatePage() {
                     placeholder="https://t.me/…"
                     value={telegram}
                     onChange={(e) => setTelegram(e.target.value)}
+                    disabled={fieldsDisabled}
                   />
                 </div>
               </div>
@@ -289,6 +640,7 @@ export default function CreatePage() {
                   placeholder="https://…"
                   value={website}
                   onChange={(e) => setWebsite(e.target.value)}
+                  disabled={fieldsDisabled}
                 />
               </div>
 
@@ -306,13 +658,14 @@ export default function CreatePage() {
                   inputMode="decimal"
                   value={devBuy}
                   onChange={(e) => setDevBuy(e.target.value)}
+                  disabled={fieldsDisabled}
                 />
                 {devBuy.trim() !== "" && devBuyWei === undefined && (
                   <p className="text-xs text-rose-400">Enter a valid ETH amount.</p>
                 )}
                 {devBuyTooLarge && (
                   <p className="text-xs text-rose-400">
-                    Capped at {formatEth(MAX_DEV_BUY_WEI)} ETH (5% of supply) during the anti-snipe
+                    Capped at {formatEth(MAX_DEV_BUY_WEI)} ETH (2% of supply) during the anti-snipe
                     window.
                   </p>
                 )}
@@ -324,6 +677,7 @@ export default function CreatePage() {
                   <button
                     type="button"
                     onClick={() => setRewardsOn(false)}
+                    disabled={fieldsDisabled}
                     className={`rounded-lg border px-3 py-2.5 text-left transition-colors ${
                       rewardsOn
                         ? "border-neutral-800 bg-black hover:border-neutral-700"
@@ -338,6 +692,7 @@ export default function CreatePage() {
                   <button
                     type="button"
                     onClick={() => setRewardsOn(true)}
+                    disabled={fieldsDisabled}
                     className={`rounded-lg border px-3 py-2.5 text-left transition-colors ${
                       rewardsOn
                         ? "border-amber-500/60 bg-amber-500/10"
@@ -370,6 +725,7 @@ export default function CreatePage() {
                       value={creatorCutPct}
                       onChange={(e) => setCreatorCutPct(Number(e.target.value))}
                       className="w-full accent-amber-500"
+                      disabled={fieldsDisabled}
                     />
 
                     {/* Live split preview: the three ways a fee can go. */}
@@ -424,14 +780,26 @@ export default function CreatePage() {
                   an original.
                 </p>
               </div>
+            ) : nameTaken || symbolTaken ? (
+              <div className="space-y-1.5 rounded-xl border border-rose-900/40 bg-rose-950/10 p-4">
+                <h4 className="font-mono text-xs font-bold uppercase tracking-wider text-rose-400">
+                  Existing name/ticker · blocked
+                </h4>
+                <p className="text-[11px] leading-relaxed text-rose-300/80">
+                  That name or ticker is already on the pad launch feed. This is a{" "}
+                  <span className="font-semibold">client-side soft-block only</span> — the contract
+                  does not enforce uniqueness. Pick an original.
+                </p>
+              </div>
             ) : (
               <div className="space-y-1.5 rounded-xl border border-neutral-800/60 bg-neutral-950 p-4">
                 <h4 className="font-mono text-xs font-bold uppercase tracking-wider text-neutral-400">
-                  Anti-vampire shield · active
+                  Name checks · active
                 </h4>
                 <p className="text-[11px] leading-relaxed text-neutral-500">
-                  Names and symbols are checked against curated ancient runners, on-chain and in this
-                  form, so copycats can&apos;t vamp the originals.
+                  Names and symbols are checked against curated ancient runners (on-chain) and the
+                  live pad launch feed (client soft-guard). Uniqueness is not enforced by the
+                  contract.
                 </p>
               </div>
             )}
@@ -439,9 +807,9 @@ export default function CreatePage() {
             <button
               type="submit"
               form="plant-form"
-              disabled={!formValid || tx.busy || tx.confirmed}
+              disabled={!canSubmit}
               className={`w-full rounded-xl py-3.5 text-xs font-bold uppercase tracking-widest transition-all ${
-                formValid && !tx.busy && !tx.confirmed
+                canSubmit
                   ? "bg-amber-500 text-neutral-950 hover:bg-amber-400"
                   : "cursor-not-allowed border border-neutral-800 bg-neutral-900 text-neutral-600"
               }`}
