@@ -106,14 +106,20 @@ export const CHAINS: ChainConfig[] = [
     chain: robinhoodChain,
     padAddress: process.env.NEXT_PUBLIC_PAD_ADDRESS_ROBINHOOD,
     curvePadAddress: process.env.NEXT_PUBLIC_CURVE_PAD_ADDRESS_ROBINHOOD,
-    curvePadStartBlock: 13_369_100n, // PotatoCurvePad 0x12fcf1… ($2.5k/$44k, lock-at-launch, post-merge) deploy block 13369169
+    curvePadStartBlock: 14_984_900n, // PotatoCurvePad 0x94085E…6069 (~$2.5k open / $44k bond, holder rewards) deploy block 14984902
     // Verified on-chain (a live Uniswap pool's token0) and in Robinhood's docs.
     weth: "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
     // Only Robinhood is wired for in-app trading (router + quoter present).
     swapRouter: "0xcaf681a66d020601342297493863e78c959e5cb2",
     quoter: "0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7",
-    padStartBlock: 14_072_000n, // deploy block of the holder-rewards pad 0x88eB…A338
+    // The DIRECT pad is read-only now: the curve pad above is the primary launcher.
+    // Points at the newest direct deploy (0x88bb90…Ca07, the collectAndClaim locker)
+    // so its tokens resolve; older direct pads follow in legacyPads.
+    padStartBlock: 14_984_800n, // deploy block of the direct pad 0x88bb90…Ca07
     legacyPads: [
+      // v6 direct pad 0x88eB…A338 — first holder-rewards pad, superseded same day by
+      // 0x88bb90…Ca07 (which added the locker's one-transaction collectAndClaim).
+      { address: "0x88eB8F4aC925C0a6b5501da0eb7E202a036EA338", startBlock: 14_072_000n, endBlock: 14_984_900n },
       // Superseded pads, CAPPED at the block their successor took over: existing
       // tokens still render, but launches after the repoint do not surface. No
       // token is lost — every pre-repoint launch is below the cap. (The cap on
