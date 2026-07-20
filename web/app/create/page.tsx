@@ -4,7 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent } from "react";
-import { bytesToHex, decodeEventLog, parseEther } from "viem";
+import { bytesToHex, decodeEventLog } from "viem";
 import { useReadContracts } from "wagmi";
 import { potatoCurvePadAbi } from "@/lib/abi";
 import { SITE_URL } from "@/lib/config";
@@ -14,13 +14,6 @@ import { formatEth, resolveImageUri, tryParseEther } from "@/lib/format";
 import { ConnectGate } from "@/components/ConnectGate";
 import { NotDeployed } from "@/components/NotDeployed";
 import { TxStatus } from "@/components/TxStatus";
-
-/**
- * Anti-snipe cap: during the launch window a dev-buy is limited to MAX_WALLET
- * (2% of supply). At the ~3 ETH open FDV that's ~0.06 ETH; a larger attached ETH
- * value would make createToken revert, so block it in the UI.
- */
-const MAX_DEV_BUY_WEI = parseEther("0.06");
 
 /**
  * The treasury always takes half the WETH fees; the other half is the creator's.
@@ -51,10 +44,11 @@ export default function CreatePage() {
   const { tokens: ancientTokens } = useAncientTokens();
 
   // Dev-buy cap. The atomic creator buy runs in the launch block (anti-snipe
-  // active) and the creator is NOT exempt, so buying > MAX_WALLET (5% = 50M)
-  // reverts the launch with DevBuyExceedsCap. We estimate the ETH that buys 50M
-  // tokens off the single-sided-v3 curve (starting at the opening price) so the
-  // form can warn before submitting. Read the per-deployment start FDV on-chain.
+  // active) and the creator is NOT exempt, so buying > MAX_WALLET reverts the
+  // launch with DevBuyExceedsCap. MAX_WALLET is TOTAL_SUPPLY / 50 — 2% of
+  // supply, i.e. 20M tokens. We estimate the ETH that buys 20M tokens off the
+  // single-sided-v3 curve (starting at the opening price) so the form can warn
+  // before submitting. Read the per-deployment start FDV on-chain.
   const { data: curveConsts } = useReadContracts({
     allowFailure: true,
     contracts: [{ address: curvePad, abi: potatoCurvePadAbi, functionName: "actualStartFdv" }],
@@ -68,7 +62,7 @@ export default function CreatePage() {
     // for the 80/20 split); buying M tokens from the floor costs L·(√p1 − √p_floor)
     // where 1/√p1 = 1/√p_floor − M/L.
     const SUPPLY = 1e9,
-      M = 5e7; // MAX_WALLET, 5% of supply
+      M = 2e7; // MAX_WALLET = TOTAL_SUPPLY / 50, i.e. 2% of supply
     const startEth = Number(startFdv) / 1e18;
     const pFloor = startEth / SUPPLY;
     const pTop = (startEth * 256) / SUPPLY; // outer FDV = 256x start
