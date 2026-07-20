@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
+    "migrate": "node scripts/migrate.mjs",
+    "start": "node scripts/migrate.mjs && next start",
     "test": "tsx --test lib/padStats.test.ts"
   },
   "dependencies": {
@@ -14,6 +15,7 @@
     "@tanstack/react-query": "^5.51.0",
     "lucide-react": "^1.24.0",
     "next": "^16.2.10",
+    "pg": "^8.22.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "viem": "^2.21.0",
