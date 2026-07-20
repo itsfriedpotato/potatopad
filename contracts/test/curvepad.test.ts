@@ -376,4 +376,68 @@ describe("PotatoCurvePad (single-sided-v3 curve, 100% in Uniswap, no migration)"
       expect(await locker.claimable(weth.target, creator.address)).to.equal(0);
     });
   });
+
+  describe("security + edge cases (adversarial)", () => {
+    it("rejects a forged swap callback from anyone who is not the mid-swap pool", async () => {
+      const { pad, alice, tokenAddr } = await loadFixture(createFixture);
+      // Outside a dev-buy `_expectedPoolCallback` is address(0), so every caller is
+      // rejected. A successful forge would drain the pad's token balance.
+      const data = ethers.AbiCoder.defaultAbiCoder().encode(["address"], [tokenAddr]);
+      await expect(
+        pad.connect(alice).uniswapV3SwapCallback(1, 0, data),
+      ).to.be.revertedWithCustomError(pad, "UnexpectedCallback");
+    });
+
+    it("reverts bond()/curveProgressBps() for a token the pad never launched", async () => {
+      const { pad, weth } = await loadFixture(createFixture);
+      const stranger = weth.target as string;
+      await expect(pad.bond(stranger)).to.be.revertedWithCustomError(pad, "UnknownToken");
+      await expect(pad.curveProgressBps(stranger)).to.be.revertedWithCustomError(pad, "UnknownToken");
+      expect(await pad.bondable(stranger)).to.equal(false); // view must not revert
+    });
+
+    it("renouncing ownership freezes both admin powers, and the blacklist stays enforced", async () => {
+      const { pad, deployer, creator } = await loadFixture(deployFixture);
+      await pad.transferOwnership(ethers.ZeroAddress);
+      expect(await pad.owner()).to.equal(ethers.ZeroAddress);
+      await expect(pad.setBanned("anything", true)).to.be.revertedWithCustomError(pad, "OnlyOwner");
+      await expect(pad.transferOwnership(deployer.address)).to.be.revertedWithCustomError(pad, "OnlyOwner");
+      // Frozen, not cleared: already-banned words keep rejecting launches.
+      await expect(pad.connect(creator).createToken(BANNED_NAME, "OK", NO_META, salt("frozen")))
+        .to.be.revertedWithCustomError(pad, "Banned");
+    });
+
+    it("redirectFees(address(0)) resets the beneficiary back to the creator", async () => {
+      const ctx = await loadFixture(createFixture);
+      const { pad, locker, creator, bob, tokenAddr } = ctx;
+      const posId = (await pad.curves(tokenAddr)).positionId;
+      await locker.redirectFees(posId, bob.address);
+      expect(await locker.beneficiaryOf(posId)).to.equal(bob.address);
+      await locker.redirectFees(posId, ethers.ZeroAddress);
+      expect(await locker.beneficiaryOf(posId)).to.equal(creator.address);
+    });
+
+    it("bonding is permissionless: a non-creator, non-owner can crank it", async () => {
+      const ctx = await loadFixture(createFixture);
+      await mine(ANTI_SNIPE + 1);
+      await buy(ctx, ctx.alice, ctx.tokenAddr, FILL_ETH);
+      await expect(ctx.pad.connect(ctx.bob).bond(ctx.tokenAddr)).to.emit(ctx.pad, "Bonded");
+    });
+
+    it("curveProgressBps stays clamped to 0..10000 across the curve in BOTH orientations", async () => {
+      for (const want0 of [true, false]) {
+        const ctx = await loadFixture(deployFixture);
+        const tokenAddr = await createWithOrientation(ctx, want0, `Bounds${want0}`, "BND");
+        await mine(ANTI_SNIPE + 1);
+        expect(await ctx.pad.curveProgressBps(tokenAddr)).to.be.lt(10000n); // ~0 at open
+        await buy(ctx, ctx.alice, tokenAddr, ethers.parseEther("1"));
+        const mid = await ctx.pad.curveProgressBps(tokenAddr);
+        expect(mid).to.be.gt(0n);
+        expect(mid).to.be.lte(10000n);
+        // Overshoot far past the bond tick: must clamp, never wrap or overflow.
+        await buy(ctx, ctx.bob, tokenAddr, ethers.parseEther("40"));
+        expect(await ctx.pad.curveProgressBps(tokenAddr)).to.equal(10000n);
+      }
+    });
+  });
 });

@@ -12,22 +12,3 @@ contract RevertingTreasury {
     }
 }
 
-interface IClaimable {
-    function claimFees() external returns (uint256);
-}
-
-/// @dev Test-only: a beneficiary that rejects native ETH but can pull its pad
-///      fees. Proves {PotatoCurvePad.claimFees} falls back to delivering WETH
-///      when the caller can't receive ETH, instead of bricking the claim.
-///      these attacking tests has been fully vibe coded.
-contract RevertingClaimer {
-    error Nope();
-
-    function claim(address pad) external returns (uint256) {
-        return IClaimable(pad).claimFees();
-    }
-
-    receive() external payable {
-        revert Nope();
-    }
-}

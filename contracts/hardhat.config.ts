@@ -30,8 +30,10 @@ const config: HardhatUserConfig = {
       chainId: 4663,
       accounts: process.env.DEPLOYER_PRIVATE_KEY ? [process.env.DEPLOYER_PRIVATE_KEY] : [],
     },
-    // Robinhood Chain TESTNET (chainId 46630). No canonical Uniswap V3 here, so
-    // the setup script self-deploys one (WETH + factory + NPM + router).
+    // Robinhood Chain TESTNET (chainId 46630). NOTE: there is no canonical Uniswap
+    // V3 deployment here, and no script in scripts/ currently provisions one, so a
+    // Uniswap stack (WETH + factory + NPM + router) must be deployed to this network
+    // before any launch will work.
     robinhoodTestnet: {
       url: process.env.ROBINHOOD_TESTNET_RPC_URL || "https://rpc.testnet.chain.robinhood.com",
       chainId: 46630,
