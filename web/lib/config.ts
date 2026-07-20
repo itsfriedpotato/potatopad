@@ -14,6 +14,22 @@ export const robinhoodChain = defineChain({
   blockExplorers: {
     default: { name: "Robinscan", url: "https://robinhoodchain.blockscout.com" },
   },
+  /**
+   * Canonical Multicall3, verified deployed on this chain at block 3,967,002.
+   *
+   * Without this viem cannot batch, so every `useReadContracts` degrades to ONE
+   * eth_call per contract — the Discover feed alone fired ~40 separate requests
+   * at /api/rpc per load. That proxy charges its rate limiter per JSON-RPC call,
+   * so a busy page could get individual reads throttled; since the pool reads use
+   * `allowFailure: true`, a throttled read silently became `priceWeth = 0` and the
+   * card rendered "—" market cap. Declaring it collapses those into one request.
+   */
+  contracts: {
+    multicall3: {
+      address: "0xcA11bde05977b3631167028862bE2a173976CA11",
+      blockCreated: 3_967_002,
+    },
+  },
 });
 
 export const ZERO_ADDRESS =

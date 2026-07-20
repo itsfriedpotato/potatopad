@@ -37,13 +37,19 @@ export interface TokenRow {
 }
 
 export function TokenCard({ row }: { row: TokenRow }) {
-  const { usd: ethUsd } = useEthUsdPrice();
+  const { usd: ethUsd, isLoading: priceLoading } = useEthUsdPrice();
 
   const mcapUsd = row.ancient
     ? (row.marketCapUsd ?? 0)
     : ethUsd !== null && row.marketCapEth > 0
       ? row.marketCapEth * ethUsd
       : 0;
+
+  // A PotatoPad market cap is priced in ETH, so it is genuinely UNKNOWN until the
+  // ETH price lands — not zero. Showing "—" while that request is still in flight
+  // reads as "no market cap", which is what made these look like they randomly
+  // vanished. Ancient cards carry USD directly and never wait on it.
+  const mcPending = !row.ancient && priceLoading && ethUsd === null && row.marketCapEth > 0;
   const mc = mcapUsd > 0 ? formatUsd(mcapUsd) : "—";
 
   // ── Ancient card: image, name, MC + 24h VOL, Ancient tag ──
@@ -109,9 +115,16 @@ export function TokenCard({ row }: { row: TokenRow }) {
           <div className="font-mono text-[11px] text-[#CCFF00]/70">${row.symbol}</div>
         </div>
         <div className="space-y-1">
-          <p className="font-mono text-sm font-bold text-neutral-100">
-            {mc} <span className="text-[10px] font-normal text-neutral-500">MC</span>
-          </p>
+          {mcPending ? (
+            <p className="flex items-center gap-1.5 font-mono text-sm font-bold text-neutral-100">
+              <span className="inline-block h-3.5 w-14 animate-pulse rounded bg-neutral-800" />
+              <span className="text-[10px] font-normal text-neutral-500">MC</span>
+            </p>
+          ) : (
+            <p className="font-mono text-sm font-bold text-neutral-100">
+              {mc} <span className="text-[10px] font-normal text-neutral-500">MC</span>
+            </p>
+          )}
           <div className="truncate font-mono text-[9px] text-neutral-600">
             {shortAddress(row.address)}
           </div>

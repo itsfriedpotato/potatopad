@@ -3,53 +3,40 @@
 import { useQuery } from "@tanstack/react-query";
 
 export interface EthUsdPrice {
-  /** ETH spot price in USD, or null when every source failed. */
+  /** ETH spot price in USD, or null when the lookup failed. */
   usd: number | null;
+  /**
+   * True while the FIRST fetch is still in flight — the price is unknown but may
+   * yet arrive. Callers must distinguish this from a null `usd`: rendering both
+   * as "—" makes a page that is merely loading look like one whose data is
+   * unavailable, which is what made market caps appear to randomly vanish.
+   */
   isLoading: boolean;
 }
 
-// Relay's public price endpoint: native ETH on mainnet -> { price: 1885.25 }.
-// No API key, permissive CORS, and it's the same pricing infra used for swaps.
-const RELAY_ETH_USD =
-  "https://api.relay.link/currencies/token/price?chainId=1&address=0x0000000000000000000000000000000000000000";
-
 /**
- * Fetch the ETH/USD spot price from a public, no-auth source. Relay is the
- * primary; Coinbase is a fallback. Returns null if both fail (never guesses).
+ * Live ETH/USD spot price, via our own `/api/eth-price`.
+ *
+ * Deliberately NOT fetched from Relay/Coinbase in the browser any more: those
+ * are among the most commonly blocked hosts by ad/tracker blockers
+ * (`api.coinbase.com` especially), and a blocked fetch blanks the market cap on
+ * every PotatoPad card at once, since they all price in ETH. Same-origin also
+ * means one cached upstream call shared by all visitors rather than one per tab.
  */
 async function fetchEthUsd(): Promise<number | null> {
-  // Primary: Relay -> { price: 1885.25 }
   try {
-    const res = await fetch(RELAY_ETH_USD);
-    if (res.ok) {
-      const json = (await res.json()) as { price?: number };
-      const price = json?.price;
-      if (typeof price === "number" && Number.isFinite(price) && price > 0) {
-        return price;
-      }
-    }
+    const res = await fetch("/api/eth-price");
+    if (!res.ok) return null;
+    const json = (await res.json()) as { usd?: number | null };
+    const usd = json?.usd;
+    return typeof usd === "number" && Number.isFinite(usd) && usd > 0 ? usd : null;
   } catch {
-    // fall through to the fallback source
+    return null;
   }
-
-  // Fallback: Coinbase spot price -> { data: { amount: "3456.78" } }
-  try {
-    const res = await fetch("https://api.coinbase.com/v2/prices/ETH-USD/spot");
-    if (res.ok) {
-      const json = (await res.json()) as { data?: { amount?: string } };
-      const amount = Number(json?.data?.amount);
-      if (Number.isFinite(amount) && amount > 0) return amount;
-    }
-  } catch {
-    // give up gracefully
-  }
-
-  return null;
 }
 
-/** Live ETH/USD spot price, cached for ~60s. usd is null when the fetch fails. */
 export function useEthUsdPrice(): EthUsdPrice {
-  const { data, isLoading } = useQuery({
+  const { data, isPending } = useQuery({
     queryKey: ["eth-usd"],
     queryFn: fetchEthUsd,
     staleTime: 60_000,
@@ -57,5 +44,7 @@ export function useEthUsdPrice(): EthUsdPrice {
     retry: 1,
   });
 
-  return { usd: data ?? null, isLoading };
+  // `isPending`, not `isLoading`: a background refetch of an already-known price
+  // must not flip cards back into a loading state.
+  return { usd: data ?? null, isLoading: isPending };
 }
