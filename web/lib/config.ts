@@ -283,3 +283,8 @@ export function geckoTerminalPoolUrl(chainId: number, pool: string): string | un
 }
 
 export const PROOF_OF_POTATO_URL = "https://proofofpotato.com";
+
+/** Canonical public origin. Also the website a coin gets when its creator leaves
+ *  the field blank, so explorers reading the launch metadata link somewhere real
+ *  instead of showing nothing. */
+export const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || "https://potato.fm";

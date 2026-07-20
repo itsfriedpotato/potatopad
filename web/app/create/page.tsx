@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent } from "react";
 import { bytesToHex, decodeEventLog, parseEther } from "viem";
 import { potatoPadAbi } from "@/lib/abi";
+import { SITE_URL } from "@/lib/config";
 import { usePad, useTx } from "@/lib/hooks";
 import { useAncientTokens } from "@/lib/ancient";
 import { formatEth, resolveImageUri, tryParseEther } from "@/lib/format";
@@ -144,7 +145,10 @@ export default function CreatePage() {
     const salt = bytesToHex(crypto.getRandomValues(new Uint8Array(32)));
     const meta = {
       imageURI: image.trim(),
-      website: website.trim(),
+      // A coin with no site of its own gets Potato Pad as its website, so explorers
+      // and aggregators reading this launch metadata link somewhere real instead of
+      // rendering a blank. Creators who supply a site keep theirs untouched.
+      website: website.trim() || SITE_URL,
       twitter: twitter.trim(),
       telegram: telegram.trim(),
     };
@@ -290,6 +294,9 @@ export default function CreatePage() {
                   value={website}
                   onChange={(e) => setWebsite(e.target.value)}
                 />
+                <p className="text-[9px] text-neutral-600">
+                  Leave blank and your coin links to {SITE_URL.replace(/^https?:\/\//, "")}.
+                </p>
               </div>
 
               <div className="space-y-1.5">
