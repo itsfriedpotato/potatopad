@@ -185,8 +185,43 @@ contract PotatoFeeLocker is IERC721Receiver, ReentrancyGuard {
     /// @notice Withdraws the caller's claimable balance of `asset`.
     ///         WETH is unwrapped and sent as native ETH.
     function claim(address asset) external nonReentrant returns (uint256 amount) {
-        amount = claimable[asset][msg.sender];
+        amount = _claim(asset);
         if (amount == 0) revert NothingToClaim();
+    }
+
+    /// @notice Harvest a position's pool fees AND pay out the caller's share of BOTH
+    ///         of its assets, in ONE transaction.
+    ///
+    ///         Identical in effect to {collect} followed by {claim} per asset, which
+    ///         costs two or three wallet confirmations. Nothing here is privileged:
+    ///         the harvest stays permissionless and the payout is still strictly the
+    ///         CALLER's own claimable balance, so cranking this for somebody else
+    ///         harvests their fees into the locker and pays you nothing.
+    ///
+    ///         Zero balances are SKIPPED rather than reverting, so a burned
+    ///         launched-token side never blocks the WETH payout, and a
+    ///         permissionless cranker with no balance still gets the harvest to land
+    ///         instead of reverting it away.
+    function collectAndClaim(uint256 tokenId)
+        external
+        nonReentrant
+        returns (uint256 collected0, uint256 collected1, uint256 paid0, uint256 paid1)
+    {
+        LockedPosition memory pos = positions[tokenId];
+        if (pos.creator == address(0)) revert UnknownPosition();
+
+        (collected0, collected1) = _collect(tokenId);
+        paid0 = _claim(pos.token0);
+        paid1 = _claim(pos.token1);
+    }
+
+    /// @dev Pays out the caller's claimable `asset`, or does nothing when it is zero.
+    ///      Effects (zeroing the balance) land BEFORE the transfer, and every external
+    ///      entrypoint that reaches this is nonReentrant, so a hostile recipient cannot
+    ///      re-enter to claim twice. Callers that REQUIRE a payout check the return.
+    function _claim(address asset) internal returns (uint256 amount) {
+        amount = claimable[asset][msg.sender];
+        if (amount == 0) return 0;
         claimable[asset][msg.sender] = 0;
 
         if (asset == address(weth)) {

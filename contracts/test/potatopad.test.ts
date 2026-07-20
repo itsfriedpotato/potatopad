@@ -532,6 +532,55 @@ describe("PotatoPad v2 (direct-to-Uniswap single-sided launch)", () => {
       );
     });
 
+    it("collectAndClaim() harvests AND pays the creator in ONE transaction", async () => {
+      const { locker, weth, creator, info, swapIn } = await loadFixture(feesFixture);
+      const expectedFee = (swapIn * 100n) / 10_000n; // 1%
+
+      // Nothing is claimable yet — the fees are still inside the Uniswap position,
+      // which is exactly why the old flow needed a separate collect() first.
+      expect(await locker.claimable(weth.target, creator.address)).to.equal(0n);
+
+      const before = await ethers.provider.getBalance(creator.address);
+      const tx = await locker.connect(creator).collectAndClaim(info.lpTokenId);
+      const rc = await tx.wait();
+      const after = await ethers.provider.getBalance(creator.address);
+
+      // Harvested AND paid in the same tx: balance rose by ~the creator's half.
+      const received = after - before + rc!.gasUsed * rc!.gasPrice;
+      expect(received).to.be.closeTo(expectedFee / 2n, expectedFee / 50n);
+      await expect(tx).to.emit(locker, "FeesCollected").and.to.emit(locker, "FeesClaimed");
+      // Ledger drained, so there is nothing left to claim separately.
+      expect(await locker.claimable(weth.target, creator.address)).to.equal(0n);
+    });
+
+    it("collectAndClaim() SKIPS a zero side instead of reverting (burned token half)", async () => {
+      const { locker, tokenAddr, creator, info } = await loadFixture(feesFixture);
+      // The launched-token side is burned, so the creator never has a token balance.
+      // A naive loop of claim() would revert NothingToClaim and block the WETH payout.
+      await expect(locker.connect(creator).collectAndClaim(info.lpTokenId)).to.not.be.reverted;
+      expect(await locker.claimable(tokenAddr as string, creator.address)).to.equal(0n);
+    });
+
+    it("collectAndClaim() stays permissionless: a cranker lands the harvest, is paid nothing", async () => {
+      const { locker, weth, creator, bob, info } = await loadFixture(feesFixture);
+      const before = await ethers.provider.getBalance(bob.address);
+      const tx = await locker.connect(bob).collectAndClaim(info.lpTokenId);
+      const rc = await tx.wait();
+      const after = await ethers.provider.getBalance(bob.address);
+
+      // Bob paid gas and received nothing — payout is strictly the CALLER's ledger.
+      expect(after - before + rc!.gasUsed * rc!.gasPrice).to.equal(0n);
+      // The harvest still landed, credited to the creator.
+      expect(await locker.claimable(weth.target, creator.address)).to.be.gt(0n);
+    });
+
+    it("collectAndClaim() reverts for a position the locker does not know", async () => {
+      const { locker, creator } = await loadFixture(feesFixture);
+      await expect(
+        locker.connect(creator).collectAndClaim(999_999)
+      ).to.be.revertedWithCustomError(locker, "UnknownPosition");
+    });
+
     it("total collected fees ≈ 1% of the swap", async () => {
       const { locker, weth, treasury, creator, bob, info, swapIn } = await loadFixture(feesFixture);
       const expectedFee = (swapIn * 100n) / 10_000n;
