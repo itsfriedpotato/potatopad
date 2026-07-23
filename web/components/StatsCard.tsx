@@ -61,8 +61,17 @@ export function StatsCard({
     },
     {
       label: onCurve ? "Collected" : "Liquidity",
+      // USD headline (matches Price / Market cap), raw WETH as the subline.
       value:
-        wethInPool === undefined ? "…" : `${formatEth(wethInPool)} ${onCurve ? "ETH" : "WETH"}`,
+        wethInPool === undefined
+          ? "…"
+          : ethUsd !== null
+            ? formatUsd(Number(wethInPool) / 1e18 * ethUsd)
+            : `${formatEth(wethInPool)} ${onCurve ? "ETH" : "WETH"}`,
+      sub:
+        wethInPool !== undefined && ethUsd !== null
+          ? `${formatEth(wethInPool)} ${onCurve ? "ETH" : "WETH"}`
+          : undefined,
     },
     {
       label: "Holders",
