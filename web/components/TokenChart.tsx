@@ -3,8 +3,14 @@
 import { CandlestickChart, ExternalLink, Sprout } from "lucide-react";
 import type { Address } from "viem";
 import { usePad } from "@/lib/hooks";
-import { ZERO_ADDRESS, geckoTerminalPoolUrl, uniswapSwapUrl } from "@/lib/config";
+import {
+  GECKOTERMINAL_NETWORKS,
+  ZERO_ADDRESS,
+  geckoTerminalPoolUrl,
+  uniswapSwapUrl,
+} from "@/lib/config";
 import { bpsToPercent } from "@/lib/format";
+import { useGeckoIndexed } from "@/lib/useGeckoIndexed";
 import { ProgressBar } from "@/components/ProgressBar";
 
 /**
@@ -31,8 +37,17 @@ export function TokenChart({
   progressBps?: bigint;
 }) {
   const { chainId } = usePad();
+  const hasPool = pool !== ZERO_ADDRESS;
+  // Only embed once GeckoTerminal has actually indexed the pool; a brand-new
+  // pool would otherwise render GT's own 404 inside the iframe. Flips to the
+  // chart automatically once GT catches up (the hook polls while missing).
+  const geckoStatus = useGeckoIndexed(
+    GECKOTERMINAL_NETWORKS[chainId],
+    hasPool ? pool : undefined,
+  );
   const embedUrl =
-    pool !== ZERO_ADDRESS ? geckoTerminalPoolUrl(chainId, pool) : undefined;
+    hasPool && geckoStatus === "indexed" ? geckoTerminalPoolUrl(chainId, pool) : undefined;
+  const indexing = hasPool && geckoStatus === "missing";
   // A bonded curve is 100% by definition, regardless of the live pool tick.
   const barBps = bonded ? 10_000n : progressBps;
 
@@ -70,8 +85,9 @@ export function TokenChart({
         <div className="flex h-56 flex-col items-center justify-center gap-3 rounded-lg border border-neutral-800 bg-neutral-950 text-center">
           <CandlestickChart className="h-8 w-8 text-amber-500/60" aria-hidden />
           <p className="max-w-xs text-sm text-neutral-400">
-            This token trades live on Uniswap V3. A price chart isn&apos;t indexed on
-            this network yet.
+            {indexing
+              ? "Fresh launch — GeckoTerminal is still indexing this pool. The chart appears here automatically within a few minutes. It's already live and tradable."
+              : "This token trades live on Uniswap V3. A price chart isn't indexed on this network yet."}
           </p>
           <a
             href={uniswapSwapUrl(token, chainId)}
