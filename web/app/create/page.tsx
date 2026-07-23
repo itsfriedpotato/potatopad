@@ -90,6 +90,8 @@ export default function CreatePage() {
 
   // Holder rewards: share the creator's half of the fees with everyone holding.
   const [rewardsOn, setRewardsOn] = useState(false);
+  // True when the server reports a newer pad than this bundle was built with.
+  const [staleClient, setStaleClient] = useState(false);
   const [creatorCutPct, setCreatorCutPct] = useState(0);
   const holderCutPct = CREATOR_HALF_PCT - creatorCutPct;
 
@@ -173,9 +175,26 @@ export default function CreatePage() {
     return <NotDeployed chainId={chainId} />;
   }
 
-  function onSubmit(e: FormEvent) {
+  async function onSubmit(e: FormEvent) {
     e.preventDefault();
     if (!formValid || devBuyWei === undefined) return;
+    // Stale-client guard. The pad address is baked into this bundle at build
+    // time; a tab left open across a repoint keeps writing to the RETIRED pad
+    // (that is exactly how DeepFryer/FROG/POND launched onto the old
+    // bounded-range pad hours after the curve pad shipped). Ask the server for
+    // its current pad right before submitting and refuse on mismatch. Fail
+    // open on network error: this guards a known hazard, it must not brick
+    // launches when the config endpoint itself hiccups.
+    try {
+      const res = await fetch("/api/config", { cache: "no-store" });
+      const cfg = (await res.json()) as { curvePad?: string | null };
+      if (cfg.curvePad && cfg.curvePad.toLowerCase() !== curvePad.toLowerCase()) {
+        setStaleClient(true);
+        return;
+      }
+    } catch {
+      // config check unavailable — proceed, the wallet still simulates the tx
+    }
     // Random CREATE2 salt: makes the token address unpredictable so a griefer
     // can't pre-initialize its Uniswap pool to brick the launch.
     const salt = bytesToHex(crypto.getRandomValues(new Uint8Array(32)));
@@ -482,12 +501,31 @@ export default function CreatePage() {
               </div>
             )}
 
+            {staleClient && (
+              <div className="space-y-2 rounded-xl border border-amber-900/50 bg-amber-950/20 p-4">
+                <h4 className="font-mono text-xs font-bold uppercase tracking-wider text-amber-400">
+                  New version available
+                </h4>
+                <p className="text-[11px] leading-relaxed text-neutral-400">
+                  The launchpad contract was upgraded since this page loaded. Launching from this
+                  tab would plant your token on the retired contract. Reload to launch on the
+                  current one — your form entries will be lost, so copy anything you need first.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => window.location.reload()}
+                  className="w-full rounded-lg bg-amber-500 py-2 text-[11px] font-bold uppercase tracking-widest text-neutral-950 hover:bg-amber-400"
+                >
+                  Reload page
+                </button>
+              </div>
+            )}
             <button
               type="submit"
               form="plant-form"
-              disabled={!formValid || tx.busy || tx.confirmed}
+              disabled={!formValid || tx.busy || tx.confirmed || staleClient}
               className={`w-full rounded-xl py-3.5 text-xs font-bold uppercase tracking-widest transition-all ${
-                formValid && !tx.busy && !tx.confirmed
+                formValid && !tx.busy && !tx.confirmed && !staleClient
                   ? "bg-amber-500 text-neutral-950 hover:bg-amber-400"
                   : "cursor-not-allowed border border-neutral-800 bg-neutral-900 text-neutral-600"
               }`}
