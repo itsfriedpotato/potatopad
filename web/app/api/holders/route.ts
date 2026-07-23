@@ -73,7 +73,24 @@ const client = createPublicClient({
   transport: robinhoodServerTransport(),
 });
 
-const cache = new Map<string, { payload: HoldersPayload; expiresAt: number }>();
+/**
+ * Incremental per-token indexer state. The first request for a token pays for
+ * one full-history scan; every refresh after that scans ONLY the blocks mined
+ * since `lastScanned` (usually a single getLogs chunk) and applies the deltas
+ * to the running balance map. Before this, every 45s cache expiry re-scanned
+ * the token's whole history from the earliest pad block (600+ getLogs calls
+ * for a busy token) and N concurrent visitors triggered N such scans — which
+ * is what crash-looped the server during the first CHIP pump.
+ */
+type TokenState = {
+  balances: Map<string, bigint>;
+  lastScanned: bigint;
+  payload: HoldersPayload;
+  freshUntil: number;
+};
+const state = new Map<string, TokenState>();
+// One scan per token at a time — concurrent requests share the same promise.
+const scanning = new Map<string, Promise<HoldersPayload>>();
 
 async function collectLogs<T>(
   fromBlock: bigint,
@@ -96,38 +113,19 @@ async function collectLogs<T>(
 
 type TransferLog = { args: { from?: Address; to?: Address; value?: bigint } };
 
-async function scan(token: Address): Promise<HoldersPayload> {
-  const latest = await client.getBlockNumber();
+function earliestPadBlock(): bigint {
   // Scan from the EARLIEST pad's deploy block so a legacy token's full Transfer
   // history is covered, not truncated at the newest pad's block.
   const deployments = allPadDeployments(robinhoodChain.id); // include the curve pad block
-  const startBlock = deployments.length
-    ? deployments.reduce(
-        (m, p) => (p.startBlock < m ? p.startBlock : m),
-        deployments[0].startBlock,
-      )
+  return deployments.length
+    ? deployments.reduce((m, p) => (p.startBlock < m ? p.startBlock : m), deployments[0].startBlock)
     : 0n;
+}
 
-  const logs = (await collectLogs(startBlock, latest, (from, to) =>
-    client.getLogs({ address: token, event: transferEvent, fromBlock: from, toBlock: to }),
-  )) as unknown as TransferLog[];
-
-  const balances = new Map<string, bigint>();
-  for (const log of logs) {
-    const { from, to, value } = log.args;
-    if (value === undefined || value === 0n) continue;
-    if (from && from !== ZERO_ADDRESS) {
-      balances.set(from, (balances.get(from) ?? 0n) - value);
-    }
-    if (to && to !== ZERO_ADDRESS) {
-      balances.set(to, (balances.get(to) ?? 0n) + value);
-    }
-  }
-
+function buildPayload(balances: Map<string, bigint>): HoldersPayload {
   const positive = Array.from(balances.entries())
     .filter(([, balance]) => balance > 0n)
     .sort((a, b) => (b[1] > a[1] ? 1 : b[1] < a[1] ? -1 : 0));
-
   const total = positive.reduce((sum, [, balance]) => sum + balance, 0n);
   return {
     holders: positive.map(([address, balance]) => ({
@@ -139,6 +137,52 @@ async function scan(token: Address): Promise<HoldersPayload> {
   };
 }
 
+/** Scan new blocks since the token's last refresh (full history on first call). */
+async function refresh(key: string, token: Address): Promise<HoldersPayload> {
+  const inflight = scanning.get(key);
+  if (inflight) return inflight;
+
+  const p = (async () => {
+    const latest = await client.getBlockNumber();
+    const prev = state.get(key);
+    const fromBlock = prev ? prev.lastScanned + 1n : earliestPadBlock();
+    const balances = prev ? prev.balances : new Map<string, bigint>();
+
+    if (fromBlock <= latest) {
+      const logs = (await collectLogs(fromBlock, latest, (from, to) =>
+        client.getLogs({ address: token, event: transferEvent, fromBlock: from, toBlock: to }),
+      )) as unknown as TransferLog[];
+
+      for (const log of logs) {
+        const { from, to, value } = log.args;
+        if (value === undefined || value === 0n) continue;
+        if (from && from !== ZERO_ADDRESS) {
+          const next = (balances.get(from) ?? 0n) - value;
+          if (next === 0n) balances.delete(from);
+          else balances.set(from, next);
+        }
+        if (to && to !== ZERO_ADDRESS) {
+          balances.set(to, (balances.get(to) ?? 0n) + value);
+        }
+      }
+    }
+
+    const payload = buildPayload(balances);
+    state.set(key, { balances, lastScanned: latest, payload, freshUntil: Date.now() + CACHE_TTL_MS });
+    if (state.size > MAX_CACHED_TOKENS) {
+      const oldest = state.keys().next().value;
+      if (oldest !== undefined) state.delete(oldest);
+    }
+    return payload;
+  })();
+
+  scanning.set(key, p);
+  void p.finally(() => {
+    if (scanning.get(key) === p) scanning.delete(key);
+  });
+  return p;
+}
+
 export async function GET(req: Request) {
   const token = new URL(req.url).searchParams.get("token");
   if (!token || !ADDRESS_RE.test(token)) {
@@ -147,35 +191,35 @@ export async function GET(req: Request) {
   const key = token.toLowerCase();
   const now = Date.now();
 
-  const hit = cache.get(key);
-  if (hit && hit.expiresAt > now) {
-    return NextResponse.json(hit.payload, { headers: CACHE_HEADERS });
+  const st = state.get(key);
+  if (st && st.freshUntil > now) {
+    return NextResponse.json(st.payload, { headers: CACHE_HEADERS });
   }
 
-  // Cache miss → a full-history scan. Gate it (arbitrary addresses can't force
-  // unbounded scans). Serve stale on limit if we have it.
+  // Stale state: answer INSTANTLY from it and refresh in the background. The
+  // incremental refresh is one small getLogs, and the inflight map guarantees
+  // at most one runs per token no matter how many viewers are polling.
+  if (st) {
+    void refresh(key, token as Address).catch(() => {});
+    return NextResponse.json(st.payload, { headers: CACHE_HEADERS });
+  }
+
+  // No state at all → this is the one expensive path (full-history first scan).
+  // Gate it so arbitrary token addresses can't force unbounded scans.
   const ip =
     req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
     req.headers.get("x-real-ip") ||
     "unknown";
   if (scanRateLimited(ip)) {
-    if (hit) return NextResponse.json(hit.payload, { headers: CACHE_HEADERS });
     return NextResponse.json({ error: "rate limited" }, { status: 429 });
   }
 
   try {
-    const payload = await scan(token as Address);
-    cache.set(key, { payload, expiresAt: now + CACHE_TTL_MS });
-    if (cache.size > MAX_CACHED_TOKENS) {
-      const oldest = cache.keys().next().value;
-      if (oldest !== undefined) cache.delete(oldest);
-    }
+    const payload = await refresh(key, token as Address);
     return NextResponse.json(payload, { headers: CACHE_HEADERS });
   } catch {
-    // Scan failed (RPC hiccup). Serve the last good payload for this token if we
-    // have one, else an empty-but-unavailable list — always HTTP 200 so the UI
-    // degrades softly.
-    if (hit) return NextResponse.json(hit.payload, { headers: CACHE_HEADERS });
+    // Scan failed (RPC hiccup) — an empty-but-unavailable list, always HTTP 200
+    // so the UI degrades softly.
     const empty: HoldersPayload = { holders: [], total: "0", unavailable: true };
     return NextResponse.json(empty, { headers: CACHE_HEADERS });
   }
