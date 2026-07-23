@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { getAddress, isAddress, type Address } from "viem";
 import { imageProxyCandidates, normalizeSocialUrl } from "@/lib/format";
 import { SOCIAL_OVERRIDES } from "@/lib/config";
+import { useTokenDescription } from "@/lib/tokenMeta/useTokenDescription";
 import { useLaunchActivity } from "@/lib/events";
 import { AddressChip } from "@/components/AddressChip";
 import { TokenAvatar } from "@/components/TokenAvatar";
@@ -30,6 +31,7 @@ export function TokenHeaderCard({
 }) {
   const { creationByToken } = useLaunchActivity();
   const meta = creationByToken.get(token.toLowerCase());
+  const description = useTokenDescription(ancient ? undefined : token);
 
   // Click-to-enlarge: walk the same proxy-first candidate list the avatar uses,
   // so the enlarged view is cached too and a dead gateway falls through instead
@@ -138,6 +140,11 @@ export function TokenHeaderCard({
                   </a>
                 ))}
               </div>
+            )}
+            {description && (
+              <p className="mt-3 whitespace-pre-line text-sm leading-relaxed text-neutral-400">
+                {description}
+              </p>
             )}
           </div>
         </div>

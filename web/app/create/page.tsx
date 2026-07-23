@@ -5,11 +5,13 @@ import { Loader2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent } from "react";
 import { bytesToHex, decodeEventLog } from "viem";
-import { useReadContracts } from "wagmi";
+import { useAccount, useReadContracts, useSignMessage } from "wagmi";
 import { potatoCurvePadAbi } from "@/lib/abi";
 import { SITE_URL } from "@/lib/config";
 import { usePad, useTx } from "@/lib/hooks";
 import { useAncientTokens } from "@/lib/ancient";
+import { DESCRIPTION_MAX, tokenDescriptionHash } from "@/lib/feedback/message";
+import { signAction } from "@/lib/feedback/sign";
 import { formatEth, normalizeSocialUrl, resolveImageUri, tryParseEther } from "@/lib/format";
 import { ConnectGate } from "@/components/ConnectGate";
 import { NotDeployed } from "@/components/NotDeployed";
@@ -42,6 +44,8 @@ export default function CreatePage() {
   const { curvePad, chainId, canLaunch } = usePad();
   const tx = useTx();
   const { tokens: ancientTokens } = useAncientTokens();
+  const { address: userAddress } = useAccount();
+  const { signMessageAsync } = useSignMessage();
 
   // Dev-buy cap. The atomic creator buy runs in the launch block (anti-snipe
   // active) and the creator is NOT exempt, so buying > MAX_WALLET reverts the
@@ -84,6 +88,7 @@ export default function CreatePage() {
   const [website, setWebsite] = useState("");
   const [twitter, setTwitter] = useState("");
   const [telegram, setTelegram] = useState("");
+  const [description, setDescription] = useState("");
   const [devBuy, setDevBuy] = useState("");
   const [uploading, setUploading] = useState(false);
   // Object URL of the just-picked file: instant preview while IPFS propagates.
@@ -159,6 +164,7 @@ export default function CreatePage() {
   useEffect(() => {
     if (!tx.confirmed || !tx.receipt) return;
     let target = "/";
+    let launchedToken: string | undefined;
     for (const log of tx.receipt.logs) {
       try {
         const event = decodeEventLog({
@@ -167,17 +173,56 @@ export default function CreatePage() {
           data: log.data,
           topics: log.topics,
         });
-        target = `/token/${event.args.token}`;
+        launchedToken = event.args.token as string;
+        target = `/token/${launchedToken}`;
         break;
       } catch {
         // not a TokenCreated log (e.g. a dev-buy's Buy log) — keep scanning
       }
     }
+    // Save the description off-chain (gasless, creator-signed). Best-effort: the
+    // token is fully launched regardless, so a declined signature or a failed
+    // write just means no description, never a lost token. The redirect waits a
+    // moment for the signature prompt but never blocks on it.
+    const trimmedDesc = description.trim();
+    if (launchedToken && trimmedDesc && userAddress) {
+      const tokenAddr = launchedToken;
+      void (async () => {
+        try {
+          const subject = tokenDescriptionHash({ token: tokenAddr, description: trimmedDesc });
+          const { nonce, issuedAt, signature } = await signAction(
+            userAddress,
+            "token-description",
+            subject,
+            (message) => signMessageAsync({ message }),
+          );
+          await fetch("/api/token-meta", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              address: userAddress,
+              token: tokenAddr,
+              description: trimmedDesc,
+              nonce,
+              issuedAt,
+              signature,
+            }),
+          });
+        } catch {
+          // creator declined the signature or the write failed — token is fine
+        }
+      })();
+    }
     // Kick the Discover/profile feed so "My profile" / planter pages pick up the
     // new plant sooner (server cache may still lag one TTL).
     void queryClient.invalidateQueries({ queryKey: ["launch-activity"] });
-    const timer = setTimeout(() => router.push(target), 800);
+    // Give the optional description-signature prompt room to appear before we
+    // navigate; the save continues even after the redirect either way.
+    const timer = setTimeout(() => router.push(target), trimmedDesc ? 2500 : 800);
     return () => clearTimeout(timer);
+    // description/userAddress/signMessageAsync are read once at confirmation;
+    // intentionally not deps so a later keystroke can't re-fire the save.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tx.confirmed, tx.receipt, router, queryClient]);
 
   if (!canLaunch) {
@@ -362,6 +407,30 @@ export default function CreatePage() {
                 />
                 <p className="text-[9px] text-neutral-600">
                   Leave blank and your coin links to {SITE_URL.replace(/^https?:\/\//, "")}.
+                </p>
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label htmlFor="description" className={labelCls}>
+                    Description (optional)
+                  </label>
+                  <span className="text-[9px] text-neutral-600">
+                    {description.length}/{DESCRIPTION_MAX}
+                  </span>
+                </div>
+                <textarea
+                  id="description"
+                  rows={3}
+                  maxLength={DESCRIPTION_MAX}
+                  className={`${inputCls} resize-none`}
+                  placeholder="What's the coin about?"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                />
+                <p className="text-[9px] text-neutral-600">
+                  Shown on your coin&apos;s page. You&apos;ll sign a free message after launch to
+                  save it (no gas).
                 </p>
               </div>
 

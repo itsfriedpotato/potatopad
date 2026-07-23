@@ -2,7 +2,14 @@
 // server (to verify). Isomorphic: no server-only imports. viem is a client dep.
 import { keccak256, toHex } from "viem";
 
-export type FeedbackAction = "post" | "vote" | "unvote" | "edit" | "admin" | "profile";
+export type FeedbackAction =
+  | "post"
+  | "vote"
+  | "unvote"
+  | "edit"
+  | "admin"
+  | "profile"
+  | "token-description";
 
 export const FEEDBACK_DOMAIN = "potato.fm";
 
@@ -27,6 +34,19 @@ export function profileHash(p: {
   return keccak256(
     toHex([p.address.toLowerCase(), p.username, p.bio, p.avatarUrl].join("\n")),
   );
+}
+
+/** Max length of an off-chain token description. Isomorphic so the client form
+ *  and the server store agree without the client importing server-only code. */
+export const DESCRIPTION_MAX = 500;
+
+/**
+ * keccak256 binding a token description to the token it describes. The server
+ * recomputes this from the token address + text it is about to write, so a
+ * signature over one description can't be replayed to store a different one.
+ */
+export function tokenDescriptionHash(p: { token: string; description: string }): string {
+  return keccak256(toHex([p.token.toLowerCase(), p.description].join("\n")));
 }
 
 /** The exact string the wallet signs. Client and server MUST produce it identically,
