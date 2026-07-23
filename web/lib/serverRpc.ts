@@ -14,12 +14,16 @@ import { fallback, http, type Transport } from "viem";
 
 export const PUBLIC_RPC = "https://rpc.mainnet.chain.robinhood.com";
 
-/** Primary pool: the Chainstack nodes, load-balanced. ROBINHOOD_RPC_URL, _2, _3. */
+/** Primary pool: the Chainstack nodes, load-balanced. ROBINHOOD_RPC_URL, _2..._7. */
 export function robinhoodPrimaryPool(): string[] {
   return [
     process.env.ROBINHOOD_RPC_URL,
     process.env.ROBINHOOD_RPC_URL_2,
     process.env.ROBINHOOD_RPC_URL_3,
+    process.env.ROBINHOOD_RPC_URL_4,
+    process.env.ROBINHOOD_RPC_URL_5,
+    process.env.ROBINHOOD_RPC_URL_6,
+    process.env.ROBINHOOD_RPC_URL_7,
   ].filter((u): u is string => !!u && u.length > 0);
 }
 
