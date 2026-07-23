@@ -6,7 +6,7 @@ import { useMemo, useState } from "react";
 import type { Address } from "viem";
 import { useReadContracts } from "wagmi";
 import { potatoCurvePadAbi } from "@/lib/abi";
-import { WETH_ADDRESSES, ZERO_ADDRESS } from "@/lib/config";
+import { WETH_ADDRESSES, ZERO_ADDRESS, isMigrated } from "@/lib/config";
 import { useAncientTokens } from "@/lib/ancient";
 import { useLaunchActivity } from "@/lib/events";
 import { usePad } from "@/lib/hooks";
@@ -144,7 +144,7 @@ export default function DiscoverPage() {
           | readonly [Address, Address, bigint, boolean]
           | undefined;
         const curveProg = curveReads?.[2 * i + 1]?.result as bigint | undefined;
-        const bonded = isCurveTok ? (cv?.[3] ?? false) : true;
+        const bonded = isCurveTok ? isMigrated(c.token, cv?.[3] ?? false) : true;
         const onCurve = isCurveTok && !bonded;
 
         // Curve tokens have a live pool from block one, so every token prices

@@ -18,6 +18,7 @@ import {
   WETH_ADDRESSES,
   ZERO_ADDRESS,
   allPadDeployments,
+  isMigrated,
 } from "@/lib/config";
 import { wagmiConfig } from "@/lib/wagmi";
 
@@ -307,7 +308,7 @@ export function useTokenPad(token: Address | undefined): ResolvedToken {
         // curves() => (creator, pool, positionId, bonded)
         const c = res.result as readonly [Address, Address, bigint, boolean];
         if (c[0] && c[0] !== ZERO_ADDRESS) {
-          const bonded = c[3];
+          const bonded = isMigrated(token ?? ZERO_ADDRESS, c[3]);
           return {
             kind: "curve",
             pad: pads[i].address,

@@ -26,6 +26,26 @@ export const robinhoodChain = defineChain({
 export const ZERO_ADDRESS =
   "0x0000000000000000000000000000000000000000" as Address;
 
+/**
+ * Tokens shown as Migrated even though their on-chain `bonded` latch is false.
+ *
+ * bond() must be called WHILE price sits above the bond tick; the chain keeps
+ * no memory of past crossings. Blue Chip crossed 100% before the bond keeper
+ * existed, nobody latched it during the window, and price retraced, so the
+ * flag can't be set until price returns. It DID break the line, and the
+ * missed latch was our tooling gap, so it displays as Migrated. The keeper
+ * (scripts/bond-keeper.mjs) latches all future crossings within seconds, so
+ * this list should never grow.
+ */
+export const MIGRATED_OVERRIDES: ReadonlySet<string> = new Set([
+  "0x0f4144954467ef961c0244ab4ab9e41f8d38a4f3", // Blue Chip $BLUECHIP
+]);
+
+/** On-chain bonded flag OR the display override above. */
+export function isMigrated(token: string, onchainBonded: boolean): boolean {
+  return onchainBonded || MIGRATED_OVERRIDES.has(token.toLowerCase());
+}
+
 function envAddress(value: string | undefined): Address {
   return value && /^0x[0-9a-fA-F]{40}$/.test(value)
     ? (value as Address)
