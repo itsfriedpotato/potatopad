@@ -46,6 +46,23 @@ export function isMigrated(token: string, onchainBonded: boolean): boolean {
   return onchainBonded || MIGRATED_OVERRIDES.has(token.toLowerCase());
 }
 
+/**
+ * Social links added AFTER launch. Launch metadata is immutable on-chain, so
+ * communities that spin up socials later (CHIP predates its own X/Telegram)
+ * can only get them surfaced via this display-time merge. Overrides win over
+ * the on-chain value for the fields they set; unset fields fall through.
+ */
+export const SOCIAL_OVERRIDES: Record<
+  string,
+  { website?: string; twitter?: string; telegram?: string }
+> = {
+  // CHIP - the original pad's test token
+  "0x1e4d3243a287edb687a4cbf2a1223da54e8c835f": {
+    twitter: "https://x.com/chip_potatopad",
+    telegram: "https://telegram.me/Chipcto_rh",
+  },
+};
+
 function envAddress(value: string | undefined): Address {
   return value && /^0x[0-9a-fA-F]{40}$/.test(value)
     ? (value as Address)

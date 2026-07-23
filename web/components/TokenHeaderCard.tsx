@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { getAddress, isAddress, type Address } from "viem";
 import { imageProxyCandidates, normalizeSocialUrl } from "@/lib/format";
+import { SOCIAL_OVERRIDES } from "@/lib/config";
 import { useLaunchActivity } from "@/lib/events";
 import { AddressChip } from "@/components/AddressChip";
 import { TokenAvatar } from "@/components/TokenAvatar";
@@ -50,20 +51,22 @@ export function TokenHeaderCard({
   // Metadata is creator-typed and immutable on-chain, so links arrive as bare
   // domains, handles, and protocol typos. normalizeSocialUrl repairs what's
   // unambiguous and guarantees only http(s) hrefs render (never javascript:).
+  // SOCIAL_OVERRIDES lets links created after launch surface anyway.
+  const override = SOCIAL_OVERRIDES[token.toLowerCase()];
   const socials = (
     [
       {
-        href: normalizeSocialUrl(meta?.website, "website"),
+        href: normalizeSocialUrl(override?.website ?? meta?.website, "website"),
         label: "Website",
         icon: <Globe className="h-3.5 w-3.5" />,
       },
       {
-        href: normalizeSocialUrl(meta?.twitter, "twitter"),
+        href: normalizeSocialUrl(override?.twitter ?? meta?.twitter, "twitter"),
         label: "X",
         icon: <span className="text-[13px] font-bold leading-none">&#120143;</span>,
       },
       {
-        href: normalizeSocialUrl(meta?.telegram, "telegram"),
+        href: normalizeSocialUrl(override?.telegram ?? meta?.telegram, "telegram"),
         label: "Telegram",
         icon: <Send className="h-3.5 w-3.5" />,
       },
