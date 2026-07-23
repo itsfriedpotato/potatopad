@@ -114,11 +114,6 @@ export function TokenCard({
     !!row.curve && (row.bonded || Number(row.curveProgressBps ?? 0n) >= 10_000);
   const onCurve = !!row.curve && !migrated;
   const progress = onCurve ? Math.max(0, Math.min(100, Number(row.curveProgressBps ?? 0n) / 100)) : 0;
-  const stage = migrated
-    ? { label: "Migrated", emoji: "🎓", cls: "border-amber-500/40 bg-amber-500/15 text-amber-300" }
-    : onCurve
-      ? { label: "Bonding", emoji: "🌱", cls: "border-emerald-500/30 bg-emerald-500/10 text-emerald-400" }
-      : { label: "Live", emoji: "⚡", cls: "border-neutral-700 bg-neutral-800/60 text-neutral-300" };
 
   return (
     <article className={cardShell}>
@@ -129,11 +124,11 @@ export function TokenCard({
         <div className="relative">
           <TokenAvatar address={row.address} symbol={row.symbol} imageURI={row.imageURI} fill />
           <div className="pointer-events-none absolute inset-x-0 bottom-0 h-14 bg-gradient-to-t from-neutral-900 via-neutral-900/40 to-transparent" />
-          {row.curve && (
-            <span
-              className={`absolute left-2 top-2 rounded border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider backdrop-blur-md ${stage.cls}`}
-            >
-              {stage.emoji} {stage.label}
+          {/* Only migration earns a badge; a bonding curve is already told by its
+              progress bar, and "Live" said nothing at all. */}
+          {migrated && (
+            <span className="absolute left-2 top-2 rounded border border-amber-500/40 bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-300 backdrop-blur-md">
+              🎓 Migrated
             </span>
           )}
           {row.createdAt !== undefined && row.createdAt > 0 && (
