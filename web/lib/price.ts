@@ -13,18 +13,40 @@ export interface EthUsdPrice {
 const RELAY_ETH_USD =
   "https://api.relay.link/currencies/token/price?chainId=1&address=0x0000000000000000000000000000000000000000";
 
+/** Last price this tab has ever seen: a stale ETH price beats a blank market cap. */
+let lastGoodUsd: number | null = null;
+
 /**
- * Fetch the ETH/USD spot price from a public, no-auth source. Relay is the
- * primary; Coinbase is a fallback. Returns null if both fail (never guesses).
+ * Fetch the ETH/USD spot price. Primary is OUR server (/api/eth-usd): one
+ * upstream call per minute shared by all visitors, immune to the ad blockers
+ * that kill relay/coinbase requests from browsers, and it serves stale-on-
+ * error. Direct third-party fetches remain as fallbacks, and the last good
+ * value this tab saw is the final fallback, so a transient failure never
+ * blanks every market cap on the page.
  */
 async function fetchEthUsd(): Promise<number | null> {
-  // Primary: Relay -> { price: 1885.25 }
+  // Primary: same-origin server cache -> { usd: 1885.25 }
+  try {
+    const res = await fetch("/api/eth-usd");
+    if (res.ok) {
+      const json = (await res.json()) as { usd?: number | null };
+      if (typeof json?.usd === "number" && Number.isFinite(json.usd) && json.usd > 0) {
+        lastGoodUsd = json.usd;
+        return json.usd;
+      }
+    }
+  } catch {
+    // fall through to direct sources
+  }
+
+  // Fallback: Relay -> { price: 1885.25 }
   try {
     const res = await fetch(RELAY_ETH_USD);
     if (res.ok) {
       const json = (await res.json()) as { price?: number };
       const price = json?.price;
       if (typeof price === "number" && Number.isFinite(price) && price > 0) {
+        lastGoodUsd = price;
         return price;
       }
     }
@@ -38,13 +60,16 @@ async function fetchEthUsd(): Promise<number | null> {
     if (res.ok) {
       const json = (await res.json()) as { data?: { amount?: string } };
       const amount = Number(json?.data?.amount);
-      if (Number.isFinite(amount) && amount > 0) return amount;
+      if (Number.isFinite(amount) && amount > 0) {
+        lastGoodUsd = amount;
+        return amount;
+      }
     }
   } catch {
     // give up gracefully
   }
 
-  return null;
+  return lastGoodUsd;
 }
 
 /** Live ETH/USD spot price, cached for ~60s. usd is null when the fetch fails. */
