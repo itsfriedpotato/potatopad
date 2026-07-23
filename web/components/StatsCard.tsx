@@ -13,6 +13,7 @@ export function StatsCard({
   wethInPool,
   onCurve = false,
   progressBps = 0n,
+  variant = "card",
 }: {
   token: Address;
   /** WETH per whole token (float) — from the pool, or the curve when onCurve */
@@ -25,6 +26,8 @@ export function StatsCard({
   onCurve?: boolean;
   /** Curve progress toward the fill/migration price, 0–10000 bps (only when onCurve). */
   progressBps?: bigint;
+  /** "card": sidebar box with heading. "strip": horizontal row for the page top. */
+  variant?: "card" | "strip";
 }) {
   const { holders, unavailable: holdersUnavailable } = useTokenHolders(token);
   const { usd: ethUsd } = useEthUsdPrice();
@@ -78,6 +81,27 @@ export function StatsCard({
       value: holdersUnavailable ? "n/a" : holders.length.toString(),
     },
   ];
+
+  // Horizontal strip (exchange-style): one row of stats above the chart.
+  if (variant === "strip") {
+    return (
+      <div className="card grid grid-cols-2 sm:grid-cols-4 sm:divide-x sm:divide-neutral-800/70">
+        {rows.map((row) => (
+          <div key={row.label} className="px-4 py-3">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-neutral-500">
+              {row.label}
+            </p>
+            <p className="mt-1 font-mono text-base font-bold tabular-nums text-neutral-100">
+              {row.value}
+            </p>
+            {row.sub && (
+              <p className="mt-0.5 font-mono text-[10px] tabular-nums text-neutral-600">{row.sub}</p>
+            )}
+          </div>
+        ))}
+      </div>
+    );
+  }
 
   return (
     <div className="card p-5">

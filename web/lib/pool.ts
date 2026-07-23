@@ -66,6 +66,27 @@ export const uniswapV3PoolAbi = [
   },
 ] as const;
 
+/**
+ * Uniswap V3 pool `Swap` event — watched to detect live buys. Kept separate
+ * from {uniswapV3PoolAbi} so the existing read hooks are untouched.
+ */
+export const uniswapV3SwapEventAbi = [
+  {
+    anonymous: false,
+    inputs: [
+      { indexed: true, internalType: "address", name: "sender", type: "address" },
+      { indexed: true, internalType: "address", name: "recipient", type: "address" },
+      { indexed: false, internalType: "int256", name: "amount0", type: "int256" },
+      { indexed: false, internalType: "int256", name: "amount1", type: "int256" },
+      { indexed: false, internalType: "uint160", name: "sqrtPriceX96", type: "uint160" },
+      { indexed: false, internalType: "uint128", name: "liquidity", type: "uint128" },
+      { indexed: false, internalType: "int24", name: "tick", type: "int24" },
+    ],
+    name: "Swap",
+    type: "event",
+  },
+] as const;
+
 /** Minimal ERC-20 (balanceOf) — used to read the pool's WETH balance as TVL. */
 export const erc20BalanceAbi = [
   {

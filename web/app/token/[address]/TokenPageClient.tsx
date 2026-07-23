@@ -220,6 +220,16 @@ export default function TokenPageClient() {
           creator={creator}
           chainId={chainId}
         />
+        {/* Exchange-style stat strip: the numbers traders scan first, above the chart. */}
+        <StatsCard
+          token={token}
+          priceWeth={priceWeth}
+          marketCapEth={marketCapEth}
+          wethInPool={liquidityProxy}
+          onCurve={onCurve}
+          progressBps={curve.progressBps}
+          variant="strip"
+        />
         <TokenChart
           token={token}
           pool={pool}
@@ -241,14 +251,6 @@ export default function TokenPageClient() {
           pool={pool}
           isCurve={isCurve}
           bonded={resolved.bonded}
-        />
-        <StatsCard
-          token={token}
-          priceWeth={priceWeth}
-          marketCapEth={marketCapEth}
-          wethInPool={liquidityProxy}
-          onCurve={onCurve}
-          progressBps={curve.progressBps}
         />
         {/* Renders only for holder-rewards launches; a no-op otherwise. */}
         <HolderRewardsCard token={token} symbol={symbol} pad={resolved.pad} chainId={chainId} />
