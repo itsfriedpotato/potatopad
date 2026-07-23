@@ -112,6 +112,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "no CID returned by pinata" }, { status: 502 });
   }
 
+  // Pre-warm our own image proxy, fire-and-forget: a FRESH pin exists only on
+  // Pinata's gateway for the first minutes, so the first card render used to
+  // miss public gateways, negative-cache for 60s, and the new token looked
+  // imageless right when everyone clicks it. Warming here means the proxy has
+  // the bytes cached (for a year) before the launch tx even confirms.
+  const origin = new URL(req.url).origin;
+  void fetch(`${origin}/api/img?cid=${data.IpfsHash}`).catch(() => {});
+
   return NextResponse.json({ uri: `ipfs://${data.IpfsHash}`, cid: data.IpfsHash });
 }
 
