@@ -10,7 +10,7 @@ import { potatoCurvePadAbi } from "@/lib/abi";
 import { SITE_URL } from "@/lib/config";
 import { usePad, useTx } from "@/lib/hooks";
 import { useAncientTokens } from "@/lib/ancient";
-import { formatEth, resolveImageUri, tryParseEther } from "@/lib/format";
+import { formatEth, normalizeSocialUrl, resolveImageUri, tryParseEther } from "@/lib/format";
 import { ConnectGate } from "@/components/ConnectGate";
 import { NotDeployed } from "@/components/NotDeployed";
 import { TxStatus } from "@/components/TxStatus";
@@ -200,12 +200,14 @@ export default function CreatePage() {
     const salt = bytesToHex(crypto.getRandomValues(new Uint8Array(32)));
     const meta = {
       imageURI: image.trim(),
-      // A coin with no site of its own gets Potato Pad as its website, so explorers
-      // and aggregators reading this launch metadata link somewhere real instead of
-      // rendering a blank. Creators who supply a site keep theirs untouched.
-      website: website.trim() || SITE_URL,
-      twitter: twitter.trim(),
-      telegram: telegram.trim(),
+      // Normalize creator-typed links BEFORE they're baked immutably on-chain:
+      // bare domains gain https://, handles become profile URLs, protocol typos
+      // are repaired, junk becomes "". A coin with no (usable) site of its own
+      // gets Potato Pad as its website, so explorers and aggregators reading
+      // this launch metadata link somewhere real instead of rendering a blank.
+      website: normalizeSocialUrl(website, "website") ?? SITE_URL,
+      twitter: normalizeSocialUrl(twitter, "twitter") ?? "",
+      telegram: normalizeSocialUrl(telegram, "telegram") ?? "",
     };
     const common = { address: curvePad, abi: potatoCurvePadAbi, value: devBuyWei } as const;
     const trimmedName = name.trim();

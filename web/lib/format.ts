@@ -306,3 +306,49 @@ export function imageProxyCandidates(uri: string | undefined | null): string[] {
 export function resolveImageUri(uri: string | undefined | null): string | undefined {
   return imageUriCandidates(uri)[0];
 }
+
+/**
+ * Normalize a creator-typed social link into a safe, renderable https URL.
+ *
+ * Creators paste links every way imaginable: bare domains ("proofofpotato.com"),
+ * handles ("@phantom"), and protocol typos ("Https;//x.com/phantom"). The
+ * on-chain metadata is immutable, so rejecting anything that isn't perfect
+ * https:// (the old behavior) silently hid real links forever. Instead, repair
+ * what's unambiguous and drop only genuine junk. Returns undefined when the
+ * value can't be made into a safe http(s) URL.
+ */
+export function normalizeSocialUrl(
+  raw: string | undefined | null,
+  kind: "website" | "twitter" | "telegram" = "website",
+): string | undefined {
+  if (!raw) return undefined;
+  let t = raw.trim();
+  if (!t || /\s/.test(t)) return undefined; // free text ("my cool site") is not a link
+
+  // Repair protocol typos: "Https;//x", "https:/x", "https//x", "http:x".
+  const typo = t.match(/^(https?)[;:]?\/{0,2}(.+)$/i);
+  if (typo && !/^https?:\/\//i.test(t)) {
+    t = `${typo[1].toLowerCase()}://${typo[2]}`;
+  }
+
+  let candidate: string | undefined;
+  if (/^https?:\/\//i.test(t)) {
+    candidate = t;
+  } else if (kind === "twitter" && /^@?[A-Za-z0-9_]{1,15}$/.test(t)) {
+    candidate = `https://x.com/${t.replace(/^@/, "")}`;
+  } else if (kind === "telegram" && /^@?[A-Za-z0-9_]{3,32}$/.test(t)) {
+    candidate = `https://t.me/${t.replace(/^@/, "")}`;
+  } else if (/^[\w-]+(\.[\w-]+)+(\/[^\s"'<>]*)?$/.test(t)) {
+    candidate = `https://${t}`; // bare domain (optionally with a path)
+  }
+  if (!candidate) return undefined;
+
+  try {
+    const u = new URL(candidate);
+    if (u.protocol !== "https:" && u.protocol !== "http:") return undefined;
+    if (!u.hostname.includes(".")) return undefined;
+    return u.toString();
+  } catch {
+    return undefined;
+  }
+}

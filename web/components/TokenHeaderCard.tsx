@@ -3,18 +3,10 @@ import { Globe, Send, X } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { getAddress, isAddress, type Address } from "viem";
-import { imageProxyCandidates } from "@/lib/format";
+import { imageProxyCandidates, normalizeSocialUrl } from "@/lib/format";
 import { useLaunchActivity } from "@/lib/events";
 import { AddressChip } from "@/components/AddressChip";
 import { TokenAvatar } from "@/components/TokenAvatar";
-
-/** Only http(s) links are safe to render — token metadata is attacker-controlled,
- *  so a `javascript:`/`data:` URL must never become a clickable href. */
-function safeUrl(u: string | undefined): string | undefined {
-  if (!u) return undefined;
-  const t = u.trim();
-  return /^https?:\/\//i.test(t) ? t : undefined;
-}
 
 export function TokenHeaderCard({
   token,
@@ -55,15 +47,26 @@ export function TokenHeaderCard({
     return () => window.removeEventListener("keydown", onKey);
   }, [zoomOpen]);
 
+  // Metadata is creator-typed and immutable on-chain, so links arrive as bare
+  // domains, handles, and protocol typos. normalizeSocialUrl repairs what's
+  // unambiguous and guarantees only http(s) hrefs render (never javascript:).
   const socials = (
     [
-      { href: safeUrl(meta?.website), label: "Website", icon: <Globe className="h-3.5 w-3.5" /> },
       {
-        href: safeUrl(meta?.twitter),
+        href: normalizeSocialUrl(meta?.website, "website"),
+        label: "Website",
+        icon: <Globe className="h-3.5 w-3.5" />,
+      },
+      {
+        href: normalizeSocialUrl(meta?.twitter, "twitter"),
         label: "X",
         icon: <span className="text-[13px] font-bold leading-none">&#120143;</span>,
       },
-      { href: safeUrl(meta?.telegram), label: "Telegram", icon: <Send className="h-3.5 w-3.5" /> },
+      {
+        href: normalizeSocialUrl(meta?.telegram, "telegram"),
+        label: "Telegram",
+        icon: <Send className="h-3.5 w-3.5" />,
+      },
     ] as { href: string | undefined; label: string; icon: ReactNode }[]
   ).filter((s): s is { href: string; label: string; icon: ReactNode } => !!s.href);
 
