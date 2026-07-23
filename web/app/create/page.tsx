@@ -86,6 +86,8 @@ export default function CreatePage() {
   const [telegram, setTelegram] = useState("");
   const [devBuy, setDevBuy] = useState("");
   const [uploading, setUploading] = useState(false);
+  // Object URL of the just-picked file: instant preview while IPFS propagates.
+  const [localPreview, setLocalPreview] = useState<string | null>(null);
   const [uploadErr, setUploadErr] = useState("");
 
   // Holder rewards: share the creator's half of the fees with everyone holding.
@@ -101,6 +103,13 @@ export default function CreatePage() {
     if (!file) return;
     setUploadErr("");
     setUploading(true);
+    // Preview the LOCAL file instantly. The pinned ipfs:// URI is what goes
+    // on-chain, but a fresh pin takes minutes to propagate to public gateways,
+    // so previewing via the URI showed a blank square right after upload.
+    setLocalPreview((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return URL.createObjectURL(file);
+    });
     try {
       const fd = new FormData();
       fd.append("file", file);
@@ -230,7 +239,7 @@ export default function CreatePage() {
     });
   }
 
-  const previewSrc = resolveImageUri(image);
+  const previewSrc = localPreview ?? resolveImageUri(image);
   const submitLabel = tx.isPending
     ? "Confirm in wallet…"
     : tx.isConfirming
