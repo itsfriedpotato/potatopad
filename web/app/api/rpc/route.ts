@@ -32,8 +32,13 @@ const FALLBACKS = [...robinhoodFallbacks(), PUBLIC_RPC];
 // which is fine — the goal is spreading load, not perfect fairness).
 let rrCursor = 0;
 
-// Denylist, not allowlist: block only the methods that could be abused to relay
-// transactions or open subscriptions through our key.
+// Denylist, not allowlist: block methods that could relay transactions or open
+// subscriptions through our key — plus ALL stateful filter methods. Filters
+// live on ONE upstream node, and this proxy round-robins a pool: a filter
+// created on node A is unknown to node B, so eth_getFilterChanges churns
+// "filter not found" forever. Rejecting eth_newFilter up front makes viem fall
+// back to its stateless getLogs polling strategy, which round-robins fine and
+// hits the read micro-cache.
 const BLOCKED_METHODS = new Set([
   "eth_sendRawTransaction",
   "eth_sendTransaction",
@@ -44,6 +49,12 @@ const BLOCKED_METHODS = new Set([
   "personal_sign",
   "eth_subscribe",
   "eth_unsubscribe",
+  "eth_newFilter",
+  "eth_newBlockFilter",
+  "eth_newPendingTransactionFilter",
+  "eth_getFilterChanges",
+  "eth_getFilterLogs",
+  "eth_uninstallFilter",
 ]);
 
 // Coarse per-IP sliding-window limiter (in-memory; nodejs runtime keeps it warm).

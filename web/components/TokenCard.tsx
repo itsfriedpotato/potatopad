@@ -34,6 +34,9 @@ export interface TokenRow {
   bonded?: boolean;
   /** Curve progress toward the bond price, 0–10000 bps (only for pre-bond curve tokens). */
   curveProgressBps?: bigint;
+  /** unix ms of the latest live-observed buy (pool Swap watch) — drives the
+   *  "Recent buys" recency sort and the card's buy flash. */
+  lastBuyAt?: number;
 }
 
 function creatorHref(creator: Address): string | null {
@@ -46,7 +49,10 @@ function creatorHref(creator: Address): string | null {
 }
 
 const cardShell =
-  "group flex flex-col overflow-hidden rounded-xl border border-neutral-800/50 bg-neutral-900 shadow-[0_6px_16px_-4px_rgba(0,0,0,0.5),inset_0_1px_0_rgba(255,255,255,0.02)] transition-all duration-200 hover:-translate-y-0.5 hover:border-[#CCFF00]/30 hover:shadow-[0_14px_28px_-8px_rgba(0,0,0,0.6),0_0_18px_rgba(204,255,0,0.06),inset_0_1px_0_rgba(255,255,255,0.03)]";
+  "group card-enter relative flex flex-col overflow-hidden rounded-xl border border-neutral-800/50 bg-neutral-900 shadow-[0_6px_16px_-4px_rgba(0,0,0,0.5),inset_0_1px_0_rgba(255,255,255,0.02)] transition-all duration-200 hover:-translate-y-0.5 hover:border-[#CCFF00]/30 hover:shadow-[0_14px_28px_-8px_rgba(0,0,0,0.6),0_0_18px_rgba(204,255,0,0.06),inset_0_1px_0_rgba(255,255,255,0.03)]";
+
+/** A buy observed within this window renders the flash + "bought" chip. */
+const BUY_FLASH_WINDOW_MS = 10_000;
 
 export function TokenCard({
   row,
@@ -76,7 +82,7 @@ export function TokenCard({
   if (row.ancient) {
     const vol = row.volume24Usd && row.volume24Usd > 0 ? formatUsd(row.volume24Usd) : "—";
     return (
-      <Link href={`/token/${row.address}`} className={cardShell}>
+      <Link href={`/token/${row.address}`} className={cardShell} data-flip-key={row.address}>
         <div className="relative">
           <TokenAvatar address={row.address} symbol={row.symbol} imageURI={row.imageURI} fill />
           <div className="pointer-events-none absolute inset-x-0 bottom-0 h-14 bg-gradient-to-t from-neutral-900 via-neutral-900/40 to-transparent" />
@@ -114,9 +120,14 @@ export function TokenCard({
     !!row.curve && (row.bonded || Number(row.curveProgressBps ?? 0n) >= 10_000);
   const onCurve = !!row.curve && !migrated;
   const progress = onCurve ? Math.max(0, Math.min(100, Number(row.curveProgressBps ?? 0n) / 100)) : 0;
+  // Keyed by the buy timestamp: a fresh buy remounts the flash/chip so the
+  // (self-limiting) animations replay on back-to-back buys.
+  const freshBuy =
+    row.lastBuyAt !== undefined && Date.now() - row.lastBuyAt < BUY_FLASH_WINDOW_MS;
 
   return (
-    <article className={cardShell}>
+    <article className={cardShell} data-flip-key={row.address}>
+      {freshBuy && <span key={`ring-${row.lastBuyAt}`} aria-hidden className="buy-flash-ring" />}
       <Link
         href={`/token/${row.address}`}
         className="flex min-h-0 flex-1 flex-col outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-500/60"
@@ -134,6 +145,11 @@ export function TokenCard({
           {row.createdAt !== undefined && row.createdAt > 0 && (
             <span className="absolute right-2 top-2 rounded bg-black/60 px-1.5 py-0.5 font-mono text-[9px] text-neutral-300 backdrop-blur-md">
               {timeAgo(row.createdAt)}
+            </span>
+          )}
+          {freshBuy && (
+            <span key={`chip-${row.lastBuyAt}`} aria-hidden className="buy-chip">
+              bought
             </span>
           )}
         </div>

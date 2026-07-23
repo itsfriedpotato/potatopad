@@ -8,6 +8,7 @@ import { useReadContracts } from "wagmi";
 import { potatoCurvePadAbi } from "@/lib/abi";
 import { WETH_ADDRESSES, ZERO_ADDRESS, isMigrated } from "@/lib/config";
 import { useAncientTokens } from "@/lib/ancient";
+import { useRecentBuys } from "@/lib/buys";
 import { useLaunchActivity } from "@/lib/events";
 import { usePad } from "@/lib/hooks";
 import {
@@ -18,6 +19,7 @@ import {
 } from "@/lib/pool";
 import { ANALYTICS_CHAIN_ID } from "@/lib/robinhoodPublicClient";
 import { useProfiles } from "@/lib/profile/useProfile";
+import { useFlipGrid } from "@/lib/useFlip";
 import { NotDeployed } from "@/components/NotDeployed";
 import { useSearch } from "@/components/SearchContext";
 import { TokenCard, type TokenRow } from "@/components/TokenCard";
@@ -120,7 +122,7 @@ export default function DiscoverPage() {
     [effectivePools],
   );
 
-  const { data: poolReads } = useReadContracts({
+  const { data: poolReads, refetch: refetchPoolReads } = useReadContracts({
     contracts: poolContracts as never[],
     allowFailure: true,
     query: {
@@ -130,6 +132,20 @@ export default function DiscoverPage() {
       staleTime: 60_000,
       refetchOnWindowFocus: false,
     },
+  });
+
+  // Live buys: ONE Swap filter spans every pool (constant RPC cost). A buy
+  // bumps its token to the front of "Recent buys" and refreshes pool prices
+  // right away instead of on the slow 60s cadence.
+  const buyPairs = useMemo(
+    () =>
+      creations
+        .map((c, i) => ({ token: c.token, pool: effectivePools[i] ?? ZERO_ADDRESS }))
+        .filter((p) => p.pool !== ZERO_ADDRESS),
+    [creations, effectivePools],
+  );
+  const { lastBuyAt } = useRecentBuys(buyPairs, () => {
+    void refetchPoolReads();
   });
 
   const creatorAddresses = useMemo(() => creations.map((c) => c.creator), [creations]);
@@ -170,12 +186,13 @@ export default function DiscoverPage() {
           createdAt: c.timestamp,
           imageURI: c.imageURI,
           volume24Usd: c.volume24Usd,
+          lastBuyAt: lastBuyAt(c.token),
           curve: isCurveTok,
           bonded,
           curveProgressBps: onCurve ? (curveProg ?? 0n) : undefined,
         };
       }),
-    [creations, curveReads, poolReads, effectivePools, creatorProfiles],
+    [creations, curveReads, poolReads, effectivePools, creatorProfiles, lastBuyAt],
   );
 
   const ancientRows = useMemo<TokenRow[]>(
@@ -215,7 +232,14 @@ export default function DiscoverPage() {
     }
     switch (sort) {
       case "recent":
-        return [...list].sort((a, b) => (b.volume24Usd ?? 0) - (a.volume24Usd ?? 0));
+        // Live buys first (most recent wins); tokens with no observed buy keep
+        // the 24h-volume order so first paint matches the previous behavior.
+        return [...list].sort((a, b) => {
+          const ba = a.lastBuyAt ?? 0;
+          const bb = b.lastBuyAt ?? 0;
+          if (bb !== ba) return bb - ba;
+          return (b.volume24Usd ?? 0) - (a.volume24Usd ?? 0);
+        });
       case "new":
         return [...list].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
       case "old":
@@ -227,6 +251,12 @@ export default function DiscoverPage() {
         return list;
     }
   }, [activeRows, query, sort, isAncientTab]);
+
+  // FLIP reorder animation: whenever the visible order changes (a live buy
+  // bumping a card, a sort switch, a new launch), moved cards glide instead of
+  // jumping. Keys are token addresses — stable across re-sorts.
+  const visibleOrderKey = useMemo(() => visible.map((r) => r.address).join(","), [visible]);
+  const gridRef = useFlipGrid<HTMLDivElement>(visibleOrderKey);
 
   if (!isDeployed) {
     return <NotDeployed chainId={chainId} />;
@@ -357,7 +387,7 @@ export default function DiscoverPage() {
             </p>
           </div>
         ) : (
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+          <div ref={gridRef} className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
             {visible.map((row) => (
               <TokenCard key={row.address} row={row} />
             ))}
