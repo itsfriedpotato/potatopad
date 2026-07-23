@@ -306,8 +306,10 @@ contract PotatoFeeLocker is IERC721Receiver, ReentrancyGuard {
     ///         claimable balances, or the permanently-locked principal.
     ///
     ///         NOTE: this is a genuine owner power over the creator fee STREAM (no
-    ///         inactivity gate, no creator veto). The token, its principal, and the
-    ///         treasury cut remain untouchable; renouncing the pad owner freezes it.
+    ///         inactivity gate). The creator can overwrite via {setFeeRecipient} and
+    ///         the owner can always redirect again — last write wins. The token, its
+    ///         principal, and the treasury cut remain untouchable; renouncing the
+    ///         pad owner freezes this power.
     function redirectFees(uint256 tokenId, address to) external nonReentrant {
         if (msg.sender != IPotatoPadOwner(pad).owner()) revert OnlyOwner();
         if (positions[tokenId].creator == address(0)) revert UnknownPosition();

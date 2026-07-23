@@ -463,6 +463,38 @@ describe("PotatoCurvePad (single-sided-v3 curve, 100% in Uniswap, no migration)"
       await locker.collect(posId);
       expect(await locker.claimable(weth.target, alice.address)).to.be.gt(0);
     });
+
+    it("setFeeRecipient reverts UnknownPosition for an unregistered tokenId", async () => {
+      const { locker, creator } = await loadFixture(createFixture);
+      await expect(locker.connect(creator).setFeeRecipient(999999, creator.address))
+        .to.be.revertedWithCustomError(locker, "UnknownPosition");
+    });
+
+    it("setFeeRecipient reset is future-only: bob keeps accrued, new fees go to creator", async () => {
+      const ctx = await loadFixture(createFixture);
+      const { pad, locker, creator, alice, bob, tokenAddr, weth } = ctx;
+      await mine(ANTI_SNIPE + 1);
+      const posId = (await pad.curves(tokenAddr)).positionId;
+
+      // Point fees at bob, then accrue while he is the beneficiary.
+      await locker.connect(creator).setFeeRecipient(posId, bob.address);
+      await buy(ctx, alice, tokenAddr, ethers.parseEther("2"));
+      await locker.collect(posId);
+      const bobBefore = await locker.claimable(weth.target, bob.address);
+      expect(bobBefore).to.be.gt(0);
+
+      // Creator resets to address(0); crystallization leaves bob's claimables alone.
+      await locker.connect(creator).setFeeRecipient(posId, ethers.ZeroAddress);
+      expect(await locker.beneficiaryOf(posId)).to.equal(creator.address);
+      expect(await locker.claimable(weth.target, bob.address)).to.equal(bobBefore);
+      expect(await locker.claimable(weth.target, creator.address)).to.equal(0);
+
+      // Only NEW volume accrues to the creator, not bob.
+      await buy(ctx, alice, tokenAddr, ethers.parseEther("1"));
+      await locker.collect(posId);
+      expect(await locker.claimable(weth.target, bob.address)).to.equal(bobBefore);
+      expect(await locker.claimable(weth.target, creator.address)).to.be.gt(0);
+    });
   });
 
   describe("holder rewards ON the curve", () => {
