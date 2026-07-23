@@ -106,20 +106,19 @@ export function TokenCard({
   // Bonding-curve progress is shown ONLY for a curve token that hasn't bonded yet.
   // Direct-pad coins have no curve at all, and a bonded coin is already done —
   // neither shows a bonding progress bar.
-  const onCurve = !!row.curve && !row.bonded;
+  // A curve that reached 100% shows as migrated whether or not the on-chain
+  // bond() latch has fired yet: the keeper (scripts/bond-keeper.ts) latches
+  // crossings within seconds, so surfacing the in-between state to users is
+  // noise. Pre-100% curves keep the progress bar.
+  const migrated =
+    !!row.curve && (row.bonded || Number(row.curveProgressBps ?? 0n) >= 10_000);
+  const onCurve = !!row.curve && !migrated;
   const progress = onCurve ? Math.max(0, Math.min(100, Number(row.curveProgressBps ?? 0n) / 100)) : 0;
-  // At 100% the curve has CROSSED the bond price but the milestone still needs
-  // someone to latch it via bond() while price holds — surface that as its own
-  // urgent stage so "100%" never reads as already done (Blue Chip crossed,
-  // nobody latched during the window, and the price retraced).
-  const bondableNow = onCurve && progress >= 100;
-  const stage = bondableNow
-    ? { label: "Bondable now", emoji: "⚡", cls: "border-amber-400/60 bg-amber-400/15 text-amber-300 animate-pulse" }
+  const stage = migrated
+    ? { label: "Migrated", emoji: "🎓", cls: "border-amber-500/40 bg-amber-500/15 text-amber-300" }
     : onCurve
       ? { label: "Bonding", emoji: "🌱", cls: "border-emerald-500/30 bg-emerald-500/10 text-emerald-400" }
-      : row.curve && row.bonded
-        ? { label: "Bonded", emoji: "🎓", cls: "border-amber-500/40 bg-amber-500/15 text-amber-300" }
-        : { label: "Live", emoji: "⚡", cls: "border-neutral-700 bg-neutral-800/60 text-neutral-300" };
+      : { label: "Live", emoji: "⚡", cls: "border-neutral-700 bg-neutral-800/60 text-neutral-300" };
 
   return (
     <article className={cardShell}>
@@ -163,11 +162,7 @@ export function TokenCard({
                 </div>
                 <div className="mt-1 flex justify-between font-mono text-[10px] tabular-nums text-neutral-600">
                   <span>🥔 Curve</span>
-                  {bondableNow ? (
-                    <span className="font-bold text-amber-400">crossed — bond it now</span>
-                  ) : (
-                    <span>{progress.toFixed(0)}% to bond</span>
-                  )}
+                  <span>{progress.toFixed(0)}% to bond</span>
                   <span>🎓 Bond</span>
                 </div>
               </div>
