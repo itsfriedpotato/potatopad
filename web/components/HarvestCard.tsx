@@ -2,13 +2,14 @@
 
 import { Coins, Leaf } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Address } from "viem";
-import { useAccount, useReadContract } from "wagmi";
+import { getAddress, isAddress, type Address } from "viem";
+import { useAccount, useReadContract, useSimulateContract } from "wagmi";
 import { potatoFeeLockerAbi, potatoPadAbi } from "@/lib/abi";
 import { PAD_ADDRESSES, ZERO_ADDRESS } from "@/lib/config";
 import { usePad, useTx } from "@/lib/hooks";
-import { formatEth } from "@/lib/format";
+import { formatEth, shortAddress } from "@/lib/format";
 import { useAccruedFees } from "@/lib/pool";
+import { AddressChip } from "@/components/AddressChip";
 import { TxStatus } from "@/components/TxStatus";
 
 type ClaimAsset = "weth" | "token";
@@ -87,6 +88,7 @@ export function HarvestCard({
   const collectTx = useTx();
   const claimWethTx = useTx();
   const claimTokenTx = useTx();
+  const setRecipientTx = useTx();
   const accrued = useAccruedFees(lpTokenId, pool, pad);
 
   const { data: locker } = useReadContract({
@@ -99,6 +101,39 @@ export function HarvestCard({
   const lockerAddr = (locker as Address | undefined) ?? ZERO_ADDRESS;
   const lockerReady = lockerAddr !== ZERO_ADDRESS;
   const tokenReady = token !== ZERO_ADDRESS;
+  const isCreator = !!user && user.toLowerCase() === creator.toLowerCase();
+
+  // Resolved fee destination (override if set, else original creator). Present on
+  // all lockers that have feeRecipient plumbing.
+  const {
+    data: beneficiary,
+    refetch: refetchBeneficiary,
+  } = useReadContract({
+    address: lockerAddr,
+    abi: potatoFeeLockerAbi,
+    functionName: "beneficiaryOf",
+    args: [lpTokenId],
+    query: { enabled: lockerReady && lpTokenId > 0n },
+  });
+
+  // Feature-detect setFeeRecipient: legacy lockers lack the selector and
+  // simulation fails with "function does not exist". Hide the control then —
+  // no error UI for old pads. On supporting lockers the creator can dry-run a
+  // no-op reset (to address(0)).
+  const { isSuccess: supportsSetFeeRecipient } = useSimulateContract({
+    address: lockerAddr,
+    abi: potatoFeeLockerAbi,
+    functionName: "setFeeRecipient",
+    args: [lpTokenId, ZERO_ADDRESS],
+    account: user,
+    query: {
+      enabled: isCreator && lockerReady && !!user && lpTokenId > 0n,
+      retry: false,
+    },
+  });
+
+  const [destInput, setDestInput] = useState("");
+  const [destErr, setDestErr] = useState("");
 
   const {
     data: creatorClaimableWeth,
@@ -123,8 +158,6 @@ export function HarvestCard({
     args: [token, creator],
     query: { enabled: lockerReady && tokenReady },
   });
-
-  const isCreator = !!user && user.toLowerCase() === creator.toLowerCase();
 
   const claimableWeth = (creatorClaimableWeth as bigint | undefined) ?? 0n;
   const claimableToken = (creatorClaimableToken as bigint | undefined) ?? 0n;
@@ -177,11 +210,39 @@ export function HarvestCard({
     collectTx.busy ||
     claimWethTx.busy ||
     claimTokenTx.busy ||
+    setRecipientTx.busy ||
     flow.kind === "await_claimables" ||
     flow.kind === "claiming";
 
   const nothingToDo = !hasUncollected && !(isCreator && hasClaimable);
   const disabled = !lockerReady || busy || nothingToDo;
+
+  // After a successful setFeeRecipient, refresh the resolved beneficiary.
+  useEffect(() => {
+    if (setRecipientTx.confirmed) {
+      void refetchBeneficiary();
+    }
+  }, [setRecipientTx.confirmed, refetchBeneficiary]);
+
+  function saveFeeDestination() {
+    setDestErr("");
+    const raw = destInput.trim();
+    // Empty input = reset to original creator (on-chain address(0)).
+    let to: Address = ZERO_ADDRESS;
+    if (raw !== "") {
+      if (!isAddress(raw)) {
+        setDestErr("Enter a valid 0x address, or leave blank to reset.");
+        return;
+      }
+      to = getAddress(raw);
+    }
+    setRecipientTx.writeContract({
+      address: lockerAddr,
+      abi: potatoFeeLockerAbi,
+      functionName: "setFeeRecipient",
+      args: [lpTokenId, to],
+    });
+  }
 
   const writeClaim = useCallback(
     (asset: ClaimAsset, expectedCtx: FlowCtx, epoch: number) => {
@@ -432,6 +493,61 @@ export function HarvestCard({
         <TxStatus tx={claimWethTx} chainId={chainId} successLabel="Claimed your WETH fees!" />
         <TxStatus tx={claimTokenTx} chainId={chainId} successLabel={`Claimed your ${symbol} fees!`} />
       </div>
+
+      {/* Fee destination: shown for every token that has a beneficiary; edit only
+          for the creator on lockers that support setFeeRecipient (feature-detected). */}
+      {beneficiary !== undefined && (
+        <div className="mt-3 rounded-lg border border-neutral-800 bg-neutral-950 p-3">
+          <p className="text-xs text-neutral-500">Fee destination</p>
+          <div className="mt-1 flex flex-wrap items-center gap-2">
+            <AddressChip address={beneficiary as string} chainId={chainId} />
+            {(beneficiary as string).toLowerCase() === creator.toLowerCase() ? (
+              <span className="text-[11px] text-neutral-600">creator wallet</span>
+            ) : (
+              <span className="text-[11px] text-neutral-600">
+                redirected from {shortAddress(creator)}
+              </span>
+            )}
+          </div>
+
+          {isCreator && supportsSetFeeRecipient && (
+            <div className="mt-3 border-t border-neutral-900 pt-3">
+              <p className="text-[11px] text-neutral-600">
+                Point future fees at any wallet (community, buyback, charity). Accrued
+                fees stay with the current destination; only future fees move. Leave
+                blank and save to reset to your creator wallet.
+              </p>
+              <div className="mt-2 flex gap-2">
+                <input
+                  type="text"
+                  value={destInput}
+                  onChange={(e) => {
+                    setDestInput(e.target.value);
+                    setDestErr("");
+                  }}
+                  placeholder="0x… or blank to reset"
+                  spellCheck={false}
+                  className="min-w-0 flex-1 rounded-lg border border-neutral-800 bg-black px-2.5 py-1.5 font-mono text-xs text-neutral-100 placeholder-neutral-700 outline-none focus:border-neutral-600"
+                />
+                <button
+                  type="button"
+                  className="btn-secondary shrink-0 px-3 py-1.5 text-xs"
+                  disabled={busy || !lockerReady}
+                  onClick={saveFeeDestination}
+                >
+                  {setRecipientTx.busy ? "Saving…" : "Save"}
+                </button>
+              </div>
+              {destErr && <p className="mt-1.5 text-[11px] text-red-400">{destErr}</p>}
+              <TxStatus
+                tx={setRecipientTx}
+                chainId={chainId}
+                successLabel="Fee destination updated. Future fees will go there."
+              />
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

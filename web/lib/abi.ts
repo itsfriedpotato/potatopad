@@ -2308,6 +2308,11 @@ export const potatoFeeLockerAbi = [
   },
   {
     "inputs": [],
+    "name": "OnlyCreator",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "OnlyOwner",
     "type": "error"
   },
@@ -2641,6 +2646,40 @@ export const potatoFeeLockerAbi = [
     "inputs": [
       {
         "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "collectAndClaim",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "collected0",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "collected1",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paid0",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paid1",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
         "name": "",
         "type": "uint256"
       }
@@ -2818,6 +2857,24 @@ export const potatoFeeLockerAbi = [
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "to",
+        "type": "address"
+      }
+    ],
+    "name": "setFeeRecipient",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
