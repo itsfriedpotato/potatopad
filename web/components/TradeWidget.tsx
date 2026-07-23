@@ -12,7 +12,7 @@ import {
   ZERO_ADDRESS,
   uniswapSwapUrl,
 } from "@/lib/config";
-import { quoterV2Abi, swapRouter02Abi } from "@/lib/pool";
+import { ROUTER_ADDRESS_THIS, quoterV2Abi, swapRouter02Abi } from "@/lib/pool";
 import { usePad, useTx } from "@/lib/hooks";
 import { formatEth, formatTokens, tryParseEther, withSlippage } from "@/lib/format";
 import { AddressChip } from "@/components/AddressChip";
@@ -246,6 +246,9 @@ export function TradeWidget({
 
   async function onSell() {
     if (amount === undefined || !user || minOut === 0n || !router || exceedsBalance) return;
+    // Swap output stays IN the router (ADDRESS_THIS sentinel), then unwrapWETH9
+    // in the same multicall pays the user native ETH instead of the WETH ERC-20
+    // they'd otherwise have to unwrap by hand.
     const swapData = encodeFunctionData({
       abi: swapRouter02Abi,
       functionName: "exactInputSingle",
@@ -254,19 +257,24 @@ export function TradeWidget({
           tokenIn: token,
           tokenOut: weth,
           fee: feeTier,
-          recipient: user,
+          recipient: ROUTER_ADDRESS_THIS,
           amountIn: amount,
           amountOutMinimum: minOut,
           sqrtPriceLimitX96: 0n,
         },
       ],
     });
+    const unwrapData = encodeFunctionData({
+      abi: swapRouter02Abi,
+      functionName: "unwrapWETH9",
+      args: [minOut, user],
+    });
     // Wrap in the deadline-checked multicall so the tx can't be mined late.
     sellTx.writeContract({
       address: router,
       abi: swapRouter02Abi,
       functionName: "multicall",
-      args: [swapDeadline(await chainNow()), [swapData]],
+      args: [swapDeadline(await chainNow()), [swapData, unwrapData]],
     });
   }
 
@@ -402,7 +410,7 @@ export function TradeWidget({
                   ? "…"
                   : mode === "buy"
                     ? `${formatTokens(amountOut)} ${symbol}`
-                    : `${formatEth(amountOut)} WETH`}
+                    : `${formatEth(amountOut)} ETH`}
             </dd>
           </div>
           <div className="flex items-center justify-between">
@@ -431,7 +439,7 @@ export function TradeWidget({
                 ? "-"
                 : mode === "buy"
                   ? `${formatTokens(minOut)} ${symbol}`
-                  : `${formatEth(minOut)} WETH`}
+                  : `${formatEth(minOut)} ETH`}
             </dd>
           </div>
         </dl>

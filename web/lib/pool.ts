@@ -118,7 +118,24 @@ export const swapRouter02Abi = [
     stateMutability: "payable",
     type: "function",
   },
+  {
+    inputs: [
+      { internalType: "uint256", name: "amountMinimum", type: "uint256" },
+      { internalType: "address", name: "recipient", type: "address" },
+    ],
+    name: "unwrapWETH9",
+    outputs: [],
+    stateMutability: "payable",
+    type: "function",
+  },
 ] as const;
+
+/**
+ * SwapRouter02's sentinel recipient meaning "keep the output in the router",
+ * so a follow-up call in the same multicall (unwrapWETH9) can pay it out as
+ * native ETH.
+ */
+export const ROUTER_ADDRESS_THIS = "0x0000000000000000000000000000000000000002" as const;
 
 /**
  * QuoterV2 quoteExactInputSingle. Marked `view` here so wagmi's read hooks
