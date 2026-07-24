@@ -7,7 +7,10 @@ import { getAddress, isAddress } from "viem";
 import { useReadContracts } from "wagmi";
 import { potatoTokenAbi } from "@/lib/abi";
 import { ZERO_ADDRESS } from "@/lib/config";
+import type { Hex } from "viem";
 import { useAncientTokens } from "@/lib/ancient";
+
+const ZERO_POOL_ID = "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex;
 import { usePad, useTokenPad } from "@/lib/hooks";
 import { useCurveStats, usePoolStats } from "@/lib/pool";
 import { formatUsd } from "@/lib/format";
@@ -44,8 +47,14 @@ export default function TokenPageClient() {
   const creator = resolved.creator;
   const lpTokenId = resolved.lpTokenId;
   // Effective Uniswap pool: curve and direct tokens both have a live pool from
-  // creation; ancient tokens use their pre-existing trade pool.
+  // creation; ancient tokens use their pre-existing trade pool. V3 tokens carry a
+  // pool ADDRESS; V4 tokens carry a pool ID — the data layer routes on both.
   const pool = isAncient && ancient ? ancient.tradePool : resolved.pool;
+  const poolId = resolved.poolId;
+  // The pool's quote currency — WETH for a standard launch, a custom ERC-20 when
+  // holders are rewarded in (and the token is priced in) another token.
+  const quote = resolved.quote;
+  const hasPool = pool !== ZERO_ADDRESS || poolId !== ZERO_POOL_ID;
 
   // Queries are disabled unless the address is valid; ZERO_ADDRESS is a typed placeholder.
   const queryToken = token ?? ZERO_ADDRESS;
@@ -64,7 +73,12 @@ export default function TokenPageClient() {
   // Price / market cap / liquidity from the Uniswap pool. Curve tokens have a
   // live pool from block one, so this is continuous across migration; {curve}
   // only supplies the migration flag + progress for the curve UI.
-  const poolStats = usePoolStats(token, pool !== ZERO_ADDRESS ? pool : undefined);
+  const poolStats = usePoolStats(
+    token,
+    pool !== ZERO_ADDRESS ? pool : undefined,
+    poolId !== ZERO_POOL_ID ? poolId : undefined,
+    quote,
+  );
   const priceWeth = poolStats.priceWeth;
   const marketCapEth = poolStats.marketCapEth;
   const liquidityProxy = poolStats.wethInPool;
@@ -233,11 +247,12 @@ export default function TokenPageClient() {
         <TokenChart
           token={token}
           pool={pool}
+          poolId={poolId}
           isCurve={isCurve}
           bonded={resolved.bonded}
           progressBps={curve.progressBps}
         />
-        <ActivityTabs token={token} creator={creator} pool={pool} />
+        <ActivityTabs token={token} creator={creator} pool={pool} poolId={poolId} />
       </div>
 
       {/* RIGHT (1/3) */}
@@ -249,6 +264,8 @@ export default function TokenPageClient() {
           token={token}
           symbol={symbol}
           pool={pool}
+          poolId={poolId}
+          quote={quote}
           isCurve={isCurve}
           bonded={resolved.bonded}
         />

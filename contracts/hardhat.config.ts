@@ -10,13 +10,18 @@ const config: HardhatUserConfig = {
     settings: {
       optimizer: { enabled: true, runs: 200 },
       viaIR: true,
+      // Uniswap V4 uses transient storage (tstore/tload); Cancun is required for
+      // the imported v4-core libraries to compile and run.
+      evmVersion: "cancun",
     },
   },
   networks: {
     hardhat: {
-      // Uniswap V3 pool creation is gas-heavy; keep generous limits for the demo.
+      // Uniswap V4 pool ops are gas-heavy; keep generous limits for the demo.
       allowUnlimitedContractSize: false,
       blockGasLimit: 30_000_000,
+      // The in-process EVM must support transient storage for the V4 singleton.
+      hardfork: "cancun",
     },
     baseSepolia: {
       url: process.env.BASE_SEPOLIA_RPC_URL || "https://sepolia.base.org",

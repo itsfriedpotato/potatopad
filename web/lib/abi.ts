@@ -27,13 +27,8 @@ export const potatoPadAbi = [
         "type": "uint256"
       },
       {
-        "internalType": "contract IUniswapV3Factory",
-        "name": "v3Factory_",
-        "type": "address"
-      },
-      {
-        "internalType": "contract INonfungiblePositionManager",
-        "name": "positionManager_",
+        "internalType": "contract IPoolManager",
+        "name": "manager_",
         "type": "address"
       },
       {
@@ -77,11 +72,6 @@ export const potatoPadAbi = [
   },
   {
     "inputs": [],
-    "name": "NotSingleSided",
-    "type": "error"
-  },
-  {
-    "inputs": [],
     "name": "OnlyOwner",
     "type": "error"
   },
@@ -99,11 +89,6 @@ export const potatoPadAbi = [
       }
     ],
     "name": "SafeERC20FailedOperation",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "SeedFailed",
     "type": "error"
   },
   {
@@ -177,9 +162,9 @@ export const potatoPadAbi = [
       },
       {
         "indexed": true,
-        "internalType": "address",
-        "name": "pool",
-        "type": "address"
+        "internalType": "bytes32",
+        "name": "poolId",
+        "type": "bytes32"
       },
       {
         "indexed": false,
@@ -282,9 +267,9 @@ export const potatoPadAbi = [
       },
       {
         "indexed": false,
-        "internalType": "address",
-        "name": "pool",
-        "type": "address"
+        "internalType": "bytes32",
+        "name": "poolId",
+        "type": "bytes32"
       },
       {
         "indexed": false,
@@ -517,6 +502,11 @@ export const potatoPadAbi = [
         "internalType": "uint16",
         "name": "creatorFeeBps",
         "type": "uint16"
+      },
+      {
+        "internalType": "address",
+        "name": "quote",
+        "type": "address"
       }
     ],
     "name": "createRewardToken",
@@ -573,6 +563,11 @@ export const potatoPadAbi = [
         "internalType": "bytes32",
         "name": "salt",
         "type": "bytes32"
+      },
+      {
+        "internalType": "address",
+        "name": "quote",
+        "type": "address"
       }
     ],
     "name": "createToken",
@@ -625,10 +620,10 @@ export const potatoPadAbi = [
   },
   {
     "inputs": [],
-    "name": "owner",
+    "name": "manager",
     "outputs": [
       {
-        "internalType": "address",
+        "internalType": "contract IPoolManager",
         "name": "",
         "type": "address"
       }
@@ -638,10 +633,10 @@ export const potatoPadAbi = [
   },
   {
     "inputs": [],
-    "name": "positionManager",
+    "name": "owner",
     "outputs": [
       {
-        "internalType": "contract INonfungiblePositionManager",
+        "internalType": "address",
         "name": "",
         "type": "address"
       }
@@ -785,14 +780,19 @@ export const potatoPadAbi = [
         "type": "address"
       },
       {
-        "internalType": "address",
-        "name": "pool",
-        "type": "address"
+        "internalType": "PoolId",
+        "name": "poolId",
+        "type": "bytes32"
       },
       {
         "internalType": "uint256",
         "name": "lpTokenId",
         "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "quote",
+        "type": "address"
       }
     ],
     "stateMutability": "view",
@@ -827,37 +827,20 @@ export const potatoPadAbi = [
   {
     "inputs": [
       {
-        "internalType": "int256",
-        "name": "amount0Delta",
-        "type": "int256"
-      },
-      {
-        "internalType": "int256",
-        "name": "amount1Delta",
-        "type": "int256"
-      },
-      {
         "internalType": "bytes",
         "name": "data",
         "type": "bytes"
       }
     ],
-    "name": "uniswapV3SwapCallback",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "v3Factory",
+    "name": "unlockCallback",
     "outputs": [
       {
-        "internalType": "contract IUniswapV3Factory",
+        "internalType": "bytes",
         "name": "",
-        "type": "address"
+        "type": "bytes"
       }
     ],
-    "stateMutability": "view",
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -904,7 +887,7 @@ export const potatoTokenAbi = [
       },
       {
         "internalType": "address",
-        "name": "positionManager_",
+        "name": "poolManager_",
         "type": "address"
       },
       {
@@ -1015,16 +998,6 @@ export const potatoTokenAbi = [
   {
     "inputs": [],
     "name": "MaxWalletExceeded",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "OnlyPad",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "PoolAlreadySet",
     "type": "error"
   },
   {
@@ -1243,7 +1216,7 @@ export const potatoTokenAbi = [
   },
   {
     "inputs": [],
-    "name": "pool",
+    "name": "poolManager",
     "outputs": [
       {
         "internalType": "address",
@@ -1252,19 +1225,6 @@ export const potatoTokenAbi = [
       }
     ],
     "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "pool_",
-        "type": "address"
-      }
-    ],
-    "name": "setPool",
-    "outputs": [],
-    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -1373,7 +1333,7 @@ export const potatoRewardTokenAbi = [
       },
       {
         "internalType": "address",
-        "name": "positionManager_",
+        "name": "poolManager_",
         "type": "address"
       },
       {
@@ -1394,6 +1354,11 @@ export const potatoRewardTokenAbi = [
       {
         "internalType": "address",
         "name": "weth_",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "quote_",
         "type": "address"
       }
     ],
@@ -1509,11 +1474,6 @@ export const potatoRewardTokenAbi = [
   {
     "inputs": [],
     "name": "OnlyPad",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "PoolAlreadySet",
     "type": "error"
   },
   {
@@ -1759,6 +1719,11 @@ export const potatoRewardTokenAbi = [
         "type": "uint256"
       },
       {
+        "internalType": "bytes32",
+        "name": "poolId_",
+        "type": "bytes32"
+      },
+      {
         "internalType": "uint128",
         "name": "liquidity_",
         "type": "uint128"
@@ -1775,7 +1740,7 @@ export const potatoRewardTokenAbi = [
       },
       {
         "internalType": "bool",
-        "name": "wethIsToken0_",
+        "name": "quoteIsToken0_",
         "type": "bool"
       },
       {
@@ -1972,6 +1937,19 @@ export const potatoRewardTokenAbi = [
     "type": "function"
   },
   {
+    "inputs": [],
+    "name": "payAsEth",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [
       {
         "internalType": "address",
@@ -1992,7 +1970,20 @@ export const potatoRewardTokenAbi = [
   },
   {
     "inputs": [],
-    "name": "pool",
+    "name": "poolId",
+    "outputs": [
+      {
+        "internalType": "PoolId",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "poolManager",
     "outputs": [
       {
         "internalType": "address",
@@ -2056,6 +2047,32 @@ export const potatoRewardTokenAbi = [
     "type": "function"
   },
   {
+    "inputs": [],
+    "name": "quoteIsToken0",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "rewardAsset",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [
       {
         "internalType": "address",
@@ -2104,19 +2121,6 @@ export const potatoRewardTokenAbi = [
       }
     ],
     "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "pool_",
-        "type": "address"
-      }
-    ],
-    "name": "setPool",
-    "outputs": [],
-    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -2251,19 +2255,6 @@ export const potatoRewardTokenAbi = [
     "type": "function"
   },
   {
-    "inputs": [],
-    "name": "wethIsToken0",
-    "outputs": [
-      {
-        "internalType": "bool",
-        "name": "",
-        "type": "bool"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
     "stateMutability": "payable",
     "type": "receive"
   }
@@ -2273,8 +2264,8 @@ export const potatoFeeLockerAbi = [
   {
     "inputs": [
       {
-        "internalType": "contract INonfungiblePositionManager",
-        "name": "positionManager_",
+        "internalType": "contract IPoolManager",
+        "name": "manager_",
         "type": "address"
       },
       {
@@ -2303,6 +2294,11 @@ export const potatoFeeLockerAbi = [
   },
   {
     "inputs": [],
+    "name": "NotSingleSided",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "NothingToClaim",
     "type": "error"
   },
@@ -2324,12 +2320,38 @@ export const potatoFeeLockerAbi = [
   {
     "inputs": [
       {
+        "internalType": "uint8",
+        "name": "bits",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint256",
+        "name": "value",
+        "type": "uint256"
+      }
+    ],
+    "name": "SafeCastOverflowedUintDowncast",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "address",
         "name": "token",
         "type": "address"
       }
     ],
     "name": "SafeERC20FailedOperation",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "SeedFailed",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "UnexpectedCallback",
     "type": "error"
   },
   {
@@ -2368,7 +2390,7 @@ export const potatoFeeLockerAbi = [
       {
         "indexed": true,
         "internalType": "uint256",
-        "name": "tokenId",
+        "name": "positionId",
         "type": "uint256"
       },
       {
@@ -2399,7 +2421,7 @@ export const potatoFeeLockerAbi = [
       {
         "indexed": true,
         "internalType": "uint256",
-        "name": "tokenId",
+        "name": "positionId",
         "type": "uint256"
       },
       {
@@ -2462,7 +2484,7 @@ export const potatoFeeLockerAbi = [
       {
         "indexed": true,
         "internalType": "uint256",
-        "name": "tokenId",
+        "name": "positionId",
         "type": "uint256"
       },
       {
@@ -2555,7 +2577,7 @@ export const potatoFeeLockerAbi = [
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "tokenId",
+        "name": "positionId",
         "type": "uint256"
       }
     ],
@@ -2617,7 +2639,7 @@ export const potatoFeeLockerAbi = [
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "tokenId",
+        "name": "positionId",
         "type": "uint256"
       }
     ],
@@ -2631,6 +2653,40 @@ export const potatoFeeLockerAbi = [
       {
         "internalType": "uint256",
         "name": "amount1",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "positionId",
+        "type": "uint256"
+      }
+    ],
+    "name": "collectAndClaim",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "collected0",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "collected1",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paid0",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "paid1",
         "type": "uint256"
       }
     ],
@@ -2657,37 +2713,29 @@ export const potatoFeeLockerAbi = [
     "type": "function"
   },
   {
-    "inputs": [
+    "inputs": [],
+    "name": "manager",
+    "outputs": [
       {
-        "internalType": "address",
+        "internalType": "contract IPoolManager",
         "name": "",
         "type": "address"
-      },
-      {
-        "internalType": "address",
-        "name": "",
-        "type": "address"
-      },
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "nextPositionId",
+    "outputs": [
       {
         "internalType": "uint256",
         "name": "",
         "type": "uint256"
-      },
-      {
-        "internalType": "bytes",
-        "name": "",
-        "type": "bytes"
       }
     ],
-    "name": "onERC721Received",
-    "outputs": [
-      {
-        "internalType": "bytes4",
-        "name": "",
-        "type": "bytes4"
-      }
-    ],
-    "stateMutability": "pure",
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -2704,13 +2752,19 @@ export const potatoFeeLockerAbi = [
     "type": "function"
   },
   {
-    "inputs": [],
-    "name": "positionManager",
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "positionId",
+        "type": "uint256"
+      }
+    ],
+    "name": "poolIdOf",
     "outputs": [
       {
-        "internalType": "contract INonfungiblePositionManager",
+        "internalType": "bytes32",
         "name": "",
-        "type": "address"
+        "type": "bytes32"
       }
     ],
     "stateMutability": "view",
@@ -2732,13 +2786,43 @@ export const potatoFeeLockerAbi = [
         "type": "address"
       },
       {
-        "internalType": "address",
-        "name": "token0",
+        "internalType": "Currency",
+        "name": "currency0",
         "type": "address"
       },
       {
+        "internalType": "Currency",
+        "name": "currency1",
+        "type": "address"
+      },
+      {
+        "internalType": "uint24",
+        "name": "fee",
+        "type": "uint24"
+      },
+      {
+        "internalType": "int24",
+        "name": "tickSpacing",
+        "type": "int24"
+      },
+      {
+        "internalType": "int24",
+        "name": "tickLower",
+        "type": "int24"
+      },
+      {
+        "internalType": "int24",
+        "name": "tickUpper",
+        "type": "int24"
+      },
+      {
+        "internalType": "uint128",
+        "name": "liquidity",
+        "type": "uint128"
+      },
+      {
         "internalType": "address",
-        "name": "token1",
+        "name": "quote",
         "type": "address"
       }
     ],
@@ -2749,7 +2833,7 @@ export const potatoFeeLockerAbi = [
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "tokenId",
+        "name": "positionId",
         "type": "uint256"
       },
       {
@@ -2759,39 +2843,6 @@ export const potatoFeeLockerAbi = [
       }
     ],
     "name": "redirectFees",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "address",
-        "name": "launchedToken",
-        "type": "address"
-      },
-      {
-        "internalType": "address",
-        "name": "creator",
-        "type": "address"
-      },
-      {
-        "internalType": "address",
-        "name": "rewardToken",
-        "type": "address"
-      },
-      {
-        "internalType": "uint16",
-        "name": "creatorBps",
-        "type": "uint16"
-      }
-    ],
-    "name": "register",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -2821,6 +2872,92 @@ export const potatoFeeLockerAbi = [
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "components": [
+          {
+            "internalType": "Currency",
+            "name": "currency0",
+            "type": "address"
+          },
+          {
+            "internalType": "Currency",
+            "name": "currency1",
+            "type": "address"
+          },
+          {
+            "internalType": "uint24",
+            "name": "fee",
+            "type": "uint24"
+          },
+          {
+            "internalType": "int24",
+            "name": "tickSpacing",
+            "type": "int24"
+          },
+          {
+            "internalType": "contract IHooks",
+            "name": "hooks",
+            "type": "address"
+          }
+        ],
+        "internalType": "struct PoolKey",
+        "name": "key",
+        "type": "tuple"
+      },
+      {
+        "internalType": "int24",
+        "name": "tickLower",
+        "type": "int24"
+      },
+      {
+        "internalType": "int24",
+        "name": "tickUpper",
+        "type": "int24"
+      },
+      {
+        "internalType": "address",
+        "name": "launchedToken",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "creator",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "rewardToken",
+        "type": "address"
+      },
+      {
+        "internalType": "uint16",
+        "name": "creatorBps",
+        "type": "uint16"
+      }
+    ],
+    "name": "seedSingleSided",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "positionId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint128",
+        "name": "liquidity",
+        "type": "uint128"
+      },
+      {
+        "internalType": "uint256",
+        "name": "tokenSeeded",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "treasury",
     "outputs": [
@@ -2831,6 +2968,25 @@ export const potatoFeeLockerAbi = [
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes",
+        "name": "data",
+        "type": "bytes"
+      }
+    ],
+    "name": "unlockCallback",
+    "outputs": [
+      {
+        "internalType": "bytes",
+        "name": "",
+        "type": "bytes"
+      }
+    ],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -2877,13 +3033,8 @@ export const potatoCurvePadAbi = [
         "type": "uint256"
       },
       {
-        "internalType": "contract IUniswapV3Factory",
-        "name": "v3Factory_",
-        "type": "address"
-      },
-      {
-        "internalType": "contract INonfungiblePositionManager",
-        "name": "positionManager_",
+        "internalType": "contract IPoolManager",
+        "name": "manager_",
         "type": "address"
       },
       {
@@ -2942,11 +3093,6 @@ export const potatoCurvePadAbi = [
   },
   {
     "inputs": [],
-    "name": "NotSingleSided",
-    "type": "error"
-  },
-  {
-    "inputs": [],
     "name": "OnlyOwner",
     "type": "error"
   },
@@ -2964,11 +3110,6 @@ export const potatoCurvePadAbi = [
       }
     ],
     "name": "SafeERC20FailedOperation",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "SeedFailed",
     "type": "error"
   },
   {
@@ -3016,9 +3157,9 @@ export const potatoCurvePadAbi = [
       },
       {
         "indexed": true,
-        "internalType": "address",
-        "name": "pool",
-        "type": "address"
+        "internalType": "bytes32",
+        "name": "poolId",
+        "type": "bytes32"
       },
       {
         "indexed": false,
@@ -3041,9 +3182,9 @@ export const potatoCurvePadAbi = [
       },
       {
         "indexed": true,
-        "internalType": "address",
-        "name": "pool",
-        "type": "address"
+        "internalType": "bytes32",
+        "name": "poolId",
+        "type": "bytes32"
       },
       {
         "indexed": false,
@@ -3171,9 +3312,9 @@ export const potatoCurvePadAbi = [
       },
       {
         "indexed": false,
-        "internalType": "address",
-        "name": "pool",
-        "type": "address"
+        "internalType": "bytes32",
+        "name": "poolId",
+        "type": "bytes32"
       },
       {
         "indexed": false,
@@ -3425,6 +3566,11 @@ export const potatoCurvePadAbi = [
         "internalType": "uint16",
         "name": "creatorFeeBps",
         "type": "uint16"
+      },
+      {
+        "internalType": "address",
+        "name": "quote",
+        "type": "address"
       }
     ],
     "name": "createRewardToken",
@@ -3481,6 +3627,11 @@ export const potatoCurvePadAbi = [
         "internalType": "bytes32",
         "name": "salt",
         "type": "bytes32"
+      },
+      {
+        "internalType": "address",
+        "name": "quote",
+        "type": "address"
       }
     ],
     "name": "createToken",
@@ -3529,9 +3680,9 @@ export const potatoCurvePadAbi = [
         "type": "address"
       },
       {
-        "internalType": "address",
-        "name": "pool",
-        "type": "address"
+        "internalType": "PoolId",
+        "name": "poolId",
+        "type": "bytes32"
       },
       {
         "internalType": "uint256",
@@ -3542,6 +3693,11 @@ export const potatoCurvePadAbi = [
         "internalType": "bool",
         "name": "bonded",
         "type": "bool"
+      },
+      {
+        "internalType": "address",
+        "name": "quote",
+        "type": "address"
       }
     ],
     "stateMutability": "view",
@@ -3586,10 +3742,10 @@ export const potatoCurvePadAbi = [
   },
   {
     "inputs": [],
-    "name": "owner",
+    "name": "manager",
     "outputs": [
       {
-        "internalType": "address",
+        "internalType": "contract IPoolManager",
         "name": "",
         "type": "address"
       }
@@ -3599,10 +3755,10 @@ export const potatoCurvePadAbi = [
   },
   {
     "inputs": [],
-    "name": "positionManager",
+    "name": "owner",
     "outputs": [
       {
-        "internalType": "contract INonfungiblePositionManager",
+        "internalType": "address",
         "name": "",
         "type": "address"
       }
@@ -3759,37 +3915,20 @@ export const potatoCurvePadAbi = [
   {
     "inputs": [
       {
-        "internalType": "int256",
-        "name": "amount0Delta",
-        "type": "int256"
-      },
-      {
-        "internalType": "int256",
-        "name": "amount1Delta",
-        "type": "int256"
-      },
-      {
         "internalType": "bytes",
         "name": "data",
         "type": "bytes"
       }
     ],
-    "name": "uniswapV3SwapCallback",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "v3Factory",
+    "name": "unlockCallback",
     "outputs": [
       {
-        "internalType": "contract IUniswapV3Factory",
+        "internalType": "bytes",
         "name": "",
-        "type": "address"
+        "type": "bytes"
       }
     ],
-    "stateMutability": "view",
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {

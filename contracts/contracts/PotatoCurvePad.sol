@@ -6,8 +6,15 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-// PotatoToken is imported for the `setPool` cast only. The token CREATION bytecode
-// lives in {PotatoTokenFactory} — see there for why (EIP-170).
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
+import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {BalanceDelta, BalanceDeltaLibrary} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
+
 import {PotatoToken} from "./PotatoToken.sol";
 import {PotatoFeeLocker} from "./PotatoFeeLocker.sol";
 import {PotatoTokenFactory} from "./PotatoTokenFactory.sol";
@@ -15,26 +22,35 @@ import {PotatoTokenFactory} from "./PotatoTokenFactory.sol";
 // full reward token risks the EIP-170 size ceiling.
 import {IPotatoRewardTokenBind} from "./interfaces/IPotatoRewardTokenBind.sol";
 import {TickMath} from "./libraries/TickMath.sol";
-import {
-    IUniswapV3Factory,
-    IUniswapV3Pool,
-    INonfungiblePositionManager,
-    IWETH9
-} from "./interfaces/IUniswapV3.sol";
+import {V4SingleSided} from "./libraries/V4SingleSided.sol";
+import {IWETH9} from "./interfaces/IWETH9.sol";
 
-/// @title PotatoCurvePad (single-sided-v3 bonding curve, 100% in Uniswap)
-/// @notice A launchpad whose bonding curve IS a single-sided Uniswap V3 position
-///         holding the wholel supply.
-contract PotatoCurvePad is ReentrancyGuard {
+/// @title PotatoCurvePad (single-sided-V4 bonding curve, 100% in Uniswap)
+/// @notice A launchpad whose bonding curve IS a single-sided Uniswap V4 position
+///         holding the whole supply. Same locked-forever, unruggable, fees-for-life
+///         economics as {PotatoPad}, but the position spans the full range above the
+///         open price, so it never "runs out": the curve keeps selling past the bond
+///         milestone. `bond()` latches a progress flag once the price crosses the
+///         bond tick — no funds move, the LP is already locked from launch.
+///
+///         Ported to Uniswap V4: pool ops run against the singleton inside `unlock`
+///         callbacks, the single-sided mint is delegated to the {PotatoFeeLocker}
+///         (which owns the position), and price/progress are read from the manager
+///         by pool id.
+contract PotatoCurvePad is IUnlockCallback, ReentrancyGuard {
     using SafeERC20 for IERC20;
+    using StateLibrary for IPoolManager;
+    using PoolIdLibrary for PoolKey;
+    using BalanceDeltaLibrary for BalanceDelta;
 
     // types
 
     struct CurveInfo {
         address creator;
-        address pool;
+        PoolId poolId;
         uint256 positionId; // the single-sided position (the curve AND the LP)
         bool bonded; // if bonded or not
+        address quote; // the pool's quote currency (WETH by default; a custom ERC-20 otherwise)
     }
 
     /// @notice Metadata
@@ -61,8 +77,8 @@ contract PotatoCurvePad is ReentrancyGuard {
 
     uint256 public constant TOTAL_SUPPLY = 1_000_000_000e18;
 
-    uint24 public constant POOL_FEE = 10_000; // Uniswap V3 1% fee tier
-    int24 public constant TICK_SPACING = 200; // tick spacing of the 1% tier
+    uint24 public constant POOL_FEE = 10_000; // 1% LP fee
+    int24 public constant TICK_SPACING = 200; // tick spacing paired with the 1% fee
 
     uint256 internal constant BPS = 10_000;
 
@@ -89,8 +105,9 @@ contract PotatoCurvePad is ReentrancyGuard {
 
     uint256 public immutable antiSnipeBlocks;
 
-    IUniswapV3Factory public immutable v3Factory;
-    INonfungiblePositionManager public immutable positionManager;
+    /// @notice The Uniswap V4 singleton — pool custody, initialize, swap, and
+    ///         (via the locker) liquidity all live here.
+    IPoolManager public immutable manager;
     IWETH9 public immutable weth;
     PotatoFeeLocker public immutable locker;
     /// @notice Deploys launch tokens on this pad's behalf, and the CREATE2 deployer
@@ -118,9 +135,6 @@ contract PotatoCurvePad is ReentrancyGuard {
     ///         anti-vampire shield for curated "ancient" runners.
     mapping(bytes32 => bool) public banned;
 
-    /// @dev Set only during a dev-buy swap, to authenticate the callback.
-    address internal _expectedPoolCallback;
-
     // - events --
 
     event TokenCreated(
@@ -128,15 +142,15 @@ contract PotatoCurvePad is ReentrancyGuard {
         address indexed creator,
         string name,
         string symbol,
-        address pool,
+        bytes32 poolId,
         string imageURI,
         string website,
         string twitter,
         string telegram
     );
-    event CurveOpened(address indexed token, address indexed pool, uint256 positionId, uint128 liquidity);
+    event CurveOpened(address indexed token, bytes32 indexed poolId, uint256 positionId, uint128 liquidity);
     event DevBuy(address indexed token, address indexed creator, uint256 ethIn, uint256 tokensOut);
-    event Bonded(address indexed token, address indexed pool, uint256 positionId);
+    event Bonded(address indexed token, bytes32 indexed poolId, uint256 positionId);
     /// @dev Emitted IN ADDITION to {TokenCreated} for holder-rewards launches, so the
     ///      existing Discover feed keeps decoding launches unchanged.
     event RewardTokenLaunched(
@@ -150,8 +164,6 @@ contract PotatoCurvePad is ReentrancyGuard {
     error InvalidConfig();
     error EthTransferFailed();
     error UnexpectedCallback();
-    error NotSingleSided();
-    error SeedFailed();
     error TickRangeInvalid();
     error LaunchGriefed();
     error UnknownToken();
@@ -177,24 +189,22 @@ contract PotatoCurvePad is ReentrancyGuard {
         uint256 startFdvWei_,
         uint256 bondFdvWei_,
         uint256 antiSnipeBlocks_,
-        IUniswapV3Factory v3Factory_,
-        INonfungiblePositionManager positionManager_,
+        IPoolManager manager_,
         IWETH9 weth_,
         address owner_,
         string[] memory initialBannedWords_
     ) {
         if (
             treasury_ == address(0) || owner_ == address(0) || startFdvWei_ == 0
-                || bondFdvWei_ <= startFdvWei_ || address(v3Factory_) == address(0)
-                || address(positionManager_) == address(0) || address(weth_) == address(0)
+                || bondFdvWei_ <= startFdvWei_ || address(manager_) == address(0)
+                || address(weth_) == address(0)
         ) revert InvalidConfig();
 
         treasury = treasury_;
         targetStartFdv = startFdvWei_;
         targetTopFdv = bondFdvWei_;
         antiSnipeBlocks = antiSnipeBlocks_;
-        v3Factory = v3Factory_;
-        positionManager = positionManager_;
+        manager = manager_;
         weth = weth_;
 
         int24 floor_ = _alignToSpacing(TickMath.getTickAtSqrtRatio(_sqrtPriceX96FromFdv(startFdvWei_)));
@@ -205,11 +215,11 @@ contract PotatoCurvePad is ReentrancyGuard {
         actualStartFdv = _fdvFromSqrtPriceX96(TickMath.getSqrtRatioAtTick(floor_));
         actualTopFdv = _fdvFromSqrtPriceX96(TickMath.getSqrtRatioAtTick(ceil_));
 
-        locker = new PotatoFeeLocker(positionManager_, weth_, treasury_);
+        locker = new PotatoFeeLocker(manager_, weth_, treasury_);
         // After the locker: the factory bakes its address into every token's
         // constructor args (the locker must be anti-snipe exempt).
         tokenFactory = new PotatoTokenFactory(
-            address(positionManager_),
+            address(manager_),
             address(locker),
             address(weth_),
             TOTAL_SUPPLY,
@@ -227,16 +237,23 @@ contract PotatoCurvePad is ReentrancyGuard {
 
     // - create curve --
 
-    /// @notice Launches a token and opens its single-sided-v3 bonding curve.
+    /// @notice Launches a token and opens its single-sided-V4 bonding curve.
     /// @param salt Fresh random entropy to make ca unique
+    /// @param quote the pool's quote/denomination currency. `address(0)` → WETH (priced
+    ///        in ETH, the standard behavior). Any other 18-decimal ERC-20 prices the
+    ///        curve in it instead. PLAIN launch — no holder rewards (use
+    ///        {createRewardToken} for those). A custom quote also forbids the ETH
+    ///        dev-buy (msg.value must be 0); 18 decimals enforced by the frontend.
     function createToken(
         string calldata name,
         string calldata symbol,
         TokenMeta calldata meta,
-        bytes32 salt
+        bytes32 salt,
+        address quote
     ) external payable nonReentrant returns (address token) {
-        return _launch(name, symbol, meta, salt, false, 0);
+        return _launch(name, symbol, meta, salt, false, 0, quote == address(0) ? address(weth) : quote);
     }
+
 
     /// @notice Launches a HOLDER-REWARDS curve token: identical to {createToken} in
     ///         every respect — same single-sided curve, same locked LP, same treasury
@@ -256,15 +273,21 @@ contract PotatoCurvePad is ReentrancyGuard {
     ///      zero while the token still advertises holder rewards everywhere it is
     ///      listed, which is a ready-made deceptive-launch vector on a permissionless
     ///      pad. Anyone wanting that split already has {createToken}.
+    /// @param quote the pool's quote currency = the asset holders are rewarded in.
+    ///        `address(0)` → WETH (holders earn ETH). Any other 18-decimal ERC-20
+    ///        pairs the curve with it, so the LP fee arrives in it and the per-share
+    ///        engine pays holders in it — no conversion. (18 decimals enforced by the
+    ///        frontend, not the pad, to keep initcode under the EIP-3860 limit.)
     function createRewardToken(
         string calldata name,
         string calldata symbol,
         TokenMeta calldata meta,
         bytes32 salt,
-        uint16 creatorFeeBps
+        uint16 creatorFeeBps,
+        address quote
     ) external payable nonReentrant returns (address token) {
         if (creatorFeeBps >= locker.CREATOR_FEE_SHARE_BPS()) revert InvalidConfig();
-        return _launch(name, symbol, meta, salt, true, creatorFeeBps);
+        return _launch(name, symbol, meta, salt, true, creatorFeeBps, quote == address(0) ? address(weth) : quote);
     }
 
     /// @dev The whole launch, shared by both entry points. `isReward` selects which
@@ -276,26 +299,29 @@ contract PotatoCurvePad is ReentrancyGuard {
         TokenMeta calldata meta,
         bytes32 salt,
         bool isReward,
-        uint16 creatorFeeBps
+        uint16 creatorFeeBps,
+        address quote
     ) internal returns (address token) {
         // Anti-vampire shield: reject blacklisted names/symbols (normalized to match
         // the client's trim().toLowerCase()) before doing any work.
         if (banned[_normHash(bytes(name))] || banned[_normHash(bytes(symbol))]) revert Banned();
+        // A custom quote can't take an ETH dev-buy (the pool isn't token/WETH).
+        if (msg.value > 0 && quote != address(weth)) revert InvalidConfig();
 
         // The token is deployed by {tokenFactory} (it carries BOTH token creation
         // bytecodes; this pad cannot embed them without breaking EIP-170), so the
         // CREATE2 address derives from the FACTORY — see {_computeTokenAddress}.
-        bytes32 initCodeHash = tokenFactory.initCodeHash(name, symbol, isReward);
+        bytes32 initCodeHash = tokenFactory.initCodeHash(name, symbol, isReward, quote);
 
         uint256 seed = uint256(keccak256(abi.encode(msg.sender, salt)));
         uint256 tries;
         address predicted;
         for (; tries < MAX_SALT_TRIES;) {
             predicted = _computeTokenAddress(bytes32(seed), initCodeHash);
-            if (
-                predicted.code.length == 0
-                    && v3Factory.getPool(predicted, address(weth), POOL_FEE) == address(0)
-            ) break;
+            (PoolKey memory candKey,) =
+                V4SingleSided.poolKeyFor(predicted, quote, POOL_FEE, TICK_SPACING);
+            (uint160 existing,,,) = manager.getSlot0(candKey.toId());
+            if (predicted.code.length == 0 && existing == 0) break;
             unchecked {
                 ++tries;
                 ++seed;
@@ -303,41 +329,63 @@ contract PotatoCurvePad is ReentrancyGuard {
         }
         if (tries == MAX_SALT_TRIES) revert LaunchGriefed();
 
-        token = tokenFactory.deploy(name, symbol, isReward, bytes32(seed));
+        token = tokenFactory.deploy(name, symbol, isReward, quote, bytes32(seed));
         // CREATE2 determinism: the deployed address is exactly the one we vetted.
         assert(token == predicted);
 
-        bool tokenIs0 = token < address(weth);
+        (PoolKey memory key, bool tokenIs0) =
+            V4SingleSided.poolKeyFor(token, quote, POOL_FEE, TICK_SPACING);
         (int24 tickLower, int24 tickUpper, int24 initTick) = _rangeFor(tokenIs0);
+        PoolId poolId = key.toId();
 
-        address pool = v3Factory.createPool(token, address(weth), POOL_FEE);
-        PotatoToken(token).setPool(pool);
-        (uint160 existing,,,,,,) = IUniswapV3Pool(pool).slot0();
-        if (existing == 0) {
-            IUniswapV3Pool(pool).initialize(TickMath.getSqrtRatioAtTick(initTick));
-        }
+        // Initialize the fresh pool at the open price (we vetted it uninitialized).
+        manager.initialize(key, TickMath.getSqrtRatioAtTick(initTick));
 
-        (uint256 positionId, uint128 liquidity) = _mintCurve(token, tokenIs0, tickLower, tickUpper);
-        // On a holder-rewards launch the token IS the reward sink: the locker pushes
-        // the holders' slice straight to it, funding what holders have accrued.
-        locker.register(positionId, token, msg.sender, isReward ? token : address(0), creatorFeeBps);
+        // Hand the whole supply to the locker and have it mint the single-sided,
+        // permanently-locked curve position.
+        uint256 supply = IERC20(token).balanceOf(address(this));
+        IERC20(token).safeTransfer(address(locker), supply);
+        (uint256 positionId, uint128 liquidity,) = locker.seedSingleSided(
+            key, tickLower, tickUpper, token, msg.sender, isReward ? token : address(0), creatorFeeBps
+        );
 
         // Hand the reward token its position so it can read fee growth directly.
         // Must come AFTER the mint (the position does not exist before it) and BEFORE
         // any dev buy, so the very first swap's fee is already accounted for.
         if (isReward) {
             IPotatoRewardTokenBind(token).bindPosition(
-                address(locker), positionId, liquidity, tickLower, tickUpper, !tokenIs0, creatorFeeBps
+                address(locker),
+                positionId,
+                PoolId.unwrap(poolId),
+                liquidity,
+                tickLower,
+                tickUpper,
+                !tokenIs0,
+                creatorFeeBps
             );
         }
 
-        curves[token] = CurveInfo({creator: msg.sender, pool: pool, positionId: positionId, bonded: false});
+        curves[token] = CurveInfo({
+            creator: msg.sender,
+            poolId: poolId,
+            positionId: positionId,
+            bonded: false,
+            quote: quote
+        });
         allTokens.push(token);
 
         emit TokenCreated(
-            token, msg.sender, name, symbol, pool, meta.imageURI, meta.website, meta.twitter, meta.telegram
+            token,
+            msg.sender,
+            name,
+            symbol,
+            PoolId.unwrap(poolId),
+            meta.imageURI,
+            meta.website,
+            meta.twitter,
+            meta.telegram
         );
-        emit CurveOpened(token, pool, positionId, liquidity);
+        emit CurveOpened(token, PoolId.unwrap(poolId), positionId, liquidity);
 
         if (isReward) {
             rewardTerms[token] = RewardTerms({enabled: true, creatorFeeBps: creatorFeeBps});
@@ -347,58 +395,24 @@ contract PotatoCurvePad is ReentrancyGuard {
         }
 
         if (msg.value > 0) {
-            _devBuy(token, pool, tokenIs0, msg.value);
+            _devBuy(token, key, tokenIs0, msg.value);
         }
-    }
-
-    function _mintCurve(address token, bool tokenIs0, int24 tickLower, int24 tickUpper)
-        internal
-        returns (uint256 tokenId, uint128 liquidity)
-    {
-        IERC20(token).forceApprove(address(positionManager), TOTAL_SUPPLY);
-        (uint256 amount0Desired, uint256 amount1Desired) =
-            tokenIs0 ? (TOTAL_SUPPLY, uint256(0)) : (uint256(0), TOTAL_SUPPLY);
-
-        uint256 used0;
-        uint256 used1;
-        (tokenId, liquidity, used0, used1) = positionManager.mint(
-            INonfungiblePositionManager.MintParams({
-                token0: tokenIs0 ? token : address(weth),
-                token1: tokenIs0 ? address(weth) : token,
-                fee: POOL_FEE,
-                tickLower: tickLower,
-                tickUpper: tickUpper,
-                amount0Desired: amount0Desired,
-                amount1Desired: amount1Desired,
-                amount0Min: 0,
-                amount1Min: 0,
-                recipient: address(locker),
-                deadline: block.timestamp
-            })
-        );
-        IERC20(token).forceApprove(address(positionManager), 0);
-
-        (uint256 tokenUsed, uint256 wethUsed) = tokenIs0 ? (used0, used1) : (used1, used0);
-        if (wethUsed != 0) revert NotSingleSided();
-        if (liquidity == 0 || tokenUsed < TOTAL_SUPPLY - TOTAL_SUPPLY / 1000) revert SeedFailed();
     }
 
     // - dev-buy --
 
-    function _devBuy(address token, address pool, bool tokenIs0, uint256 ethIn) internal {
+    function _devBuy(address token, PoolKey memory key, bool tokenIs0, uint256 ethIn) internal {
         weth.deposit{value: ethIn}();
         bool zeroForOne = !tokenIs0;
+        // Cap the dev-buy at the BOND price (not the range ceiling): a launch buy
+        // can't bond the token itself.
         uint160 sqrtLimit = TickMath.getSqrtRatioAtTick(tokenIs0 ? tickCeil : -tickCeil);
 
-        _expectedPoolCallback = pool;
-        (int256 amount0, int256 amount1) =
-            IUniswapV3Pool(pool).swap(address(this), zeroForOne, int256(ethIn), sqrtLimit, abi.encode(token));
-        _expectedPoolCallback = address(0);
+        (uint256 wethSpent, uint256 tokensOut) = abi.decode(
+            manager.unlock(abi.encode(key, zeroForOne, ethIn, sqrtLimit, tokenIs0)), (uint256, uint256)
+        );
 
-        uint256 wethSpent = uint256(tokenIs0 ? amount1 : amount0);
-        uint256 tokensOut = uint256(-(tokenIs0 ? amount0 : amount1));
-
-        // The dev-buy is capped by MAX_WALLET
+        // The dev-buy is capped by MAX_WALLET during the anti-snipe window.
         if (block.number <= PotatoToken(token).antiSnipeDeadlineBlock() && tokensOut > MAX_WALLET) {
             revert DevBuyExceedsCap();
         }
@@ -413,20 +427,33 @@ contract PotatoCurvePad is ReentrancyGuard {
         }
     }
 
-    function uniswapV3SwapCallback(int256 amount0Delta, int256 amount1Delta, bytes calldata data)
-        external
-    {
-        if (msg.sender != _expectedPoolCallback || _expectedPoolCallback == address(0)) {
-            revert UnexpectedCallback();
-        }
-        address token = abi.decode(data, (address));
-        bool tokenIs0 = token < address(weth);
-        if (amount0Delta > 0) {
-            IERC20(tokenIs0 ? token : address(weth)).safeTransfer(msg.sender, uint256(amount0Delta));
-        }
-        if (amount1Delta > 0) {
-            IERC20(tokenIs0 ? address(weth) : token).safeTransfer(msg.sender, uint256(amount1Delta));
-        }
+    /// @notice Flash-accounting entrypoint for the dev-buy swap. Only the manager can
+    ///         reach it, and only during THIS pad's own `unlock`. Tokens are taken to
+    ///         the pad here; {_devBuy} enforces the wallet cap before forwarding them
+    ///         to the creator.
+    function unlockCallback(bytes calldata data) external override returns (bytes memory) {
+        if (msg.sender != address(manager)) revert UnexpectedCallback();
+        (PoolKey memory key, bool zeroForOne, uint256 ethIn, uint160 sqrtLimit, bool tokenIs0) =
+            abi.decode(data, (PoolKey, bool, uint256, uint160, bool));
+
+        BalanceDelta delta = manager.swap(
+            key,
+            SwapParams({zeroForOne: zeroForOne, amountSpecified: -int256(ethIn), sqrtPriceLimitX96: sqrtLimit}),
+            ""
+        );
+
+        (int128 wethDelta, int128 tokenDelta, Currency wethCur, Currency tokenCur) = tokenIs0
+            ? (delta.amount1(), delta.amount0(), key.currency1, key.currency0)
+            : (delta.amount0(), delta.amount1(), key.currency0, key.currency1);
+
+        uint256 wethSpent = wethDelta < 0 ? uint256(uint128(-wethDelta)) : 0;
+        uint256 tokensOut = tokenDelta > 0 ? uint256(uint128(tokenDelta)) : 0;
+
+        if (wethSpent != 0) V4SingleSided.settle(manager, wethCur, wethSpent);
+        // Take to the pad (exempt); {_devBuy} checks the cap before paying the creator.
+        if (tokensOut != 0) manager.take(tokenCur, address(this), tokensOut);
+
+        return abi.encode(wethSpent, tokensOut);
     }
 
     // - bond --
@@ -442,7 +469,7 @@ contract PotatoCurvePad is ReentrancyGuard {
         if (!_priceCrossedBond(token)) revert NotBonded();
 
         c.bonded = true;
-        emit Bonded(token, c.pool, c.positionId);
+        emit Bonded(token, PoolId.unwrap(c.poolId), c.positionId);
     }
 
     // - views --
@@ -450,9 +477,9 @@ contract PotatoCurvePad is ReentrancyGuard {
     /// @dev True once the pool price has crossed the bond tick (~80% sold).
     function _priceCrossedBond(address token) internal view returns (bool) {
         CurveInfo storage c = curves[token];
-        (, int24 tick,,,,,) = IUniswapV3Pool(c.pool).slot0();
+        (, int24 tick,,) = manager.getSlot0(c.poolId);
         // token0: price rises with buys (tick up) it means that it bonded at tickCeil.
-        // token1: price is inverted (tick down) -> it means that it bonded bonded at -tickCeil.
+        // token1: price is inverted (tick down) -> it means that it bonded at -tickCeil.
         return (token < address(weth)) ? tick >= tickCeil : tick <= -tickCeil;
     }
 
@@ -468,7 +495,7 @@ contract PotatoCurvePad is ReentrancyGuard {
         CurveInfo storage c = curves[token];
         if (c.creator == address(0)) revert UnknownToken();
         if (c.bonded) return BPS;
-        (, int24 tick,,,,,) = IUniswapV3Pool(c.pool).slot0();
+        (, int24 tick,,) = manager.getSlot0(c.poolId);
         bool tokenIs0 = token < address(weth);
         int24 lo = tokenIs0 ? tickFloor : -tickCeil;
         int24 hi = tokenIs0 ? tickCeil : -tickFloor;
@@ -514,7 +541,9 @@ contract PotatoCurvePad is ReentrancyGuard {
 
     // - internals --
 
-    /// @dev The single-sided curve position.
+    /// @dev The single-sided curve position: from the open price to the extreme of
+    ///      the (spacing-aligned) tick range, so the whole supply is sold as one
+    ///      position that never runs out.
     function _rangeFor(bool tokenIs0)
         internal
         view

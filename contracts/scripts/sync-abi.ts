@@ -17,6 +17,7 @@ const BLOCKS: Record<string, string> = {
   potatoTokenAbi: "PotatoToken",
   potatoRewardTokenAbi: "PotatoRewardToken",
   potatoFeeLockerAbi: "PotatoFeeLocker",
+  potatoCurvePadAbi: "PotatoCurvePad",
 };
 
 const ROOT = path.join(__dirname, "..");

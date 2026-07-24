@@ -11,6 +11,9 @@ import { robinhoodServerTransport } from "@/lib/serverRpc";
  * hammering the RPC. A poor-man's indexer.
  */
 
+// The Discover feed is chain-pinned (robinhoodChain below). Robinhood's pads are
+// V3 and emit `address pool`. A V4-chain feed would decode `bytes32 poolId` instead
+// (the pad's V4 TokenCreated) — see the note in loadFeed's chain wiring.
 const tokenCreatedEvent = parseAbiItem(
   "event TokenCreated(address indexed token, address indexed creator, string name, string symbol, address pool, string imageURI, string website, string twitter, string telegram)",
 );

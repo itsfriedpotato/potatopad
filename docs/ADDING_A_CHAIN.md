@@ -1,9 +1,19 @@
 # Adding a chain
 
-PotatoPad runs on any EVM chain that has a **Uniswap V3 deployment** (factory +
-NonfungiblePositionManager) and a **canonical WETH**. Adding one is three small,
-independent edits: deploy the contract, tell the deploy script where Uniswap
-lives, and tell the frontend about the new chain.
+> **Uniswap V4 port.** New chains use a **Uniswap V4 deployment** (the singleton
+> `PoolManager`, plus StateView / Universal Router / Permit2 / V4 Quoter for the
+> frontend). The deploy scripts take the `PoolManager` + WETH per network
+> (canonical for Base/Base Sepolia; `POOL_MANAGER` / `WETH` env vars elsewhere —
+> see developers.uniswap.org/contracts/v4/deployments). In `web/lib/config.ts`,
+> tag the chain entry with `uniswapVersion: "v4"` and set `stateView`,
+> `universalRouter`, `permit2`, `poolManager`, and `quoter`. Legacy chains keep
+> `uniswapVersion: "v3"` (Robinhood) and their SwapRouter02/QuoterV2 addresses, so
+> existing V3 tokens keep displaying and trading — the frontend routes by this tag.
+
+PotatoPad runs on any EVM chain that has a **Uniswap deployment** and a
+**canonical WETH**. Adding one is three small, independent edits: deploy the
+contract, tell the deploy script where Uniswap lives, and tell the frontend about
+the new chain.
 
 Robinhood Chain mainnet (chainId `4663`) is already wired end-to-end and is the
 best worked example to copy.

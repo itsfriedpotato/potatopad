@@ -1,6 +1,8 @@
 # PotatoPad
 
-An open-source, direct-to-Uniswap-V3 token launchpad. Every launch mints its entire supply as permanently locked, single-sided Uniswap V3 liquidity — so the token is live and tradable from the first block, with no bonding curve and no graduation step. Built to be read, forked, and shipped by people who want to understand exactly how a launchpad works, end to end.
+An open-source, direct-to-Uniswap-V4 token launchpad. Every launch mints its entire supply as permanently locked, single-sided Uniswap V4 liquidity — so the token is live and tradable from the first block, with no bonding curve and no graduation step. Built to be read, forked, and shipped by people who want to understand exactly how a launchpad works, end to end.
+
+> **Ported to Uniswap V4.** The contracts run against the singleton `PoolManager` with flash accounting (`unlock` callbacks, `settle`/`take`) instead of V3's per-pair pool contracts + NonfungiblePositionManager. WETH stays the pool's quote currency, so the economics are identical to the V3 build; only the Uniswap plumbing changed. The launch position is owned directly by the fee locker in the singleton (there is no position NFT in this design). Requires the **Cancun** EVM (V4 uses transient storage) — set in `hardhat.config.ts` and supported by Base and most modern L2s.
 
 **Live demo: [potato.fm](https://potato.fm/)**
 
@@ -23,10 +25,10 @@ This README is written to be vibecoded: if you can run a few terminal commands a
 
 ## What you get
 
-- **Smart contracts** (Solidity 0.8.24, Hardhat): a factory that mints single-sided Uniswap V3 liquidity, a permanent fee locker, and a minimal fixed-supply ERC-20 — plus an optional variant that pays trading fees to holders in ETH. No owner, no mint function, no pause switch, no blacklist.
+- **Smart contracts** (Solidity 0.8.24, Hardhat): a launchpad that mints single-sided Uniswap V4 liquidity, a permanent fee locker that owns the position in the singleton, and a minimal fixed-supply ERC-20 — plus an optional variant that pays trading fees to holders in ETH. No owner, no mint function, no pause switch, no blacklist.
 - **A website** (Next.js App Router, wagmi v2, viem, RainbowKit): a Discover feed, a "Plant a Coin" launch form, and per-token pages with price / market cap, holders, a trade widget, and fee collection. A few small server routes keep infrastructure fast and keys hidden: `/api/rpc` (RPC-key proxy with a write-method denylist, rate limit, and multi-key failover), `/api/tokens` (server-side cached launch feed), and `/api/upload` (image → IPFS via Pinata).
 - **Scripts**: a narrated end-to-end demo, a deploy script (local, Base Sepolia, and Robinhood Chain), and a seeder that fills a local chain with sample tokens.
-- **Tests**: 63 Hardhat tests that run against the real Uniswap V3 contracts (factory, position manager, router) deployed from the official `@uniswap/*` npm artifacts. No mocks.
+- **Tests**: 102 Hardhat tests that run against the real Uniswap V4 singleton (`PoolManager` + the official `PoolSwapTest` / `PoolModifyLiquidityTest` routers), deployed from the `@uniswap/v4-core` npm artifacts. No mocks.
 
 ## How it works
 
@@ -34,7 +36,7 @@ A launch is a single atomic transaction — no curve, no graduation, no waiting.
 
 1. **Launch.** Anyone calls `createToken(name, symbol, meta, salt)`. It deploys a fixed-supply ERC-20 (1,000,000,000 tokens) with no owner, no mint, no pause, no blacklist — nothing a rug could hide in (the only transfer-time logic is a time-boxed anti-snipe max-wallet cap that becomes a complete no-op after the launch window). `meta` carries the token's image + socials; it's emitted in the `TokenCreated` event and indexed off-chain, so nothing extra is stored on-chain.
 
-2. **Single-sided liquidity.** The pad creates and initializes the token's Uniswap V3 pool (the 1% fee tier) at the open price, then mints the **entire supply as single-sided liquidity — token only, zero ETH** — across a fixed price range: it opens around a **3 ETH fully-diluted valuation** and the range tops out around **525 ETH FDV**. That position's NFT is minted straight into the immutable `PotatoFeeLocker`, which has no transfer and no withdraw path, so the principal is **locked forever (unruggable)**.
+2. **Single-sided liquidity.** The pad initializes the token's Uniswap V4 pool (1% fee, tick spacing 200) on the singleton `PoolManager` at the open price, then mints the **entire supply as single-sided liquidity — token only, zero ETH** — across a fixed price range: it opens around a **3 ETH fully-diluted valuation** and the range tops out around **525 ETH FDV**. The position is owned directly by the immutable `PotatoFeeLocker` in the singleton, and the locker exposes no path that removes liquidity, so the principal is **locked forever (unruggable)**.
 
 3. **Price walks up as people buy.** From the first block the token is live and tradable on Uniswap. As buyers bring WETH, the price walks up through the range and the launch supply sells out of the locked LP — the pad never runs a curve, the open market does the pricing. Attach ETH to `createToken` and it runs an atomic creator "dev-buy" on the fresh pool in the same transaction.
 
@@ -60,10 +62,12 @@ potatopad/
     contracts/PotatoFeeLocker.sol     permanent LP lock + fee splitter
     contracts/PotatoToken.sol         minimal fixed-supply ERC-20 (+ time-boxed anti-snipe)
     contracts/PotatoRewardToken.sol   the above + holder fee rewards, credited per swap
-    contracts/libraries/TickMath.sol  Uniswap tick math, ported to 0.8.24
-    contracts/interfaces/             minimal Uniswap V3 interfaces
-    test/potatopad.test.ts            32 tests vs real Uniswap V3 bytecode
-    test/potatoreward.test.ts         31 tests for the holder-rewards flow
+    contracts/libraries/TickMath.sol  Uniswap tick math, ported to 0.8.24 (identical in V3/V4)
+    contracts/libraries/V4SingleSided.sol  single-sided liquidity math + settle/take + pool-key helpers
+    contracts/interfaces/             minimal WETH interface (V4 types come from @uniswap/v4-core)
+    test/helpers/v4.ts                deploys real Uniswap V4 (PoolManager + test routers) for the suites
+    test/potatopad.test.ts            direct-pad tests vs real Uniswap V4 bytecode
+    test/potatoreward.test.ts         tests for the holder-rewards flow
     scripts/demo.ts                   narrated launch showcase
     scripts/reward-demo.ts            narrated holder-rewards walkthrough (balances per step)
     scripts/reward-stress.ts          250 wallets / 3k actions, checks 8 invariants
@@ -100,16 +104,19 @@ To deploy to a public testnet and host the site, additionally:
 
 This gets you the contracts, the demo, and the website running against a local chain with sample tokens, no testnet or faucet needed.
 
-**1. Contracts: install, test, and watch the demo.**
+**1. Contracts: install and test.**
 
 ```bash
 cd contracts
 npm install
-npx hardhat test                    # 32 tests, all green
-npx hardhat run scripts/demo.ts     # the whole story, narrated in your terminal
+npx hardhat test                    # 106 tests, all green (against real Uniswap V4)
 ```
 
-**2. Start a local chain and seed it with sample tokens.**
+The suite deploys the real Uniswap V4 singleton + test routers, and a dedicated
+integration test (`test/v4-integration.test.ts`) exercises the frontend's exact
+buy/sell calldata through the **real Universal Router + Permit2 + V4 periphery**.
+
+**2. Start a local chain and stand up the full V4 stack + sample tokens.**
 
 Open a terminal and start the node (leave it running):
 
@@ -118,19 +125,16 @@ cd contracts
 npx hardhat node
 ```
 
-In a second terminal, seed it:
+In a second terminal, deploy the complete local V4 stack (PoolManager, StateView,
+V4 Quoter, Permit2, Universal Router, both pads) and seed a couple of tokens:
 
 ```bash
 cd contracts
-npx hardhat run scripts/seed-demo.ts --network localhost
+npx hardhat run scripts/local-v4-playground.ts --network localhost
 ```
 
-The seeder prints two lines to copy, the PotatoPad and WETH addresses, that look like:
-
-```
-NEXT_PUBLIC_PAD_ADDRESS_LOCALHOST=0x...
-NEXT_PUBLIC_WETH_ADDRESS_LOCALHOST=0x...
-```
+It prints the full `web/.env.local` block to copy (pad + WETH + all the V4
+addresses the frontend needs).
 
 **3. Run the website.**
 
@@ -139,11 +143,17 @@ cd web
 npm install
 ```
 
-Create `web/.env.local` and paste the two lines the seeder printed:
+Create `web/.env.local` and paste the block the playground printed:
 
 ```
+NEXT_PUBLIC_CURVE_PAD_ADDRESS_LOCALHOST=0x...
 NEXT_PUBLIC_PAD_ADDRESS_LOCALHOST=0x...
 NEXT_PUBLIC_WETH_ADDRESS_LOCALHOST=0x...
+NEXT_PUBLIC_POOL_MANAGER_LOCALHOST=0x...
+NEXT_PUBLIC_STATE_VIEW_LOCALHOST=0x...
+NEXT_PUBLIC_UNIVERSAL_ROUTER_LOCALHOST=0x...
+NEXT_PUBLIC_PERMIT2_LOCALHOST=0x000000000022D473030F116dDEE9F6B43aC78BA3
+NEXT_PUBLIC_QUOTER_LOCALHOST=0x...
 ```
 
 Then:
@@ -180,7 +190,7 @@ Deploy:
 npx hardhat run scripts/deploy.ts --network baseSepolia
 ```
 
-It deploys the pad and its `PotatoFeeLocker`, prints both addresses, and writes `deployments.baseSepolia.json`. The `PotatoPad` constructor takes `(treasury, startFdvWei, topFdvWei, antiSnipeBlocks, factory, positionManager, weth, owner, initialBannedWords)`; the deploy script fills in the Uniswap addresses per network, the FDV/anti-snipe values from the env above, the `owner` (blacklist admin + fee-redirect authority — defaults to the treasury), and the seed blacklist. Note `owner == address(0)` reverts (`InvalidConfig`), so both trailing args are mandatory.
+It deploys the pad and its `PotatoFeeLocker`, prints both addresses, and writes `deployments.baseSepolia.json`. The `PotatoPad` constructor takes `(treasury, startFdvWei, topFdvWei, antiSnipeBlocks, poolManager, weth, owner, initialBannedWords)`; the deploy script fills in the Uniswap V4 `PoolManager` + WETH per network (canonical for Base/Base Sepolia, or via `POOL_MANAGER`/`WETH` env vars for other chains), the FDV/anti-snipe values from the env above, the `owner` (blacklist admin + fee-redirect authority — defaults to the treasury), and the seed blacklist. Note `owner == address(0)` reverts (`InvalidConfig`), so both trailing args are mandatory.
 
 To target a different chain, follow the end-to-end guide in **[docs/ADDING_A_CHAIN.md](docs/ADDING_A_CHAIN.md)**: it's three small edits (a `hardhat.config.ts` network entry, a `CANONICAL` entry in `scripts/deploy.ts`, and one entry in the frontend's `CHAINS` config). **Robinhood Chain mainnet (chainId 4663)** is already wired this way, and is where the live demo runs.
 
@@ -212,7 +222,7 @@ Notes:
 
 | Setting | Default | Where |
 |---|---|---|
-| Uniswap fee tier | 1% (`POOL_FEE = 10000`) | `PotatoPad.sol` |
+| Uniswap fee / tick spacing | 1% (`POOL_FEE = 10000`) / `TICK_SPACING = 200` | `PotatoPad.sol` |
 | Fee split | 50% creator / 50% treasury | `PotatoPad.sol`, `PotatoFeeLocker.sol` |
 | Treasury | `0xd3358b1F39A6a71911c6e33717D185F99d43e80d` | constructor arg (`scripts/deploy.ts`) |
 | Total supply | 1,000,000,000 | `PotatoPad.sol` |
@@ -227,7 +237,7 @@ The launch supply is seeded single-sided across a tick-aligned range, so the ali
 
 These are intentional scope cuts for an MVP, documented so you know what to harden before production.
 
-- **Read the price from the pool.** There is no curve; a token's price and market cap come from its Uniswap V3 pool, not the pad.
+- **Read the price from the pool.** There is no curve; a token's price and market cap come from its Uniswap V4 pool (read from the singleton `PoolManager` by pool id), not the pad.
 - **Feed staleness.** The Discover feed is cached ~45s server-side (`/api/tokens`), so a brand-new launch appears within that window rather than instantly.
 - **No full indexer.** The frontend reads chain state over RPC plus the cached feed route. That is great for a demo and for self-hosting with near-zero backend, but at scale you would add an indexer (for example Ponder) over the `TokenCreated` event and serve token pages from it too.
 - **Anti-snipe is blunt.** The 2% max-wallet window throttles the most obvious sniping; it is not full MEV protection.

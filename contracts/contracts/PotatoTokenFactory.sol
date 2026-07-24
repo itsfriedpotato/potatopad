@@ -26,7 +26,9 @@ contract PotatoTokenFactory {
 
     // Launch parameters, fixed by the pad at construction so the pad stays the
     // single source of truth for token economics.
-    address public immutable positionManager;
+    /// @notice The Uniswap V4 PoolManager singleton, baked into every token as its
+    ///         anti-snipe/reward-excluded custody address (V3's NonfungiblePositionManager).
+    address public immutable poolManager;
     address public immutable locker;
     address public immutable weth;
     uint256 public immutable totalSupply;
@@ -37,7 +39,7 @@ contract PotatoTokenFactory {
     error DeployFailed();
 
     constructor(
-        address positionManager_,
+        address poolManager_,
         address locker_,
         address weth_,
         uint256 totalSupply_,
@@ -45,7 +47,7 @@ contract PotatoTokenFactory {
         uint256 antiSnipeBlocks_
     ) {
         pad = msg.sender;
-        positionManager = positionManager_;
+        poolManager = poolManager_;
         locker = locker_;
         weth = weth_;
         totalSupply = totalSupply_;
@@ -55,24 +57,26 @@ contract PotatoTokenFactory {
 
     /// @notice keccak of the full CREATE2 initcode for a launch — what the pad
     ///         needs to predict (and vet) a token's address before committing.
-    function initCodeHash(string calldata name, string calldata symbol, bool isReward)
+    /// @param quote the pool's quote currency, baked into a reward token as its
+    ///        reward asset (ignored for a plain token). WETH for a standard launch.
+    function initCodeHash(string calldata name, string calldata symbol, bool isReward, address quote)
         external
         view
         returns (bytes32)
     {
-        return keccak256(_initCode(name, symbol, isReward));
+        return keccak256(_initCode(name, symbol, isReward, quote));
     }
 
     /// @notice CREATE2-deploys a launch token. Pad-only.
     /// @dev Deploys the very bytes {initCodeHash} hashes, so the address the pad
     ///      vetted cannot diverge from the address that gets deployed.
-    function deploy(string calldata name, string calldata symbol, bool isReward, bytes32 salt)
+    function deploy(string calldata name, string calldata symbol, bool isReward, address quote, bytes32 salt)
         external
         returns (address deployed)
     {
         if (msg.sender != pad) revert OnlyPad();
 
-        bytes memory code = _initCode(name, symbol, isReward);
+        bytes memory code = _initCode(name, symbol, isReward, quote);
         assembly ("memory-safe") {
             deployed := create2(0, add(code, 0x20), mload(code), salt)
         }
@@ -89,8 +93,9 @@ contract PotatoTokenFactory {
     }
 
     /// @dev Creation bytecode + ABI-encoded constructor args. The reward variant
-    ///      takes one extra argument: the WETH it pays holders in.
-    function _initCode(string calldata name, string calldata symbol, bool isReward)
+    ///      takes two extra arguments: the WETH (for the unwrap path) and the
+    ///      `quote` currency it rewards holders in (WETH for a standard launch).
+    function _initCode(string calldata name, string calldata symbol, bool isReward, address quote)
         internal
         view
         returns (bytes memory)
@@ -103,18 +108,19 @@ contract PotatoTokenFactory {
                     symbol,
                     totalSupply,
                     pad,
-                    positionManager,
+                    poolManager,
                     locker,
                     maxWallet,
                     antiSnipeBlocks,
-                    weth
+                    weth,
+                    quote
                 )
             );
         }
         return abi.encodePacked(
             type(PotatoToken).creationCode,
             abi.encode(
-                name, symbol, totalSupply, pad, positionManager, locker, maxWallet, antiSnipeBlocks
+                name, symbol, totalSupply, pad, poolManager, locker, maxWallet, antiSnipeBlocks
             )
         );
     }

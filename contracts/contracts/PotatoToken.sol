@@ -14,9 +14,18 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 ///         `maxWallet` tokens. This throttles bots from hoovering up the
 ///         single-sided launch supply in the first few blocks. It is enforced
 ///         purely on the receiving balance, exempts the launch infrastructure
-///         (pad / pool / position manager / locker), and — critically — becomes
-///         a complete no-op once `antiSnipeDeadlineBlock` passes, so it can
-///         never interfere with normal trading afterwards.
+///         (pad / PoolManager / locker), and — critically — becomes a complete
+///         no-op once `antiSnipeDeadlineBlock` passes, so it can never interfere
+///         with normal trading afterwards.
+///
+///         ## What changed for Uniswap V4
+///
+///         V3 had a per-pair pool CONTRACT that custodied the launch supply, so
+///         its address wasn't known until `createPool` and had to be registered
+///         exempt afterwards via `setPool`. V4 is a singleton: the {PoolManager}
+///         custodies the reserves of EVERY pool, and its address is known at
+///         construction. So the manager is exempted here directly and there is no
+///         per-pool address to set later — `setPool` is gone.
 contract PotatoToken is ERC20 {
     /// @notice Burn sink for fees. Must be a normal (unspendable) address — OZ
     ///         ERC20 reverts on transfers to address(0).
@@ -24,6 +33,9 @@ contract PotatoToken is ERC20 {
 
     /// @notice The launchpad that deployed this token (holds the full supply at genesis).
     address public immutable pad;
+    /// @notice The Uniswap V4 PoolManager singleton — custodies the single-sided
+    ///         launch liquidity, so it holds ~the entire supply and must be exempt.
+    address public immutable poolManager;
     /// @notice Max tokens a non-exempt wallet may hold during the anti-snipe window.
     uint256 public immutable maxWallet;
     /// @notice Last block (inclusive) at which the max-wallet cap is enforced.
@@ -32,17 +44,11 @@ contract PotatoToken is ERC20 {
     /// @notice Addresses exempt from the anti-snipe cap (launch infrastructure).
     mapping(address => bool) public antiSnipeExempt;
 
-    /// @notice The token's Uniswap V3 pool. Set once by the pad, right after the
-    ///         pool is created (its address isn't known at construction time).
-    address public pool;
-
-    error OnlyPad();
-    error PoolAlreadySet();
     error MaxWalletExceeded();
 
     /// @param pad_ the deployer/launchpad; receives the full supply and is exempt.
-    /// @param positionManager_ Uniswap NonfungiblePositionManager (exempt).
-    /// @param locker_ the fee locker that holds the LP NFT (exempt).
+    /// @param poolManager_ the Uniswap V4 PoolManager singleton (custody, exempt).
+    /// @param locker_ the fee locker that owns the locked position (exempt).
     /// @param maxWallet_ max non-exempt balance during the anti-snipe window.
     /// @param antiSnipeBlocks_ number of blocks AFTER the launch block that stay capped.
     constructor(
@@ -50,17 +56,19 @@ contract PotatoToken is ERC20 {
         string memory symbol_,
         uint256 supply_,
         address pad_,
-        address positionManager_,
+        address poolManager_,
         address locker_,
         uint256 maxWallet_,
         uint256 antiSnipeBlocks_
     ) ERC20(name_, symbol_) {
         pad = pad_;
+        poolManager = poolManager_;
         maxWallet = maxWallet_;
         antiSnipeDeadlineBlock = block.number + antiSnipeBlocks_;
 
         antiSnipeExempt[pad_] = true;
-        antiSnipeExempt[positionManager_] = true;
+        // The singleton custodies ~the whole supply as single-sided LP reserves.
+        antiSnipeExempt[poolManager_] = true;
         antiSnipeExempt[locker_] = true;
         // Fee-burn sink: the locker sends the launched-token side of swap fees here,
         // which must never trip the max-wallet cap and revert a permissionless
@@ -68,19 +76,6 @@ contract PotatoToken is ERC20 {
         antiSnipeExempt[DEAD] = true;
 
         _mint(pad_, supply_);
-    }
-
-    /// @notice One-time hook for the pad to register the pool as exempt once it
-    ///         exists. The pool must be exempt because it custodies ~the entire
-    ///         supply as single-sided LP.
-    /// @dev `public virtual` (not external) so subclasses can extend it via
-    ///      `super.setPool` — {PotatoRewardToken} also excludes the pool from
-    ///      holder rewards there. The ABI is identical either way.
-    function setPool(address pool_) public virtual {
-        if (msg.sender != pad) revert OnlyPad();
-        if (pool != address(0)) revert PoolAlreadySet();
-        pool = pool_;
-        antiSnipeExempt[pool_] = true;
     }
 
     /// @notice Always address(0). PotatoToken has no owner, mint, pause, or

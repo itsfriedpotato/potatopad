@@ -2,10 +2,7 @@ import { expect } from "chai";
 import { ethers } from "hardhat";
 import { loadFixture, mine } from "@nomicfoundation/hardhat-toolbox/network-helpers";
 
-import FactoryArtifact from "@uniswap/v3-core/artifacts/contracts/UniswapV3Factory.sol/UniswapV3Factory.json";
-import PoolArtifact from "@uniswap/v3-core/artifacts/contracts/UniswapV3Pool.sol/UniswapV3Pool.json";
-import NPMArtifact from "@uniswap/v3-periphery/artifacts/contracts/NonfungiblePositionManager.sol/NonfungiblePositionManager.json";
-import RouterArtifact from "@uniswap/v3-periphery/artifacts/contracts/SwapRouter.sol/SwapRouter.json";
+import { deployV4, poolIdFor, buy, sell, slot0 } from "./helpers/v4";
 
 const E = 10n ** 18n;
 const TOTAL_SUPPLY = 1_000_000_000n * E;
@@ -22,123 +19,51 @@ const NO_META = { imageURI: "", website: "", twitter: "", telegram: "" };
 const salt = (s: string) => ethers.id(s);
 const isToken0 = (t: string, w: string) => t.toLowerCase() < w.toLowerCase();
 
-async function deployRealUniswap() {
-  const weth = await (await ethers.getContractFactory("WETH9")).deploy();
-  const v3Factory = await (await ethers.getContractFactoryFromArtifact(FactoryArtifact)).deploy();
-  const npm = await (
-    await ethers.getContractFactoryFromArtifact(NPMArtifact)
-  ).deploy(v3Factory.target, weth.target, ethers.ZeroAddress);
-  const router = await (
-    await ethers.getContractFactoryFromArtifact(RouterArtifact)
-  ).deploy(v3Factory.target, weth.target);
-  return { weth, v3Factory, npm, router };
-}
-
 async function deployFixture() {
   const [deployer, treasury, creator, alice, bob] = await ethers.getSigners();
-  const { weth, v3Factory, npm, router } = await deployRealUniswap();
+  const v4 = await deployV4();
   const pad = await (
     await ethers.getContractFactory("PotatoCurvePad")
   ).deploy(
     treasury.address, START_FDV, BOND_FDV, ANTI_SNIPE,
-    v3Factory.target, npm.target, weth.target,
-    deployer.address, [BANNED_NAME],
+    v4.manager.target, v4.weth.target, deployer.address, [BANNED_NAME],
   );
   const locker = await ethers.getContractAt("PotatoFeeLocker", await pad.locker());
-  return { deployer, treasury, creator, alice, bob, weth, v3Factory, npm, router, pad, locker };
+  return { deployer, treasury, creator, alice, bob, ...v4, pad, locker };
 }
 
 async function createFixture() {
   const ctx = await deployFixture();
   const tokenAddr: string = await ctx.pad
     .connect(ctx.creator)
-    .createToken.staticCall("Spud", "SPUD", NO_META, salt("Spud"));
-  await ctx.pad.connect(ctx.creator).createToken("Spud", "SPUD", NO_META, salt("Spud"));
+    .createToken.staticCall("Spud", "SPUD", NO_META, salt("Spud"), ethers.ZeroAddress);
+  await ctx.pad.connect(ctx.creator).createToken("Spud", "SPUD", NO_META, salt("Spud"), ethers.ZeroAddress);
   const token = await ethers.getContractAt("PotatoToken", tokenAddr);
   const info = await ctx.pad.curves(tokenAddr);
-  const pool = await ethers.getContractAtFromArtifact(PoolArtifact, info.pool);
-  return { ...ctx, token, tokenAddr, info, pool, tokenIs0: isToken0(tokenAddr, ctx.weth.target as string) };
+  return { ...ctx, token, tokenAddr, info, tokenIs0: isToken0(tokenAddr, ctx.weth.target as string) };
 }
 
-const FULL_RANGE_LOWER = -887200;
-const FULL_RANGE_UPPER = 887200;
-
-/** Buy WETH->token on the token's Uniswap pool via the real SwapRouter. */
-async function buy(ctx: any, buyer: any, tokenAddr: string, value: bigint) {
-  const deadline = (await ethers.provider.getBlock("latest"))!.timestamp + 600;
-  return ctx.router.connect(buyer).exactInputSingle(
-    {
-      tokenIn: ctx.weth.target,
-      tokenOut: tokenAddr,
-      fee: POOL_FEE,
-      recipient: buyer.address,
-      deadline,
-      amountIn: value,
-      amountOutMinimum: 0,
-      sqrtPriceLimitX96: 0,
-    },
-    { value },
-  );
-}
-
-/** Sell token->WETH on the pool via the router. */
-async function sell(ctx: any, seller: any, tokenAddr: string, amount: bigint) {
-  const token = await ethers.getContractAt("PotatoToken", tokenAddr);
-  const deadline = (await ethers.provider.getBlock("latest"))!.timestamp + 600;
-  await token.connect(seller).approve(ctx.router.target, amount);
-  await ctx.router.connect(seller).exactInputSingle({
-    tokenIn: tokenAddr,
-    tokenOut: ctx.weth.target,
-    fee: POOL_FEE,
-    recipient: seller.address,
-    deadline,
-    amountIn: amount,
-    amountOutMinimum: 0,
-    sqrtPriceLimitX96: 0,
-  });
+/** Asserts the locker owns a funded, locked position (V4 has no NFT — it's the modifyLiquidity owner). */
+async function assertLockerOwns(ctx: any, positionId: bigint, creator: string) {
+  const pos = await ctx.locker.positions(positionId);
+  expect(pos.creator).to.equal(creator);
+  expect(pos.liquidity).to.be.gt(0n);
 }
 
 /** Launch a token whose address sorts on the requested side of WETH (grind salt). */
 async function createWithOrientation(ctx: any, want0: boolean, name: string, symbol: string) {
   for (let i = 0; i < 200; i++) {
     const s = salt(`${name}-${i}`);
-    const addr: string = await ctx.pad.connect(ctx.creator).createToken.staticCall(name, symbol, NO_META, s);
+    const addr: string = await ctx.pad.connect(ctx.creator).createToken.staticCall(name, symbol, NO_META, s, ethers.ZeroAddress);
     if (isToken0(addr, ctx.weth.target as string) === want0) {
-      await ctx.pad.connect(ctx.creator).createToken(name, symbol, NO_META, s);
+      await ctx.pad.connect(ctx.creator).createToken(name, symbol, NO_META, s, ethers.ZeroAddress);
       return addr;
     }
   }
   throw new Error(`could not grind a token${want0 ? "0" : "1"} salt`);
 }
 
-/** A third party buys some token, then seeds its own full-range LP in the pool. */
-async function addExternalLP(ctx: any, who: any, tokenAddr: string, buyEth: bigint, wethAmt: bigint) {
-  await buy(ctx, who, tokenAddr, buyEth);
-  const token = await ethers.getContractAt("PotatoToken", tokenAddr);
-  const tokBal = await token.balanceOf(who.address);
-  await ctx.weth.connect(who).deposit({ value: wethAmt });
-  await token.connect(who).approve(ctx.npm.target, tokBal);
-  await ctx.weth.connect(who).approve(ctx.npm.target, wethAmt);
-  const tokenIs0 = isToken0(tokenAddr, ctx.weth.target as string);
-  const [t0, t1] = tokenIs0 ? [tokenAddr, ctx.weth.target] : [ctx.weth.target, tokenAddr];
-  const [a0, a1] = tokenIs0 ? [tokBal, wethAmt] : [wethAmt, tokBal];
-  const deadline = (await ethers.provider.getBlock("latest"))!.timestamp + 600;
-  await ctx.npm.connect(who).mint({
-    token0: t0,
-    token1: t1,
-    fee: POOL_FEE,
-    tickLower: FULL_RANGE_LOWER,
-    tickUpper: FULL_RANGE_UPPER,
-    amount0Desired: a0,
-    amount1Desired: a1,
-    amount0Min: 0,
-    amount1Min: 0,
-    recipient: who.address,
-    deadline,
-  });
-}
-
-describe("PotatoCurvePad (single-sided-v3 curve, 100% in Uniswap, no migration)", () => {
+describe("PotatoCurvePad (single-sided-V4 curve, 100% in Uniswap, no migration)", () => {
   describe("deployment", () => {
     it("exposes constants, derives floor<ceil, deploys a locker", async () => {
       const { pad, treasury, locker } = await loadFixture(deployFixture);
@@ -153,29 +78,27 @@ describe("PotatoCurvePad (single-sided-v3 curve, 100% in Uniswap, no migration)"
 
   describe("launch (open the curve)", () => {
     it("deposits the WHOLE supply single-sided into a LOCKER-owned position at launch; pad holds no tokens", async () => {
-      const { pad, creator, token, tokenAddr, info, pool, npm, weth, locker } = await loadFixture(createFixture);
+      const ctx = await loadFixture(createFixture);
+      const { pad, creator, token, tokenAddr, info, manager, weth, locker } = ctx;
       expect(info.creator).to.equal(creator.address);
       expect(info.bonded).to.equal(false);
       expect(info.positionId).to.be.gt(0);
       // The position is locked in the fee locker from LAUNCH (fees flow from day one),
-      // and registered so the locker knows the creator.
-      expect(await npm.ownerOf(info.positionId)).to.equal(await locker.getAddress());
-      expect((await locker.positions(info.positionId)).creator).to.equal(creator.address);
-      const pos = await npm.positions(info.positionId);
-      expect(pos.liquidity).to.be.gt(0);
-      // 100% in Uniswap: the pool holds ~all the supply, zero WETH.
-      expect(await token.balanceOf(info.pool)).to.be.closeTo(TOTAL_SUPPLY, TOTAL_SUPPLY / 1000n);
-      expect(await weth.balanceOf(info.pool)).to.equal(0);
-      // The pad holds NO tokens (no reserve stash) — only mint-rounding dust.
+      // owned directly by the locker in the singleton (no NFT in V4).
+      await assertLockerOwns(ctx, info.positionId, creator.address);
+      // 100% in Uniswap: the singleton holds ~all the supply, zero WETH.
+      expect(await token.balanceOf(manager.target)).to.be.closeTo(TOTAL_SUPPLY, TOTAL_SUPPLY / 1000n);
+      expect(await weth.balanceOf(manager.target)).to.equal(0);
+      // The pad holds NO tokens (transferred to the locker; keeps not even dust).
       expect(await token.balanceOf(await pad.getAddress())).to.be.lt(TOTAL_SUPPLY / 100000n);
-      expect((await pool.slot0()).sqrtPriceX96).to.be.gt(0);
+      expect((await slot0(ctx, tokenAddr)).sqrtPriceX96).to.be.gt(0);
       expect(await pad.curveProgressBps(tokenAddr)).to.be.lt(100); // ~0% at open
     });
 
     it("emits TokenCreated with metadata and CurveOpened", async () => {
       const ctx = await loadFixture(deployFixture);
       const meta = { imageURI: "ipfs://x", website: "w", twitter: "t", telegram: "g" };
-      await expect(ctx.pad.connect(ctx.creator).createToken("Meta", "META", meta, salt("Meta")))
+      await expect(ctx.pad.connect(ctx.creator).createToken("Meta", "META", meta, salt("Meta"), ethers.ZeroAddress))
         .to.emit(ctx.pad, "TokenCreated")
         .and.to.emit(ctx.pad, "CurveOpened");
     });
@@ -185,8 +108,8 @@ describe("PotatoCurvePad (single-sided-v3 curve, 100% in Uniswap, no migration)"
       const value = ethers.parseEther("0.05");
       const tokenAddr: string = await ctx.pad
         .connect(ctx.creator)
-        .createToken.staticCall("Dev", "DEV", NO_META, salt("Dev"), { value });
-      await ctx.pad.connect(ctx.creator).createToken("Dev", "DEV", NO_META, salt("Dev"), { value });
+        .createToken.staticCall("Dev", "DEV", NO_META, salt("Dev"), ethers.ZeroAddress, { value });
+      await ctx.pad.connect(ctx.creator).createToken("Dev", "DEV", NO_META, salt("Dev"), ethers.ZeroAddress, { value });
       const token = await ethers.getContractAt("PotatoToken", tokenAddr);
       const bal = await token.balanceOf(ctx.creator.address);
       expect(bal).to.be.gt(0);
@@ -198,7 +121,7 @@ describe("PotatoCurvePad (single-sided-v3 curve, 100% in Uniswap, no migration)"
       await expect(
         ctx.pad
           .connect(ctx.creator)
-          .createToken("Big", "BIG", NO_META, salt("Big"), { value: ethers.parseEther("1") }),
+          .createToken("Big", "BIG", NO_META, salt("Big"), ethers.ZeroAddress, { value: ethers.parseEther("1") }),
       ).to.be.revertedWithCustomError(ctx.pad, "DevBuyExceedsCap");
     });
   });
@@ -207,11 +130,11 @@ describe("PotatoCurvePad (single-sided-v3 curve, 100% in Uniswap, no migration)"
     it("a buy walks the price up and delivers tokens; a sell works too", async () => {
       const ctx = await loadFixture(createFixture);
       await mine(ANTI_SNIPE + 1);
-      const { pad, alice, tokenAddr, token, pool } = ctx;
+      const { pad, alice, tokenAddr, token } = ctx;
 
-      const p0 = (await pool.slot0()).sqrtPriceX96;
+      const p0 = (await slot0(ctx, tokenAddr)).sqrtPriceX96;
       await buy(ctx, alice, tokenAddr, ethers.parseEther("1"));
-      const p1 = (await pool.slot0()).sqrtPriceX96;
+      const p1 = (await slot0(ctx, tokenAddr)).sqrtPriceX96;
       const got = await token.balanceOf(alice.address);
       expect(got).to.be.gt(0);
       expect(ctx.tokenIs0 ? p1 > p0 : p1 < p0).to.equal(true);
@@ -238,28 +161,28 @@ describe("PotatoCurvePad (single-sided-v3 curve, 100% in Uniswap, no migration)"
 
     it("bonds on a big buy (~80% sold) — latches the milestone; the position was already locked at launch", async () => {
       const ctx = await loadFixture(createFixture);
-      const { pad, token, tokenAddr, npm, locker, weth } = ctx;
+      const { pad, token, tokenAddr, manager, locker, weth, creator } = ctx;
       await mine(ANTI_SNIPE + 1);
 
       // The locker owns the position from LAUNCH (not the pad).
       const before = await pad.curves(tokenAddr);
-      expect(await npm.ownerOf(before.positionId)).to.equal(await locker.getAddress());
+      await assertLockerOwns(ctx, before.positionId, creator.address);
 
       await buy(ctx, ctx.alice, tokenAddr, FILL_ETH);
       expect(await pad.bondable(tokenAddr)).to.equal(true);
       expect(await pad.curveProgressBps(tokenAddr)).to.equal(10000);
-      const poolWethBefore = await weth.balanceOf(before.pool);
-      const poolTokBefore = await token.balanceOf(before.pool);
+      const poolWethBefore = await weth.balanceOf(manager.target);
+      const poolTokBefore = await token.balanceOf(manager.target);
 
       await expect(pad.bond(tokenAddr)).to.emit(pad, "Bonded");
       const info = await pad.curves(tokenAddr);
       expect(info.bonded).to.equal(true);
 
-      // bond() moves NOTHING — same position, same owner (locker), same pool balances.
+      // bond() moves NOTHING — same position, same owner (locker), same reserves.
       expect(info.positionId).to.equal(before.positionId);
-      expect(await npm.ownerOf(info.positionId)).to.equal(await locker.getAddress());
-      expect(await weth.balanceOf(info.pool)).to.equal(poolWethBefore);
-      expect(await token.balanceOf(info.pool)).to.equal(poolTokBefore);
+      await assertLockerOwns(ctx, info.positionId, creator.address);
+      expect(await weth.balanceOf(manager.target)).to.equal(poolWethBefore);
+      expect(await token.balanceOf(manager.target)).to.equal(poolTokBefore);
 
       await expect(pad.bond(tokenAddr)).to.be.revertedWithCustomError(pad, "AlreadyBonded");
       expect(await pad.bondable(tokenAddr)).to.equal(false);
@@ -267,16 +190,14 @@ describe("PotatoCurvePad (single-sided-v3 curve, 100% in Uniswap, no migration)"
 
     it("PRE-BOND trading fees are collectable via the locker (even if it never bonds)", async () => {
       const ctx = await loadFixture(createFixture);
-      const { pad, alice, creator, treasury, tokenAddr, token, locker, weth } = ctx;
+      const { pad, alice, creator, tokenAddr, token, locker, weth } = ctx;
       await mine(ANTI_SNIPE + 1);
 
-      // Trade both ways WITHOUT bonding (stay well below the bond price).
       await buy(ctx, alice, tokenAddr, ethers.parseEther("1"));
       await sell(ctx, alice, tokenAddr, (await token.balanceOf(alice.address)) / 2n);
       expect(await pad.bondable(tokenAddr)).to.equal(false); // never bonded
       expect((await pad.curves(tokenAddr)).bonded).to.equal(false);
 
-      // The locker already owns the position, so it can collect + split the fees now.
       const posId = (await pad.curves(tokenAddr)).positionId;
       await expect(locker.collect(posId)).to.emit(locker, "FeesCollected");
       const feeW = await locker.claimable(weth.target, creator.address);
@@ -299,7 +220,7 @@ describe("PotatoCurvePad (single-sided-v3 curve, 100% in Uniswap, no migration)"
       await expect(ctx.pad.bond(tokenAddr)).to.emit(ctx.pad, "Bonded");
       const info = await ctx.pad.curves(tokenAddr);
       expect(info.bonded).to.equal(true);
-      expect(await ctx.npm.ownerOf(info.positionId)).to.equal(await ctx.locker.getAddress());
+      await assertLockerOwns(ctx, info.positionId, ctx.creator.address);
     });
 
     it("post-bond: trading continues and the locker collects LP fees 50/50", async () => {
@@ -310,7 +231,6 @@ describe("PotatoCurvePad (single-sided-v3 curve, 100% in Uniswap, no migration)"
       await pad.bond(tokenAddr);
       const info = await pad.curves(tokenAddr);
 
-      // Trade both ways on the still-live pool to accrue fees.
       await buy(ctx, bob, tokenAddr, ethers.parseEther("2"));
       await sell(ctx, bob, tokenAddr, (await token.balanceOf(bob.address)) / 2n);
       expect(await token.balanceOf(bob.address)).to.be.gt(0);
@@ -337,12 +257,11 @@ describe("PotatoCurvePad (single-sided-v3 curve, 100% in Uniswap, no migration)"
 
     it("rejects a launch whose name OR symbol is blacklisted (normalized: case/space-insensitive)", async () => {
       const { pad, creator } = await loadFixture(deployFixture);
-      await expect(pad.connect(creator).createToken(BANNED_NAME, "OK", NO_META, salt("m1")))
+      await expect(pad.connect(creator).createToken(BANNED_NAME, "OK", NO_META, salt("m1"), ethers.ZeroAddress))
         .to.be.revertedWithCustomError(pad, "Banned");
-      // seeded "Scam" as a symbol too, padded + lowercased, still caught by _normHash
-      await expect(pad.connect(creator).createToken("Fine", "  scam ", NO_META, salt("m2")))
+      await expect(pad.connect(creator).createToken("Fine", "  scam ", NO_META, salt("m2"), ethers.ZeroAddress))
         .to.be.revertedWithCustomError(pad, "Banned");
-      await expect(pad.connect(creator).createToken("Clean", "CLN", NO_META, salt("m3"))).to.not.be
+      await expect(pad.connect(creator).createToken("Clean", "CLN", NO_META, salt("m3"), ethers.ZeroAddress)).to.not.be
         .reverted;
     });
 
@@ -351,7 +270,7 @@ describe("PotatoCurvePad (single-sided-v3 curve, 100% in Uniswap, no migration)"
       await expect(pad.connect(alice).setBanned("Villain", true))
         .to.be.revertedWithCustomError(pad, "OnlyOwner");
       await expect(pad.setBanned("Villain", true)).to.emit(pad, "BannedSet");
-      await expect(pad.connect(creator).createToken("Villain", "VIL", NO_META, salt("m4")))
+      await expect(pad.connect(creator).createToken("Villain", "VIL", NO_META, salt("m4"), ethers.ZeroAddress))
         .to.be.revertedWithCustomError(pad, "Banned");
     });
 
@@ -361,15 +280,12 @@ describe("PotatoCurvePad (single-sided-v3 curve, 100% in Uniswap, no migration)"
       await mine(ANTI_SNIPE + 1);
       const posId = (await pad.curves(tokenAddr)).positionId;
 
-      // Non-owner cannot redirect.
       await expect(locker.connect(alice).redirectFees(posId, bob.address))
         .to.be.revertedWithCustomError(locker, "OnlyOwner");
 
-      // The pad owner (deployer) redirects FUTURE creator fees to bob.
       await expect(locker.redirectFees(posId, bob.address)).to.emit(locker, "FeesRedirected");
       expect(await locker.beneficiaryOf(posId)).to.equal(bob.address);
 
-      // Fees accrued AFTER the redirect land with bob, not the creator.
       await buy(ctx, alice, tokenAddr, ethers.parseEther("2"));
       await locker.collect(posId);
       expect(await locker.claimable(weth.target, bob.address)).to.be.gt(0);
@@ -378,10 +294,9 @@ describe("PotatoCurvePad (single-sided-v3 curve, 100% in Uniswap, no migration)"
   });
 
   describe("holder rewards ON the curve", () => {
-    /** Launch a reward-token curve and return its handles. */
     async function rewardFixture(creatorFeeBps = 2500) {
       const ctx = await loadFixture(deployFixture);
-      const args = ["Rewarded", "RWD", NO_META, salt("Rewarded"), creatorFeeBps] as const;
+      const args = ["Rewarded", "RWD", NO_META, salt("Rewarded"), creatorFeeBps, ethers.ZeroAddress] as const;
       const tokenAddr: string = await ctx.pad
         .connect(ctx.creator)
         .createRewardToken.staticCall(...args);
@@ -392,21 +307,21 @@ describe("PotatoCurvePad (single-sided-v3 curve, 100% in Uniswap, no migration)"
     }
 
     it("launches a reward token through the factory and records its terms", async () => {
-      const { pad, tokenAddr, info, creator, locker, npm } = await rewardFixture();
+      const ctx = await rewardFixture();
+      const { pad, tokenAddr, info, creator } = ctx;
       const terms = await pad.rewardTerms(tokenAddr);
       expect(terms.enabled).to.equal(true);
       expect(terms.creatorFeeBps).to.equal(2500);
-      // Same curve mechanics as a plain launch: whole supply locked in the locker.
       expect(info.creator).to.equal(creator.address);
       expect(info.bonded).to.equal(false);
-      expect(await npm.ownerOf(info.positionId)).to.equal(await locker.getAddress());
+      await assertLockerOwns(ctx, info.positionId, creator.address);
     });
 
     it("rejects a creator cut at or above the whole creator half", async () => {
       const ctx = await loadFixture(deployFixture);
       const half = await ctx.locker.CREATOR_FEE_SHARE_BPS();
       await expect(
-        ctx.pad.connect(ctx.creator).createRewardToken("X", "X", NO_META, salt("X"), half),
+        ctx.pad.connect(ctx.creator).createRewardToken("X", "X", NO_META, salt("X"), half, ethers.ZeroAddress),
       ).to.be.revertedWithCustomError(ctx.pad, "InvalidConfig");
     });
 
@@ -414,8 +329,6 @@ describe("PotatoCurvePad (single-sided-v3 curve, 100% in Uniswap, no migration)"
       const ctx = await rewardFixture();
       await mine(ANTI_SNIPE + 1);
       await buy(ctx, ctx.alice, ctx.tokenAddr, ethers.parseEther("1"));
-      // Alice holds a slice of circulating supply, so swap fees accrue to her
-      // straight off the locked position's fee growth.
       expect(await ctx.token.pendingRewards(ctx.alice.address)).to.be.gt(0n);
     });
 
@@ -427,8 +340,6 @@ describe("PotatoCurvePad (single-sided-v3 curve, 100% in Uniswap, no migration)"
       await ctx.pad.bond(ctx.tokenAddr);
 
       const before = await ctx.token.pendingRewards(ctx.alice.address);
-      // Trade well past the bond price: an unbounded upper range means the position
-      // is still in range, so holders keep earning instead of stopping at bond.
       await buy(ctx, ctx.bob, ctx.tokenAddr, ethers.parseEther("5"));
       expect(await ctx.token.pendingRewards(ctx.alice.address)).to.be.gt(before);
     });
@@ -442,13 +353,13 @@ describe("PotatoCurvePad (single-sided-v3 curve, 100% in Uniswap, no migration)"
   });
 
   describe("security + edge cases (adversarial)", () => {
-    it("rejects a forged swap callback from anyone who is not the mid-swap pool", async () => {
+    it("rejects a forged unlock callback from anyone who is not the manager", async () => {
       const { pad, alice, tokenAddr } = await loadFixture(createFixture);
-      // Outside a dev-buy `_expectedPoolCallback` is address(0), so every caller is
-      // rejected. A successful forge would drain the pad's token balance.
+      // Outside a dev-buy only the manager may call unlockCallback. A successful
+      // forge would let an attacker drive the pad's swap/settle logic.
       const data = ethers.AbiCoder.defaultAbiCoder().encode(["address"], [tokenAddr]);
       await expect(
-        pad.connect(alice).uniswapV3SwapCallback(1, 0, data),
+        pad.connect(alice).unlockCallback(data),
       ).to.be.revertedWithCustomError(pad, "UnexpectedCallback");
     });
 
@@ -466,8 +377,7 @@ describe("PotatoCurvePad (single-sided-v3 curve, 100% in Uniswap, no migration)"
       expect(await pad.owner()).to.equal(ethers.ZeroAddress);
       await expect(pad.setBanned("anything", true)).to.be.revertedWithCustomError(pad, "OnlyOwner");
       await expect(pad.transferOwnership(deployer.address)).to.be.revertedWithCustomError(pad, "OnlyOwner");
-      // Frozen, not cleared: already-banned words keep rejecting launches.
-      await expect(pad.connect(creator).createToken(BANNED_NAME, "OK", NO_META, salt("frozen")))
+      await expect(pad.connect(creator).createToken(BANNED_NAME, "OK", NO_META, salt("frozen"), ethers.ZeroAddress))
         .to.be.revertedWithCustomError(pad, "Banned");
     });
 
@@ -498,7 +408,6 @@ describe("PotatoCurvePad (single-sided-v3 curve, 100% in Uniswap, no migration)"
         const mid = await ctx.pad.curveProgressBps(tokenAddr);
         expect(mid).to.be.gt(0n);
         expect(mid).to.be.lte(10000n);
-        // Overshoot far past the bond tick: must clamp, never wrap or overflow.
         await buy(ctx, ctx.bob, tokenAddr, ethers.parseEther("40"));
         expect(await ctx.pad.curveProgressBps(tokenAddr)).to.equal(10000n);
       }
