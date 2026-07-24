@@ -88,9 +88,10 @@ contract PotatoFeeLocker is IERC721Receiver, ReentrancyGuard {
     mapping(address => mapping(address => uint256)) public claimable;
 
     /// @notice LP tokenId => address that receives the CREATOR half of future fees.
-    ///         address(0) means "the original creator" (the default). Only the pad
-    ///         owner can change it, via {redirectFees}; it never affects the treasury
-    ///         cut, already-accrued claimable balances, or the locked principal.
+    ///         address(0) means "the original creator" (the default). Writable by the
+    ///         pad owner via {redirectFees} or by the token's creator via
+    ///         {setFeeRecipient}; last write wins. Never affects the treasury cut,
+    ///         already-accrued claimable balances, or the locked principal.
     mapping(uint256 => address) public feeRecipient;
 
     event PositionLocked(uint256 indexed tokenId, address indexed launchedToken, address indexed creator);
@@ -110,6 +111,7 @@ contract PotatoFeeLocker is IERC721Receiver, ReentrancyGuard {
     error NothingToClaim();
     error EthTransferFailed();
     error OnlyOwner();
+    error OnlyCreator();
     error InvalidRewardConfig();
 
     constructor(INonfungiblePositionManager positionManager_, IWETH9 weth_, address treasury_) {
@@ -156,9 +158,9 @@ contract PotatoFeeLocker is IERC721Receiver, ReentrancyGuard {
     }
 
     /// @dev Harvest + distribute one position's fees. Internal so {redirectFees}
-    ///      can crystallize accrued fees to the CURRENT beneficiary before it
-    ///      switches — keeping the redirect strictly future-only. The public entry
-    ///      points ({collect}, {redirectFees}) hold the reentrancy guard.
+    ///      and {setFeeRecipient} can crystallize accrued fees to the CURRENT
+    ///      beneficiary before they switch — keeping redirects strictly future-only.
+    ///      The public entry points hold the reentrancy guard.
     function _collect(uint256 tokenId) internal returns (uint256 amount0, uint256 amount1) {
         LockedPosition memory pos = positions[tokenId];
         if (pos.creator == address(0)) revert UnknownPosition();
@@ -304,11 +306,26 @@ contract PotatoFeeLocker is IERC721Receiver, ReentrancyGuard {
     ///         claimable balances, or the permanently-locked principal.
     ///
     ///         NOTE: this is a genuine owner power over the creator fee STREAM (no
-    ///         inactivity gate, no creator veto). The token, its principal, and the
-    ///         treasury cut remain untouchable; renouncing the pad owner freezes it.
+    ///         inactivity gate). The creator can overwrite via {setFeeRecipient} and
+    ///         the owner can always redirect again — last write wins. The token, its
+    ///         principal, and the treasury cut remain untouchable; renouncing the
+    ///         pad owner freezes this power.
     function redirectFees(uint256 tokenId, address to) external nonReentrant {
         if (msg.sender != IPotatoPadOwner(pad).owner()) revert OnlyOwner();
         if (positions[tokenId].creator == address(0)) revert UnknownPosition();
+        _collect(tokenId); // crystallize accrued to the current beneficiary (future-only)
+        feeRecipient[tokenId] = to;
+        emit FeesRedirected(tokenId, to, msg.sender);
+    }
+
+    /// @notice Lets a token's creator point their FUTURE fee share at any address.
+    ///         `to == address(0)` resets to the creator. Accrued fees are crystallized
+    ///         to the current beneficiary first, so changes are strictly future-only.
+    ///         Shares the same mapping as {redirectFees}; last write wins.
+    function setFeeRecipient(uint256 tokenId, address to) external nonReentrant {
+        address creator = positions[tokenId].creator;
+        if (creator == address(0)) revert UnknownPosition();
+        if (msg.sender != creator) revert OnlyCreator();
         _collect(tokenId); // crystallize accrued to the current beneficiary (future-only)
         feeRecipient[tokenId] = to;
         emit FeesRedirected(tokenId, to, msg.sender);

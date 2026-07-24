@@ -375,6 +375,126 @@ describe("PotatoCurvePad (single-sided-v3 curve, 100% in Uniswap, no migration)"
       expect(await locker.claimable(weth.target, bob.address)).to.be.gt(0);
       expect(await locker.claimable(weth.target, creator.address)).to.equal(0);
     });
+
+    it("setFeeRecipient: creator can point future fees at any wallet; non-creators cannot", async () => {
+      const ctx = await loadFixture(createFixture);
+      const { pad, locker, creator, alice, bob, tokenAddr, weth } = ctx;
+      await mine(ANTI_SNIPE + 1);
+      const posId = (await pad.curves(tokenAddr)).positionId;
+
+      // Non-creator and the prospective recipient themselves cannot set.
+      await expect(locker.connect(alice).setFeeRecipient(posId, bob.address))
+        .to.be.revertedWithCustomError(locker, "OnlyCreator");
+      await expect(locker.connect(bob).setFeeRecipient(posId, bob.address))
+        .to.be.revertedWithCustomError(locker, "OnlyCreator");
+
+      // Creator redirects FUTURE fees to bob; bob can claim them.
+      await expect(locker.connect(creator).setFeeRecipient(posId, bob.address))
+        .to.emit(locker, "FeesRedirected")
+        .withArgs(posId, bob.address, creator.address);
+      expect(await locker.beneficiaryOf(posId)).to.equal(bob.address);
+
+      await buy(ctx, alice, tokenAddr, ethers.parseEther("2"));
+      await locker.collect(posId);
+      const bobClaim = await locker.claimable(weth.target, bob.address);
+      expect(bobClaim).to.be.gt(0);
+      expect(await locker.claimable(weth.target, creator.address)).to.equal(0);
+      await expect(locker.connect(bob).claim(weth.target)).to.changeEtherBalance(bob, bobClaim);
+    });
+
+    it("setFeeRecipient is future-only: accrued fees stay with the old beneficiary", async () => {
+      const ctx = await loadFixture(createFixture);
+      const { pad, locker, creator, alice, bob, tokenAddr, weth } = ctx;
+      await mine(ANTI_SNIPE + 1);
+      const posId = (await pad.curves(tokenAddr)).positionId;
+
+      // Accrue fees while creator is still the beneficiary.
+      await buy(ctx, alice, tokenAddr, ethers.parseEther("2"));
+      await locker.collect(posId);
+      const creatorBefore = await locker.claimable(weth.target, creator.address);
+      expect(creatorBefore).to.be.gt(0);
+
+      // Creator redirects; crystallization leaves prior claimables with creator.
+      await locker.connect(creator).setFeeRecipient(posId, bob.address);
+      expect(await locker.claimable(weth.target, creator.address)).to.equal(creatorBefore);
+      expect(await locker.claimable(weth.target, bob.address)).to.equal(0);
+
+      // Only NEW volume accrues to bob.
+      await buy(ctx, alice, tokenAddr, ethers.parseEther("1"));
+      await locker.collect(posId);
+      expect(await locker.claimable(weth.target, creator.address)).to.equal(creatorBefore);
+      expect(await locker.claimable(weth.target, bob.address)).to.be.gt(0);
+    });
+
+    it("setFeeRecipient(address(0)) resets to the original creator", async () => {
+      const ctx = await loadFixture(createFixture);
+      const { pad, locker, creator, bob, tokenAddr } = ctx;
+      const posId = (await pad.curves(tokenAddr)).positionId;
+
+      await locker.connect(creator).setFeeRecipient(posId, bob.address);
+      expect(await locker.beneficiaryOf(posId)).to.equal(bob.address);
+      await locker.connect(creator).setFeeRecipient(posId, ethers.ZeroAddress);
+      expect(await locker.beneficiaryOf(posId)).to.equal(creator.address);
+    });
+
+    it("owner redirectFees and creator setFeeRecipient last-write-wins on the same mapping", async () => {
+      const ctx = await loadFixture(createFixture);
+      const { pad, locker, deployer, creator, alice, bob, tokenAddr, weth } = ctx;
+      await mine(ANTI_SNIPE + 1);
+      const posId = (await pad.curves(tokenAddr)).positionId;
+
+      // Owner first, then creator overwrites.
+      await expect(locker.redirectFees(posId, alice.address))
+        .to.emit(locker, "FeesRedirected")
+        .withArgs(posId, alice.address, deployer.address);
+      await expect(locker.connect(creator).setFeeRecipient(posId, bob.address))
+        .to.emit(locker, "FeesRedirected")
+        .withArgs(posId, bob.address, creator.address);
+      expect(await locker.beneficiaryOf(posId)).to.equal(bob.address);
+
+      // Creator first, then owner overwrites back.
+      await expect(locker.redirectFees(posId, alice.address))
+        .to.emit(locker, "FeesRedirected")
+        .withArgs(posId, alice.address, deployer.address);
+      expect(await locker.beneficiaryOf(posId)).to.equal(alice.address);
+
+      // Smoke: post-owner fees land with alice.
+      await buy(ctx, bob, tokenAddr, ethers.parseEther("1"));
+      await locker.collect(posId);
+      expect(await locker.claimable(weth.target, alice.address)).to.be.gt(0);
+    });
+
+    it("setFeeRecipient reverts UnknownPosition for an unregistered tokenId", async () => {
+      const { locker, creator } = await loadFixture(createFixture);
+      await expect(locker.connect(creator).setFeeRecipient(999999, creator.address))
+        .to.be.revertedWithCustomError(locker, "UnknownPosition");
+    });
+
+    it("setFeeRecipient reset is future-only: bob keeps accrued, new fees go to creator", async () => {
+      const ctx = await loadFixture(createFixture);
+      const { pad, locker, creator, alice, bob, tokenAddr, weth } = ctx;
+      await mine(ANTI_SNIPE + 1);
+      const posId = (await pad.curves(tokenAddr)).positionId;
+
+      // Point fees at bob, then accrue while he is the beneficiary.
+      await locker.connect(creator).setFeeRecipient(posId, bob.address);
+      await buy(ctx, alice, tokenAddr, ethers.parseEther("2"));
+      await locker.collect(posId);
+      const bobBefore = await locker.claimable(weth.target, bob.address);
+      expect(bobBefore).to.be.gt(0);
+
+      // Creator resets to address(0); crystallization leaves bob's claimables alone.
+      await locker.connect(creator).setFeeRecipient(posId, ethers.ZeroAddress);
+      expect(await locker.beneficiaryOf(posId)).to.equal(creator.address);
+      expect(await locker.claimable(weth.target, bob.address)).to.equal(bobBefore);
+      expect(await locker.claimable(weth.target, creator.address)).to.equal(0);
+
+      // Only NEW volume accrues to the creator, not bob.
+      await buy(ctx, alice, tokenAddr, ethers.parseEther("1"));
+      await locker.collect(posId);
+      expect(await locker.claimable(weth.target, bob.address)).to.equal(bobBefore);
+      expect(await locker.claimable(weth.target, creator.address)).to.be.gt(0);
+    });
   });
 
   describe("holder rewards ON the curve", () => {
