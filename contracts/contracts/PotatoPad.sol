@@ -6,35 +6,38 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-// PotatoToken is imported for the `setPool` cast only. The token CREATION
-// bytecode lives in {PotatoTokenFactory} — see there for why (EIP-170).
-import {PotatoToken} from "./PotatoToken.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
+import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {BalanceDelta, BalanceDeltaLibrary} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
+
 import {PotatoFeeLocker} from "./PotatoFeeLocker.sol";
 // Declared rather than imported: the pad only needs the selector, and pulling in
 // the full contract risks the EIP-170 size ceiling this pad already sits near.
 import {IPotatoRewardTokenBind} from "./interfaces/IPotatoRewardTokenBind.sol";
 import {PotatoTokenFactory} from "./PotatoTokenFactory.sol";
 import {TickMath} from "./libraries/TickMath.sol";
-import {
-    IUniswapV3Factory,
-    IUniswapV3Pool,
-    INonfungiblePositionManager,
-    IWETH9
-} from "./interfaces/IUniswapV3.sol";
+import {V4SingleSided} from "./libraries/V4SingleSided.sol";
+import {IWETH9} from "./interfaces/IWETH9.sol";
 
-/// @title PotatoPad (v2 — direct-to-Uniswap single-sided launch)
+/// @title PotatoPad (v3 — direct-to-Uniswap-V4 single-sided launch)
 /// @notice A launchpad that skips bonding curves entirely. Every launch mints a
 ///         fixed 1B supply straight into a permanently locked, single-sided
-///         Uniswap V3 position:
+///         Uniswap V4 position:
 ///
 ///         1. `createToken` deploys a fixed-supply ERC-20 (entire supply held here).
-///         2. It creates + initializes the token/WETH 1% pool at the START price
-///            (≈ 3 ETH FDV), positioned exactly on a tick boundary.
-///         3. It mints the ENTIRE supply as SINGLE-SIDED liquidity (token only,
-///            ZERO WETH) across [tickLower, tickUpper] (top ≈ 530 ETH FDV). The LP
-///            NFT is minted straight into the {PotatoFeeLocker} — locked forever,
-///            principal unruggable, but swap fees remain collectable (50/50
-///            creator/treasury) "for life".
+///         2. It initializes the token/WETH 1% pool on the singleton at the START
+///            price (≈ 3 ETH FDV), positioned exactly on a tick boundary.
+///         3. It hands the ENTIRE supply to the {PotatoFeeLocker}, which mints it as
+///            SINGLE-SIDED liquidity (token only, ZERO WETH) across [tickLower,
+///            tickUpper] (top ≈ 530 ETH FDV). The locker OWNS that position in the
+///            singleton and exposes no way to remove it — locked forever, principal
+///            unruggable, but swap fees remain collectable (50/50 creator/treasury)
+///            "for life".
 ///         4. If ETH is attached, an atomic dev-buy swaps WETH->token on the fresh
 ///            pool and delivers the tokens to the creator. There is no separate
 ///            curve fee — the dev-buy pays the pool's normal 1% LP fee, which
@@ -45,16 +48,29 @@ import {
 ///         sold single-sided out of the locked LP. Correct for BOTH token/WETH
 ///         orderings (token0 or token1).
 ///
+///         ## What changed for Uniswap V4
+///
+///         V3 had a factory + per-pair pool contract + a NonfungiblePositionManager;
+///         the pad called each directly. V4 is a singleton with flash accounting:
+///         `initialize` lives on the manager, and every mint/swap runs inside an
+///         `unlock` callback that must net all currency deltas to zero. The mint is
+///         delegated to the locker (which owns the position); the pad keeps only the
+///         initialize + the dev-buy swap, the latter settled here in {unlockCallback}.
+///
 ///         This is an MVP for demonstration. It is NOT audited.
-contract PotatoPad is ReentrancyGuard {
+contract PotatoPad is IUnlockCallback, ReentrancyGuard {
     using SafeERC20 for IERC20;
+    using StateLibrary for IPoolManager;
+    using PoolIdLibrary for PoolKey;
+    using BalanceDeltaLibrary for BalanceDelta;
 
     // ---------------------------------------------------------------- types --
 
     struct TokenInfo {
         address creator;
-        address pool; // Uniswap V3 pool
-        uint256 lpTokenId; // permanently locked LP position
+        PoolId poolId; // Uniswap V4 pool id (keccak of the pool key)
+        uint256 lpTokenId; // permanently locked LP position (the locker's id)
+        address quote; // the pool's quote currency (WETH by default; a custom ERC-20 otherwise)
     }
 
     /// @notice Launch metadata (image + socials). NOT stored on-chain — emitted
@@ -82,8 +98,8 @@ contract PotatoPad is ReentrancyGuard {
 
     uint256 public constant TOTAL_SUPPLY = 1_000_000_000e18;
 
-    uint24 public constant POOL_FEE = 10_000; // Uniswap V3 1% fee tier
-    int24 public constant TICK_SPACING = 200; // tick spacing of the 1% tier
+    uint24 public constant POOL_FEE = 10_000; // 1% LP fee
+    int24 public constant TICK_SPACING = 200; // tick spacing paired with the 1% fee
 
     uint256 public constant CREATOR_FEE_SHARE_BPS = 5_000; // creator gets half the LP fees
     uint256 internal constant BPS = 10_000;
@@ -122,8 +138,9 @@ contract PotatoPad is ReentrancyGuard {
     /// @notice Anti-snipe window length (in blocks) applied to each launched token.
     uint256 public immutable antiSnipeBlocks;
 
-    IUniswapV3Factory public immutable v3Factory;
-    INonfungiblePositionManager public immutable positionManager;
+    /// @notice The Uniswap V4 singleton — pool custody, initialize, swap, and
+    ///         (via the locker) liquidity all live here.
+    IPoolManager public immutable manager;
     IWETH9 public immutable weth;
     PotatoFeeLocker public immutable locker;
     /// @notice Deploys launch tokens on this pad's behalf, and the CREATE2 deployer
@@ -140,9 +157,6 @@ contract PotatoPad is ReentrancyGuard {
     ///         `tokens()` getter keeps its existing shape for already-deployed
     ///         frontends reading legacy pads.
     mapping(address => RewardTerms) public rewardTerms;
-
-    /// @dev Set only for the duration of a dev-buy swap, to authenticate the callback.
-    address internal _expectedPoolCallback;
 
     /// @notice The pad admin — two powers: block NEW launches by name via
     ///         {setBanned}, and manually reassign any token's FUTURE creator-fee
@@ -165,7 +179,7 @@ contract PotatoPad is ReentrancyGuard {
         address indexed creator,
         string name,
         string symbol,
-        address pool,
+        bytes32 poolId,
         string imageURI,
         string website,
         string twitter,
@@ -173,7 +187,7 @@ contract PotatoPad is ReentrancyGuard {
     );
     event Launched(
         address indexed token,
-        address indexed pool,
+        bytes32 indexed poolId,
         uint256 lpTokenId,
         uint128 liquidity,
         uint256 tokenSeeded
@@ -193,8 +207,6 @@ contract PotatoPad is ReentrancyGuard {
     error InvalidConfig();
     error EthTransferFailed();
     error UnexpectedCallback();
-    error NotSingleSided();
-    error SeedFailed();
     error TickRangeInvalid();
     error LaunchGriefed();
     error Banned();
@@ -214,24 +226,22 @@ contract PotatoPad is ReentrancyGuard {
         uint256 startFdvWei_,
         uint256 topFdvWei_,
         uint256 antiSnipeBlocks_,
-        IUniswapV3Factory v3Factory_,
-        INonfungiblePositionManager positionManager_,
+        IPoolManager manager_,
         IWETH9 weth_,
         address owner_,
         string[] memory initialBannedWords_
     ) {
         if (
             treasury_ == address(0) || owner_ == address(0) || startFdvWei_ == 0 || topFdvWei_ == 0
-                || topFdvWei_ <= startFdvWei_ || address(v3Factory_) == address(0)
-                || address(positionManager_) == address(0) || address(weth_) == address(0)
+                || topFdvWei_ <= startFdvWei_ || address(manager_) == address(0)
+                || address(weth_) == address(0)
         ) revert InvalidConfig();
 
         treasury = treasury_;
         targetStartFdv = startFdvWei_;
         targetTopFdv = topFdvWei_;
         antiSnipeBlocks = antiSnipeBlocks_;
-        v3Factory = v3Factory_;
-        positionManager = positionManager_;
+        manager = manager_;
         weth = weth_;
 
         // Derive tick bounds from the FDV targets (in the token0 convention),
@@ -249,11 +259,11 @@ contract PotatoPad is ReentrancyGuard {
         actualStartFdv = _fdvFromSqrtPriceX96(TickMath.getSqrtRatioAtTick(floor_));
         actualTopFdv = _fdvFromSqrtPriceX96(TickMath.getSqrtRatioAtTick(ceil_));
 
-        locker = new PotatoFeeLocker(positionManager_, weth_, treasury_);
+        locker = new PotatoFeeLocker(manager_, weth_, treasury_);
         // After the locker: the factory bakes its address into every token's
         // constructor args (the locker must be anti-snipe/reward exempt).
         tokenFactory = new PotatoTokenFactory(
-            address(positionManager_),
+            address(manager_),
             address(locker),
             address(weth_),
             TOTAL_SUPPLY,
@@ -270,10 +280,10 @@ contract PotatoPad is ReentrancyGuard {
 
     // -------------------------------------------------------------- actions --
 
-    /// @notice Launches a new token: deploys the ERC-20, creates + initializes its
-    ///         Uniswap V3 pool at the start price, mints the whole supply as a
-    ///         single-sided locked LP, and optionally executes a creator dev-buy
-    ///         with the attached ETH.
+    /// @notice Launches a new token: deploys the ERC-20, initializes its Uniswap V4
+    ///         pool at the start price, mints the whole supply as a single-sided
+    ///         locked LP, and optionally executes a creator dev-buy with the
+    ///         attached ETH.
     /// @dev During the anti-snipe window a dev-buy is capped like any wallet at
     ///      MAX_WALLET (2%); size the attached ETH so the output stays under it.
     /// @param salt Caller-supplied entropy for the token's CREATE2 address. Pass a
@@ -281,14 +291,23 @@ contract PotatoPad is ReentrancyGuard {
     ///        so a griefer can't pre-initialize its Uniswap pool at a hostile price
     ///        to brick the launch (see the CREATE2 rationale in the body). On the
     ///        rare {LaunchGriefed} revert, retry with a new random salt.
+    /// @param quote the pool's quote/denomination currency. `address(0)` → WETH (the
+    ///        token is priced in ETH, the standard behavior). Any other address prices
+    ///        it in that ERC-20 instead. This is a PLAIN launch — no holder rewards; to
+    ///        also reward holders in the quote asset use {createRewardToken}. A custom
+    ///        quote MUST be an 18-decimal ERC-20 (the FDV↔tick math assumes 18/18
+    ///        decimals); the frontend enforces this, not the pad. A custom quote also
+    ///        forbids the ETH dev-buy (msg.value must be 0).
     function createToken(
         string calldata name,
         string calldata symbol,
         TokenMeta calldata meta,
-        bytes32 salt
+        bytes32 salt,
+        address quote
     ) external payable nonReentrant returns (address token) {
-        return _launch(name, symbol, meta, salt, false, 0);
+        return _launch(name, symbol, meta, salt, false, 0, quote == address(0) ? address(weth) : quote);
     }
+
 
     /// @notice Launches a HOLDER-REWARDS token: identical to {createToken} in every
     ///         respect — same locked single-sided LP, same treasury cut, same
@@ -314,15 +333,22 @@ contract PotatoPad is ReentrancyGuard {
     ///      launchers a ready-made deceptive-launch vector. Anyone actually wanting
     ///      that split already has {createToken}, which is the same thing without the
     ///      misleading label.
+    /// @param quote the pool's quote currency = the asset holders are rewarded in.
+    ///        `address(0)` → WETH (holders earn ETH, the standard behavior). Any
+    ///        other address pairs the token with that ERC-20 so the LP fee arrives in
+    ///        it and the same continuous per-share engine pays holders in it — no
+    ///        conversion. A custom quote MUST be an 18-decimal ERC-20 (the FDV↔tick
+    ///        math assumes 18/18 decimals); the frontend enforces this, not the pad.
     function createRewardToken(
         string calldata name,
         string calldata symbol,
         TokenMeta calldata meta,
         bytes32 salt,
-        uint16 creatorFeeBps
+        uint16 creatorFeeBps,
+        address quote
     ) external payable nonReentrant returns (address token) {
         if (creatorFeeBps >= CREATOR_FEE_SHARE_BPS) revert InvalidConfig();
-        return _launch(name, symbol, meta, salt, true, creatorFeeBps);
+        return _launch(name, symbol, meta, salt, true, creatorFeeBps, quote == address(0) ? address(weth) : quote);
     }
 
     /// @dev The whole launch, shared by both entry points. `isReward` selects which
@@ -334,22 +360,25 @@ contract PotatoPad is ReentrancyGuard {
         TokenMeta calldata meta,
         bytes32 salt,
         bool isReward,
-        uint16 creatorFeeBps
+        uint16 creatorFeeBps,
+        address quote
     ) internal returns (address token) {
         // Anti-vampire shield: reject blacklisted names/symbols (normalized to
         // match the client's trim().toLowerCase()) before doing any work.
         if (banned[_normHash(bytes(name))] || banned[_normHash(bytes(symbol))]) revert Banned();
+        // A custom quote can't take an ETH dev-buy (the pool isn't token/WETH).
+        if (msg.value > 0 && quote != address(weth)) revert InvalidConfig();
 
         // 1. Deploy the fixed-supply token with CREATE2, at an address that has NO
         //    pre-existing Uniswap pool and NO code.
         //
         //    Why not plain CREATE: a token deployed with `new PotatoToken(...)`
         //    lands at an address that is a pure function of the pad's nonce, so
-        //    anyone can compute the *next* one. The Uniswap factory lets you
-        //    `createPool` + `initialize` a pool for a token that doesn't exist yet,
-        //    so a griefer could pre-initialize the pool at a hostile price, making
-        //    our single-sided mint revert. And because a reverted createToken rolls
-        //    the pad's nonce back, that SAME address (and poisoned pool) would be
+        //    anyone can compute the *next* one. `PoolManager.initialize` lets you
+        //    initialize a pool for a token that doesn't exist yet, so a griefer
+        //    could pre-initialize the pool at a hostile price, making our
+        //    single-sided mint revert. And because a reverted createToken rolls the
+        //    pad's nonce back, that SAME address (and poisoned pool) would be
         //    retried forever: one ~gas-only transaction would brick every future
         //    launch permanently.
         //
@@ -364,10 +393,8 @@ contract PotatoPad is ReentrancyGuard {
         //
         //    The token is deployed by {tokenFactory} (it carries the creation
         //    bytecode; see that contract for why), so addresses derive from the
-        //    FACTORY as CREATE2 deployer. Everything above holds unchanged: the
-        //    salt is still the caller's random value, and the factory only
-        //    deploys for this pad.
-        bytes32 initCodeHash = tokenFactory.initCodeHash(name, symbol, isReward);
+        //    FACTORY as CREATE2 deployer.
+        bytes32 initCodeHash = tokenFactory.initCodeHash(name, symbol, isReward, quote);
 
         // Seed from caller + their random salt, then walk past any taken candidate.
         uint256 seed = uint256(keccak256(abi.encode(msg.sender, salt)));
@@ -375,12 +402,12 @@ contract PotatoPad is ReentrancyGuard {
         address predicted;
         for (; tries < MAX_SALT_TRIES;) {
             predicted = _computeTokenAddress(bytes32(seed), initCodeHash);
-            // Clean iff no pool exists for token/WETH AND the address holds no code
-            // (either would make our own createPool / CREATE2 deploy fail).
-            if (v3Factory.getPool(predicted, address(weth), POOL_FEE) == address(0) && predicted.code.length == 0)
-            {
-                break;
-            }
+            // Clean iff the token/quote pool is uninitialized AND the address holds
+            // no code (either would make our own initialize / CREATE2 deploy fail).
+            (PoolKey memory candKey,) =
+                V4SingleSided.poolKeyFor(predicted, quote, POOL_FEE, TICK_SPACING);
+            (uint160 existing,,,) = manager.getSlot0(candKey.toId());
+            if (existing == 0 && predicted.code.length == 0) break;
             unchecked {
                 ++tries;
                 ++seed;
@@ -391,53 +418,59 @@ contract PotatoPad is ReentrancyGuard {
         // a fresh random salt for a brand-new (un-pre-poisonable) candidate set.
         if (tries == MAX_SALT_TRIES) revert LaunchGriefed();
 
-        token = tokenFactory.deploy(name, symbol, isReward, bytes32(seed));
+        token = tokenFactory.deploy(name, symbol, isReward, quote, bytes32(seed));
         // CREATE2 determinism: the deployed address is exactly the one we vetted.
         assert(token == predicted);
 
-        bool tokenIs0 = token < address(weth);
+        (PoolKey memory key, bool tokenIs0) =
+            V4SingleSided.poolKeyFor(token, quote, POOL_FEE, TICK_SPACING);
         (int24 tickLower, int24 tickUpper, int24 initTick) = _rangeFor(tokenIs0);
+        PoolId poolId = key.toId();
 
-        // 2. Create the pool. We vetted above that no pool exists for this token,
-        //    so this always deploys a fresh pool that only we initialize.
-        address pool = v3Factory.getPool(token, address(weth), POOL_FEE);
-        if (pool == address(0)) {
-            pool = v3Factory.createPool(token, address(weth), POOL_FEE);
-        }
+        // 2. Initialize at the EXACT tick-boundary sqrt price. Sitting precisely on
+        //    `initTick` is what makes the single-sided mint consume exactly zero
+        //    WETH. We vetted above that the pool is uninitialized, so this succeeds.
+        manager.initialize(key, TickMath.getSqrtRatioAtTick(initTick));
 
-        // Register the pool as anti-snipe exempt (it will custody ~all supply).
-        PotatoToken(token).setPool(pool);
+        // 3. Hand the whole supply to the locker and have it mint the single-sided,
+        //    permanently-locked position (it owns the position in the singleton).
+        uint256 supply = IERC20(token).balanceOf(address(this));
+        IERC20(token).safeTransfer(address(locker), supply);
+        (uint256 lpTokenId, uint128 liquidity, uint256 tokenSeeded) = locker.seedSingleSided(
+            key, tickLower, tickUpper, token, msg.sender, isReward ? token : address(0), creatorFeeBps
+        );
 
-        // 3. Initialize at the EXACT tick-boundary sqrt price. Sitting precisely on
-        //    `initTick` is what makes the mint consume exactly zero WETH.
-        (uint160 existing,,,,,,) = IUniswapV3Pool(pool).slot0();
-        if (existing == 0) {
-            IUniswapV3Pool(pool).initialize(TickMath.getSqrtRatioAtTick(initTick));
-        }
-
-        // 4. Mint the entire supply single-sided into the locker.
-        (uint256 lpTokenId, uint128 liquidity, uint256 tokenSeeded) =
-            _mintSingleSided(token, tokenIs0, tickLower, tickUpper);
-
-        tokens[token] = TokenInfo({creator: msg.sender, pool: pool, lpTokenId: lpTokenId});
+        tokens[token] = TokenInfo({creator: msg.sender, poolId: poolId, lpTokenId: lpTokenId, quote: quote});
         allTokens.push(token);
-        // On a holder-rewards launch the token IS the reward sink: the locker pushes
-        // the holders' slice straight to it, to fund what holders have accrued.
-        locker.register(lpTokenId, token, msg.sender, isReward ? token : address(0), creatorFeeBps);
 
         // Hand the reward token its position so it can read fee growth directly.
         // Must come AFTER the mint — the position does not exist before it — and
         // before any dev buy, so the very first swap's fee is already accounted.
         if (isReward) {
             IPotatoRewardTokenBind(token).bindPosition(
-                address(locker), lpTokenId, liquidity, tickLower, tickUpper, !tokenIs0, creatorFeeBps
+                address(locker),
+                lpTokenId,
+                PoolId.unwrap(poolId),
+                liquidity,
+                tickLower,
+                tickUpper,
+                !tokenIs0,
+                creatorFeeBps
             );
         }
 
         emit TokenCreated(
-            token, msg.sender, name, symbol, pool, meta.imageURI, meta.website, meta.twitter, meta.telegram
+            token,
+            msg.sender,
+            name,
+            symbol,
+            PoolId.unwrap(poolId),
+            meta.imageURI,
+            meta.website,
+            meta.twitter,
+            meta.telegram
         );
-        emit Launched(token, pool, lpTokenId, liquidity, tokenSeeded);
+        emit Launched(token, PoolId.unwrap(poolId), lpTokenId, liquidity, tokenSeeded);
 
         if (isReward) {
             rewardTerms[token] = RewardTerms({enabled: true, creatorFeeBps: creatorFeeBps});
@@ -446,9 +479,9 @@ contract PotatoPad is ReentrancyGuard {
             );
         }
 
-        // 5. Optional atomic dev-buy with the attached ETH.
+        // 4. Optional atomic dev-buy with the attached ETH.
         if (msg.value > 0) {
-            _devBuy(token, pool, tokenIs0, tickLower, tickUpper, msg.value);
+            _devBuy(token, key, tokenIs0, tickLower, tickUpper, msg.value);
         }
     }
 
@@ -489,64 +522,14 @@ contract PotatoPad is ReentrancyGuard {
         return keccak256(out);
     }
 
-    // ---------------------------------------------------------- LP seeding --
-
-    /// @dev Mints the pad's entire token balance as single-sided liquidity
-    ///      (token only) directly to the locker, and asserts zero WETH was used.
-    function _mintSingleSided(address token, bool tokenIs0, int24 tickLower, int24 tickUpper)
-        internal
-        returns (uint256 tokenId, uint128 liquidity, uint256 tokenUsed)
-    {
-        uint256 supply = IERC20(token).balanceOf(address(this));
-        IERC20(token).forceApprove(address(positionManager), supply);
-
-        (uint256 amount0Desired, uint256 amount1Desired) =
-            tokenIs0 ? (supply, uint256(0)) : (uint256(0), supply);
-
-        uint256 used0;
-        uint256 used1;
-        (tokenId, liquidity, used0, used1) = positionManager.mint(
-            INonfungiblePositionManager.MintParams({
-                token0: tokenIs0 ? token : address(weth),
-                token1: tokenIs0 ? address(weth) : token,
-                fee: POOL_FEE,
-                tickLower: tickLower,
-                tickUpper: tickUpper,
-                amount0Desired: amount0Desired,
-                amount1Desired: amount1Desired,
-                amount0Min: 0,
-                amount1Min: 0,
-                recipient: address(locker),
-                deadline: block.timestamp
-            })
-        );
-
-        IERC20(token).forceApprove(address(positionManager), 0);
-
-        uint256 wethUsed;
-        if (tokenIs0) {
-            (tokenUsed, wethUsed) = (used0, used1);
-        } else {
-            (tokenUsed, wethUsed) = (used1, used0);
-        }
-
-        // The seed MUST be pure token: zero WETH, real liquidity, ~the whole
-        // supply deployed. Defense-in-depth: createToken already guarantees a
-        // fresh, self-initialized pool (see the CREATE2 salt logic), so a poisoned
-        // pool can't reach here — but if one ever did, we revert rather than
-        // produce a broken launch.
-        if (wethUsed != 0) revert NotSingleSided();
-        if (liquidity == 0 || tokenUsed < supply - supply / 1000) revert SeedFailed();
-    }
-
     // ------------------------------------------------------------- dev-buy --
 
     /// @dev Wraps `ethIn` to WETH and swaps WETH->token on the fresh pool, sending
-    ///      the tokens straight to the creator. Any WETH the swap didn't consume
-    ///      (e.g. it reached the range edge) is refunded as ETH.
+    ///      the tokens straight to the creator (via {unlockCallback}). Any WETH the
+    ///      swap didn't consume (e.g. it reached the range edge) is refunded as ETH.
     function _devBuy(
         address token,
-        address pool,
+        PoolKey memory key,
         bool tokenIs0,
         int24 tickLower,
         int24 tickUpper,
@@ -560,14 +543,10 @@ contract PotatoPad is ReentrancyGuard {
         bool zeroForOne = !tokenIs0;
         uint160 sqrtLimit = TickMath.getSqrtRatioAtTick(tokenIs0 ? tickUpper : tickLower);
 
-        _expectedPoolCallback = pool;
-        (int256 amount0, int256 amount1) =
-            IUniswapV3Pool(pool).swap(msg.sender, zeroForOne, int256(ethIn), sqrtLimit, abi.encode(token));
-        _expectedPoolCallback = address(0);
-
-        // The WETH side is the positive (owed-to-pool) delta.
-        uint256 wethSpent = uint256(tokenIs0 ? amount1 : amount0);
-        uint256 tokensOut = uint256(-(tokenIs0 ? amount0 : amount1));
+        (uint256 wethSpent, uint256 tokensOut) = abi.decode(
+            manager.unlock(abi.encode(key, zeroForOne, ethIn, sqrtLimit, tokenIs0, msg.sender)),
+            (uint256, uint256)
+        );
         emit DevBuy(token, msg.sender, wethSpent, tokensOut);
 
         uint256 refund = ethIn - wethSpent;
@@ -578,23 +557,36 @@ contract PotatoPad is ReentrancyGuard {
         }
     }
 
-    /// @dev Pays the WETH owed for a dev-buy swap out of WETH we already hold.
-    ///      Authenticated by `_expectedPoolCallback` so only our own swap can call it.
-    function uniswapV3SwapCallback(int256 amount0Delta, int256 amount1Delta, bytes calldata data)
-        external
-    {
-        if (msg.sender != _expectedPoolCallback || _expectedPoolCallback == address(0)) {
-            revert UnexpectedCallback();
-        }
-        address token = abi.decode(data, (address));
-        bool tokenIs0 = token < address(weth);
+    /// @notice Flash-accounting entrypoint for the dev-buy swap. Only the manager
+    ///         can reach it, and only during THIS pad's own `unlock` — the manager
+    ///         always calls back the address that invoked `unlock`.
+    function unlockCallback(bytes calldata data) external override returns (bytes memory) {
+        if (msg.sender != address(manager)) revert UnexpectedCallback();
+        (PoolKey memory key, bool zeroForOne, uint256 ethIn, uint160 sqrtLimit, bool tokenIs0, address creator)
+        = abi.decode(data, (PoolKey, bool, uint256, uint160, bool, address));
 
-        if (amount0Delta > 0) {
-            IERC20(tokenIs0 ? token : address(weth)).safeTransfer(msg.sender, uint256(amount0Delta));
-        }
-        if (amount1Delta > 0) {
-            IERC20(tokenIs0 ? address(weth) : token).safeTransfer(msg.sender, uint256(amount1Delta));
-        }
+        // Exact-input swap of WETH (negative amountSpecified = exact input).
+        BalanceDelta delta = manager.swap(
+            key,
+            SwapParams({zeroForOne: zeroForOne, amountSpecified: -int256(ethIn), sqrtPriceLimitX96: sqrtLimit}),
+            ""
+        );
+
+        // WETH is the input (owed to the pool, negative); the token is the output
+        // (owed to us, positive). Map by orientation.
+        (int128 wethDelta, int128 tokenDelta, Currency wethCur, Currency tokenCur) = tokenIs0
+            ? (delta.amount1(), delta.amount0(), key.currency1, key.currency0)
+            : (delta.amount0(), delta.amount1(), key.currency0, key.currency1);
+
+        uint256 wethSpent = wethDelta < 0 ? uint256(uint128(-wethDelta)) : 0;
+        uint256 tokensOut = tokenDelta > 0 ? uint256(uint128(tokenDelta)) : 0;
+
+        if (wethSpent != 0) V4SingleSided.settle(manager, wethCur, wethSpent);
+        // Deliver straight to the creator; the token's anti-snipe cap applies to
+        // this take exactly as it would to any buy during the window.
+        if (tokensOut != 0) manager.take(tokenCur, creator, tokensOut);
+
+        return abi.encode(wethSpent, tokensOut);
     }
 
     // ------------------------------------------------------------ tick math --

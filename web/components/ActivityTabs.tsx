@@ -15,10 +15,14 @@ export function ActivityTabs({
   token,
   creator,
   pool,
+  poolId: _poolId,
 }: {
   token: Address;
   creator: Address;
+  /** V3 pool address (labels the pool row). ZERO on V4 chains. */
   pool: Address;
+  /** V4 pool id (V4 chains). Reserved for a V4-native activity feed. */
+  poolId?: `0x${string}`;
 }) {
   const { holders, total, unavailable, isLoading } = useTokenHolders(token);
   const topHolders = holders.slice(0, 10);

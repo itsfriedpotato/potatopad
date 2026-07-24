@@ -13,7 +13,9 @@ export interface TokenRow {
   creator: Address;
   /** The planter's profile name. Falls back to their short address when absent. */
   creatorName?: string;
-  pool: Address;
+  /** Ancient (V3) tokens carry their pool address here for the trade link; unused
+   *  for V4 PotatoPad tokens (which are identified by poolId, priced upstream). */
+  pool?: Address;
   /** WETH per whole token (float); null when price is unknown / failed. */
   priceWeth: number | null;
   /** fully-diluted valuation in ETH; null when price unknown. */

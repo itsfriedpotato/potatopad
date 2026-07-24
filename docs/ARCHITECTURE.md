@@ -1,7 +1,18 @@
 # Architecture
 
+> **Uniswap V4 port.** The contracts now launch into the V4 singleton
+> `PoolManager` (flash accounting: `unlock` callbacks + `settle`/`take`) instead
+> of V3's per-pair pool contracts + NonfungiblePositionManager. WETH stays the
+> quote currency, so the economics are unchanged; the fee locker owns the position
+> directly in the singleton (no NFT). The frontend is **hybrid**: it routes reads
+> and trading by each chain's `uniswapVersion` (config), so existing V3 tokens
+> keep displaying and trading while V4 chains use StateView + Universal Router +
+> Permit2. Sections below that describe V3 mechanics (createPool / pool.slot0 /
+> NPM.mint) map to their V4 equivalents (PoolManager.initialize / StateView by
+> poolId / locker.seedSingleSided via `unlock`).
+
 A map of the codebase for new contributors. PotatoPad has two halves that meet
-only at an address + an event: **contracts** that launch tokens into Uniswap V3,
+only at an address + an event: **contracts** that launch tokens into Uniswap,
 and a **Next.js frontend** that reads chain state (there is no database).
 
 ```

@@ -2,17 +2,22 @@
 
 import { ExternalLink, TrendingUp } from "lucide-react";
 import { useState } from "react";
-import { encodeFunctionData, formatEther, parseEther, type Address } from "viem";
+import { encodeFunctionData, formatEther, parseEther, type Address, type Hex } from "viem";
 import { useAccount, useBalance, usePublicClient, useReadContract } from "wagmi";
 import { potatoTokenAbi } from "@/lib/abi";
 import {
+  PERMIT2_ADDRESSES,
   POOL_FEE_TIER,
   QUOTER_ADDRESSES,
   SWAP_ROUTER_ADDRESSES,
+  UNISWAP_VERSION,
+  UNIVERSAL_ROUTER_ADDRESSES,
   ZERO_ADDRESS,
   uniswapSwapUrl,
 } from "@/lib/config";
 import { ROUTER_ADDRESS_THIS, quoterV2Abi, swapRouter02Abi } from "@/lib/pool";
+import { poolKeyFor, v4QuoterAbi } from "@/lib/v4";
+import { buildV4Buy, buildV4Sell, permit2Abi, universalRouterAbi } from "@/lib/v4Swap";
 import { usePad, useTx } from "@/lib/hooks";
 import { formatEth, formatTokens, tryParseEther, withSlippage } from "@/lib/format";
 import { AddressChip } from "@/components/AddressChip";
@@ -22,34 +27,10 @@ import { TxStatus } from "@/components/TxStatus";
 /** Keep a little ETH aside for gas when quick-filling "Max" on buys. */
 const GAS_BUFFER = parseEther("0.01");
 
-/**
- * How long a signed swap stays valid, in seconds. SwapRouter02's
- * `exactInputSingle` struct has no deadline, so a signed-but-unmined swap would
- * otherwise linger in the mempool indefinitely (bounded only by slippage) and
- * be executed later when it's sandwich-profitable. We wrap the call in the
- * router's `multicall(deadline, [...])`, which reverts once the deadline passes.
- */
 const SWAP_DEADLINE_SECONDS = 600n; // 10 minutes
+const MAX_UINT160 = 2n ** 160n - 1n;
+const PERMIT2_EXPIRATION = 2n ** 48n - 1n; // effectively non-expiring
 
-/**
- * Deadline measured against the CHAIN's clock, not the browser's.
- *
- * The router compares against `block.timestamp`, so a browser clock that is
- * behind the chain produces a deadline already in the chain's past and every
- * swap reverts `Transaction too old`. That is easy to hit on a local or forked
- * node (Hardhat stamps each auto-mined block at least a second after the last,
- * so a burst of activity runs the chain clock ahead of real time), and it can
- * also bite a user whose system clock is simply wrong.
- *
- * Taking the max of the two is safe in both directions: the chain's own
- * timestamp when it is ahead, wall-clock when the latest block is stale.
- *
- * NOTE: this makes the window an UPPER bound, not an exact one. When the chain
- * clock lags wall-clock, the effective allowance measured against
- * `block.timestamp` is longer than SWAP_DEADLINE_SECONDS by however far it lags.
- * Immaterial on an L2 with real blocktimes, but do not later tighten this
- * constant on the assumption that it is exact.
- */
 function swapDeadline(latestBlockTs?: bigint): bigint {
   const wall = BigInt(Math.floor(Date.now() / 1000));
   const base = latestBlockTs && latestBlockTs > wall ? latestBlockTs : wall;
@@ -66,6 +47,7 @@ export function TradeWidget({
   token,
   symbol,
   pool,
+  quote,
   feeTier = POOL_FEE_TIER,
   isCurve = false,
   bonded = false,
@@ -73,39 +55,49 @@ export function TradeWidget({
   token: Address;
   symbol: string;
   pool: Address;
-  /** Uniswap pool fee tier (bps). Defaults to PotatoPad's 1% tier; ancient tokens pass their own. */
+  /** V4 pool id (V4 chains). Accepted for API parity; V4 trades derive the pool
+   *  key from token/WETH, so it isn't read here. */
+  poolId?: Hex;
+  /** The pool's quote currency. When it's a custom ERC-20 (not WETH), the token
+   *  trades against that token — in-app ETH trading doesn't apply, so it falls back
+   *  to the Uniswap link. */
+  quote?: Address;
   feeTier?: number;
-  /** True when the token launched on the bonding-curve pad. */
   isCurve?: boolean;
-  /** True once a curve token has bonded (its position locked into the fee locker). */
   bonded?: boolean;
 }) {
   const { address: user } = useAccount();
   const { chainId, weth } = usePad();
   const buyTx = useTx();
   const approveTx = useTx();
+  const permit2Tx = useTx();
   const sellTx = useTx();
 
-  const router = SWAP_ROUTER_ADDRESSES[chainId];
-  // Chain clock for the swap deadline, read ON DEMAND at submit rather than
-  // polled. A poller would add a recurring hit to the rate-limited /api/rpc proxy
-  // on every open token page, and the value is only ever needed at the moment a
-  // swap is signed.
+  const isV4 = UNISWAP_VERSION[chainId] === "v4";
+  const router = isV4 ? UNIVERSAL_ROUTER_ADDRESSES[chainId] : SWAP_ROUTER_ADDRESSES[chainId];
+  const permit2 = PERMIT2_ADDRESSES[chainId];
+  const quoter = QUOTER_ADDRESSES[chainId];
+
   const publicClient = usePublicClient();
   async function chainNow(): Promise<bigint | undefined> {
     try {
       return (await publicClient?.getBlock())?.timestamp;
     } catch {
-      return undefined; // fall back to wall-clock inside swapDeadline()
+      return undefined;
     }
   }
-  const quoter = QUOTER_ADDRESSES[chainId];
-  // Every token — curve (pre- and post-migration), direct, ancient — trades
-  // through Uniswap: the single-sided-v3 curve is a live Uniswap pool from
-  // block one. Curve buys just walk the price up the range.
-  const onCurve = isCurve && !bonded; // pre-bond curve phase (copy only)
-  const spender = router ?? ZERO_ADDRESS; // sells approve the router
-  const inApp = !!router && weth !== ZERO_ADDRESS;
+
+  const onCurve = isCurve && !bonded;
+  // V3 sells approve the swap router directly; V4 sells approve Permit2 (and then
+  // Permit2 approves the Universal Router).
+  const sellSpender = isV4 ? (permit2 ?? ZERO_ADDRESS) : (router ?? ZERO_ADDRESS);
+  // A custom-quote token trades against an ERC-20, not ETH — the in-app ETH path
+  // doesn't apply, so route it to the Uniswap link (in-app quote-token swaps TBD).
+  const customQuote = !!quote && quote !== ZERO_ADDRESS && quote.toLowerCase() !== weth.toLowerCase();
+  const inApp = !!router && weth !== ZERO_ADDRESS && !customQuote && (!isV4 || !!permit2);
+
+  const { key: poolKey, tokenIs0 } = poolKeyFor(token, weth);
+  const wethIsCurrency0 = !tokenIs0;
 
   const [mode, setMode] = useState<"buy" | "sell">("buy");
   const [amountIn, setAmountIn] = useState("");
@@ -123,12 +115,22 @@ export function TradeWidget({
     query: { enabled: !!user },
   });
 
+  // ERC-20 allowance to the sell spender (swap router on V3, Permit2 on V4).
   const { data: allowance } = useReadContract({
     address: token,
     abi: potatoTokenAbi,
     functionName: "allowance",
-    args: [user ?? ZERO_ADDRESS, spender],
-    query: { enabled: !!user && spender !== ZERO_ADDRESS },
+    args: [user ?? ZERO_ADDRESS, sellSpender],
+    query: { enabled: !!user && sellSpender !== ZERO_ADDRESS },
+  });
+
+  // On V4, the extra Permit2 -> Universal Router allowance (2-step Permit2 flow).
+  const { data: permit2Allowance } = useReadContract({
+    address: permit2,
+    abi: permit2Abi,
+    functionName: "allowance",
+    args: [user ?? ZERO_ADDRESS, token, router ?? ZERO_ADDRESS],
+    query: { enabled: isV4 && !!user && !!permit2 && !!router },
   });
 
   const exceedsBalance =
@@ -137,8 +139,8 @@ export function TradeWidget({
       ? tokenBalance !== undefined && amount > tokenBalance
       : ethBalance !== undefined && amount > ethBalance.value);
 
-  // Accurate quote from QuoterV2 (accounts for the pool's impact).
-  const { data: quote, isFetching: quoting } = useReadContract({
+  // ---- Quote (V3 QuoterV2 or V4 Quoter) -----------------------------------
+  const { data: v3Quote, isFetching: v3Quoting } = useReadContract({
     address: quoter ?? ZERO_ADDRESS,
     abi: quoterV2Abi,
     functionName: "quoteExactInputSingle",
@@ -151,19 +153,49 @@ export function TradeWidget({
         sqrtPriceLimitX96: 0n,
       },
     ],
-    query: { enabled: inApp && !!quoter && hasAmount && !exceedsBalance },
+    query: { enabled: inApp && !isV4 && !!quoter && hasAmount && !exceedsBalance },
   });
 
-  const amountOut = quote ? (quote[0] as bigint) : 0n;
+  // V4 quote: buying sells WETH (zeroForOne iff WETH is currency0); selling is the mirror.
+  const v4ZeroForOne = mode === "buy" ? wethIsCurrency0 : !wethIsCurrency0;
+  const { data: v4Quote, isFetching: v4Quoting } = useReadContract({
+    address: quoter ?? ZERO_ADDRESS,
+    abi: v4QuoterAbi,
+    functionName: "quoteExactInputSingle",
+    args: [
+      {
+        poolKey,
+        zeroForOne: v4ZeroForOne,
+        exactAmount: amount ?? 0n,
+        hookData: "0x",
+      },
+    ],
+    query: { enabled: inApp && isV4 && !!quoter && hasAmount && !exceedsBalance },
+  });
+
+  const quoting = isV4 ? v4Quoting : v3Quoting;
+  const amountOut = isV4
+    ? v4Quote
+      ? (v4Quote[0] as bigint)
+      : 0n
+    : v3Quote
+      ? (v3Quote[0] as bigint)
+      : 0n;
   const minOut = amountOut > 0n ? withSlippage(amountOut, slippageBps) : 0n;
-  const needsApproval =
+
+  // Approvals a sell needs before it can execute.
+  const needsErc20Approval =
+    mode === "sell" && hasAmount && !exceedsBalance && allowance !== undefined && allowance < amount;
+  const needsPermit2Approval =
+    isV4 &&
     mode === "sell" &&
     hasAmount &&
     !exceedsBalance &&
-    allowance !== undefined &&
-    allowance < amount;
+    !needsErc20Approval &&
+    permit2Allowance !== undefined &&
+    (permit2Allowance as readonly [bigint, number, number])[0] < amount;
 
-  // ---- Fallback: no in-app router on this chain -> Uniswap link -------------
+  // ---- Fallback: no in-app router on this chain -> Uniswap link ------------
   if (!inApp) {
     return (
       <div className="card p-5">
@@ -172,16 +204,11 @@ export function TradeWidget({
           Trade
         </h3>
         <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-center">
-          <p className="font-semibold text-amber-400">Live on Uniswap V3</p>
+          <p className="font-semibold text-amber-400">Live on Uniswap {isV4 ? "V4" : "V3"}</p>
           <p className="mt-1 text-xs text-neutral-400">
             In-app trading isn&apos;t wired for this network. Trade directly on Uniswap.
           </p>
-          <a
-            href={uniswapSwapUrl(token, chainId)}
-            target="_blank"
-            rel="noreferrer"
-            className="btn-primary mt-4 w-full"
-          >
+          <a href={uniswapSwapUrl(token, chainId)} target="_blank" rel="noreferrer" className="btn-primary mt-4 w-full">
             Trade on Uniswap
             <ExternalLink className="h-4 w-4" />
           </a>
@@ -208,22 +235,31 @@ export function TradeWidget({
 
   async function onBuy() {
     if (amount === undefined || !user || minOut === 0n || !router || exceedsBalance) return;
+    if (isV4) {
+      const { commands, inputs, value } = buildV4Buy({
+        key: poolKey,
+        weth,
+        token,
+        wethIsCurrency0,
+        amountIn: amount,
+        minOut,
+      });
+      buyTx.writeContract({
+        address: router,
+        abi: universalRouterAbi,
+        functionName: "execute",
+        args: [commands, inputs, swapDeadline(await chainNow())],
+        value,
+      });
+      return;
+    }
     const swapData = encodeFunctionData({
       abi: swapRouter02Abi,
       functionName: "exactInputSingle",
       args: [
-        {
-          tokenIn: weth,
-          tokenOut: token,
-          fee: feeTier,
-          recipient: user,
-          amountIn: amount,
-          amountOutMinimum: minOut,
-          sqrtPriceLimitX96: 0n,
-        },
+        { tokenIn: weth, tokenOut: token, fee: feeTier, recipient: user, amountIn: amount, amountOutMinimum: minOut, sqrtPriceLimitX96: 0n },
       ],
     });
-    // Wrap in the deadline-checked multicall so the tx can't be mined late.
     buyTx.writeContract({
       address: router,
       abi: swapRouter02Abi,
@@ -234,42 +270,57 @@ export function TradeWidget({
   }
 
   function onApprove() {
-    // Sells approve the Uniswap router as spender.
-    if (amount === undefined || spender === ZERO_ADDRESS) return;
+    // Sells: approve the ERC-20 to the sell spender (swap router on V3, Permit2 on V4).
+    if (amount === undefined || sellSpender === ZERO_ADDRESS) return;
     approveTx.writeContract({
       address: token,
       abi: potatoTokenAbi,
       functionName: "approve",
-      args: [spender, amount],
+      // V4 approves Permit2 for the max (Permit2 then meters per-swap); V3 exact.
+      args: [sellSpender, isV4 ? 2n ** 256n - 1n : amount],
+    });
+  }
+
+  function onPermit2Approve() {
+    // V4 second step: Permit2 grants the Universal Router a spending allowance.
+    if (!permit2 || !router) return;
+    permit2Tx.writeContract({
+      address: permit2,
+      abi: permit2Abi,
+      functionName: "approve",
+      args: [token, router, MAX_UINT160, Number(PERMIT2_EXPIRATION)],
     });
   }
 
   async function onSell() {
     if (amount === undefined || !user || minOut === 0n || !router || exceedsBalance) return;
-    // Swap output stays IN the router (ADDRESS_THIS sentinel), then unwrapWETH9
-    // in the same multicall pays the user native ETH instead of the WETH ERC-20
-    // they'd otherwise have to unwrap by hand.
+    if (isV4) {
+      const { commands, inputs, value } = buildV4Sell({
+        key: poolKey,
+        weth,
+        token,
+        wethIsCurrency0,
+        amountIn: amount,
+        minOut,
+        recipient: user,
+      });
+      sellTx.writeContract({
+        address: router,
+        abi: universalRouterAbi,
+        functionName: "execute",
+        args: [commands, inputs, swapDeadline(await chainNow())],
+        value,
+      });
+      return;
+    }
     const swapData = encodeFunctionData({
       abi: swapRouter02Abi,
       functionName: "exactInputSingle",
       args: [
-        {
-          tokenIn: token,
-          tokenOut: weth,
-          fee: feeTier,
-          recipient: ROUTER_ADDRESS_THIS,
-          amountIn: amount,
-          amountOutMinimum: minOut,
-          sqrtPriceLimitX96: 0n,
-        },
+        { tokenIn: token, tokenOut: weth, fee: feeTier, recipient: ROUTER_ADDRESS_THIS, amountIn: amount, amountOutMinimum: minOut, sqrtPriceLimitX96: 0n },
       ],
     });
-    const unwrapData = encodeFunctionData({
-      abi: swapRouter02Abi,
-      functionName: "unwrapWETH9",
-      args: [minOut, user],
-    });
-    // Wrap in the deadline-checked multicall so the tx can't be mined late.
+    const unwrapData = encodeFunctionData({ abi: swapRouter02Abi, functionName: "unwrapWETH9", args: [minOut, user] });
     sellTx.writeContract({
       address: router,
       abi: swapRouter02Abi,
@@ -288,34 +339,13 @@ export function TradeWidget({
       </h3>
 
       <ConnectGate>
-        {/* Buy / Sell segmented toggle */}
         <div className="mt-4 grid grid-cols-2 gap-1 rounded-lg border border-neutral-800 bg-neutral-950 p-1">
-          <button
-            type="button"
-            onClick={() => {
-              setMode("buy");
-              setAmountIn("");
-            }}
-            className={`rounded-md py-2 text-sm font-bold transition-colors ${
-              mode === "buy"
-                ? "bg-amber-500 text-neutral-900"
-                : "text-neutral-400 hover:text-neutral-100"
-            }`}
-          >
+          <button type="button" onClick={() => { setMode("buy"); setAmountIn(""); }}
+            className={`rounded-md py-2 text-sm font-bold transition-colors ${mode === "buy" ? "bg-amber-500 text-neutral-900" : "text-neutral-400 hover:text-neutral-100"}`}>
             Buy
           </button>
-          <button
-            type="button"
-            onClick={() => {
-              setMode("sell");
-              setAmountIn("");
-            }}
-            className={`rounded-md py-2 text-sm font-bold transition-colors ${
-              mode === "sell"
-                ? "bg-red-500/80 text-neutral-50"
-                : "text-neutral-400 hover:text-neutral-100"
-            }`}
-          >
+          <button type="button" onClick={() => { setMode("sell"); setAmountIn(""); }}
+            className={`rounded-md py-2 text-sm font-bold transition-colors ${mode === "sell" ? "bg-red-500/80 text-neutral-50" : "text-neutral-400 hover:text-neutral-100"}`}>
             Sell
           </button>
         </div>
@@ -326,169 +356,76 @@ export function TradeWidget({
               {mode === "buy" ? "You pay (ETH)" : `You sell (${symbol})`}
             </label>
             {mode === "buy"
-              ? ethBalance && (
-                  <span className="font-mono text-xs text-neutral-500">
-                    Bal {formatEth(ethBalance.value)} ETH
-                  </span>
-                )
-              : tokenBalance !== undefined && (
-                  <span className="font-mono text-xs text-neutral-500">
-                    Bal {formatTokens(tokenBalance)}
-                  </span>
-                )}
+              ? ethBalance && <span className="font-mono text-xs text-neutral-500">Bal {formatEth(ethBalance.value)} ETH</span>
+              : tokenBalance !== undefined && <span className="font-mono text-xs text-neutral-500">Bal {formatTokens(tokenBalance)}</span>}
           </div>
-          <input
-            id={`trade-${token}`}
-            className="input font-mono"
-            placeholder="0.0"
-            inputMode="decimal"
-            value={amountIn}
-            onChange={(e) => setAmountIn(e.target.value)}
-          />
+          <input id={`trade-${token}`} className="input font-mono" placeholder="0.0" inputMode="decimal" value={amountIn} onChange={(e) => setAmountIn(e.target.value)} />
 
-          {/* quick-fill chips */}
           <div className="mt-2 flex flex-wrap gap-1.5">
             {mode === "buy" ? (
               <>
                 {["0.1", "0.5", "1"].map((v) => (
-                  <button
-                    key={v}
-                    type="button"
-                    onClick={() => setAmountIn(v)}
-                    className="rounded-md border border-neutral-800 bg-neutral-900 px-2.5 py-1 font-mono text-xs text-neutral-400 transition-colors hover:border-amber-500/40 hover:text-amber-400"
-                  >
-                    {v}
-                  </button>
+                  <button key={v} type="button" onClick={() => setAmountIn(v)}
+                    className="rounded-md border border-neutral-800 bg-neutral-900 px-2.5 py-1 font-mono text-xs text-neutral-400 transition-colors hover:border-amber-500/40 hover:text-amber-400">{v}</button>
                 ))}
-                <button
-                  type="button"
-                  onClick={fillBuyMax}
-                  disabled={!ethBalance}
-                  className="rounded-md border border-neutral-800 bg-neutral-900 px-2.5 py-1 font-mono text-xs text-neutral-400 transition-colors hover:border-amber-500/40 hover:text-amber-400 disabled:opacity-50"
-                >
-                  Max
-                </button>
+                <button type="button" onClick={fillBuyMax} disabled={!ethBalance}
+                  className="rounded-md border border-neutral-800 bg-neutral-900 px-2.5 py-1 font-mono text-xs text-neutral-400 transition-colors hover:border-amber-500/40 hover:text-amber-400 disabled:opacity-50">Max</button>
               </>
             ) : (
               <>
-                {[
-                  ["25%", 2500n],
-                  ["50%", 5000n],
-                  ["75%", 7500n],
-                  ["Max", 10000n],
-                ].map(([label, bps]) => (
-                  <button
-                    key={label as string}
-                    type="button"
-                    onClick={() => fillSellFraction(bps as bigint)}
-                    disabled={tokenBalance === undefined}
-                    className="rounded-md border border-neutral-800 bg-neutral-900 px-2.5 py-1 font-mono text-xs text-neutral-400 transition-colors hover:border-amber-500/40 hover:text-amber-400 disabled:opacity-50"
-                  >
-                    {label as string}
-                  </button>
+                {[["25%", 2500n], ["50%", 5000n], ["75%", 7500n], ["Max", 10000n]].map(([label, bps]) => (
+                  <button key={label as string} type="button" onClick={() => fillSellFraction(bps as bigint)} disabled={tokenBalance === undefined}
+                    className="rounded-md border border-neutral-800 bg-neutral-900 px-2.5 py-1 font-mono text-xs text-neutral-400 transition-colors hover:border-amber-500/40 hover:text-amber-400 disabled:opacity-50">{label as string}</button>
                 ))}
               </>
             )}
           </div>
 
-          {amountIn.trim() !== "" && amount === undefined && (
-            <p className="mt-1.5 text-xs text-red-400">Enter a valid amount.</p>
-          )}
-          {exceedsBalance && (
-            <p className="mt-1.5 text-xs text-red-400">Amount exceeds your balance.</p>
-          )}
+          {amountIn.trim() !== "" && amount === undefined && <p className="mt-1.5 text-xs text-red-400">Enter a valid amount.</p>}
+          {exceedsBalance && <p className="mt-1.5 text-xs text-red-400">Amount exceeds your balance.</p>}
         </div>
 
-        {/* quote */}
         <dl className="mt-4 space-y-1.5 rounded-lg border border-neutral-800 bg-neutral-950 p-3 text-sm">
           <div className="flex justify-between">
             <dt className="text-neutral-500">You receive ≈</dt>
             <dd className="font-mono text-neutral-100">
-              {!hasAmount || exceedsBalance
-                ? "-"
-                : quoting
-                  ? "…"
-                  : mode === "buy"
-                    ? `${formatTokens(amountOut)} ${symbol}`
-                    : `${formatEth(amountOut)} ETH`}
+              {!hasAmount || exceedsBalance ? "-" : quoting ? "…" : mode === "buy" ? `${formatTokens(amountOut)} ${symbol}` : `${formatEth(amountOut)} ETH`}
             </dd>
           </div>
           <div className="flex items-center justify-between">
             <dt className="text-neutral-500">Max slippage</dt>
             <dd className="flex gap-1">
               {SLIPPAGE_OPTIONS.map((o) => (
-                <button
-                  key={o.label}
-                  type="button"
-                  onClick={() => setSlippageBps(o.bps)}
-                  className={`rounded px-1.5 py-0.5 font-mono text-[11px] transition-colors ${
-                    slippageBps === o.bps
-                      ? "bg-amber-500/20 text-amber-300"
-                      : "text-neutral-500 hover:text-neutral-300"
-                  }`}
-                >
-                  {o.label}
-                </button>
+                <button key={o.label} type="button" onClick={() => setSlippageBps(o.bps)}
+                  className={`rounded px-1.5 py-0.5 font-mono text-[11px] transition-colors ${slippageBps === o.bps ? "bg-amber-500/20 text-amber-300" : "text-neutral-500 hover:text-neutral-300"}`}>{o.label}</button>
               ))}
             </dd>
           </div>
           <div className="flex justify-between">
             <dt className="text-neutral-500">Min received</dt>
             <dd className="font-mono text-neutral-400">
-              {!hasAmount || exceedsBalance || amountOut === 0n
-                ? "-"
-                : mode === "buy"
-                  ? `${formatTokens(minOut)} ${symbol}`
-                  : `${formatEth(minOut)} ETH`}
+              {!hasAmount || exceedsBalance || amountOut === 0n ? "-" : mode === "buy" ? `${formatTokens(minOut)} ${symbol}` : `${formatEth(minOut)} ETH`}
             </dd>
           </div>
         </dl>
 
-        {noQuote && (
-          <p className="mt-2 text-xs text-amber-400/80">
-            Couldn&apos;t fetch a live quote. Try a different amount or trade on Uniswap.
-          </p>
-        )}
+        {noQuote && <p className="mt-2 text-xs text-amber-400/80">Couldn&apos;t fetch a live quote. Try a different amount or trade on Uniswap.</p>}
 
-        {/* CTA */}
         {mode === "buy" ? (
-          <button
-            type="button"
-            className="btn-primary mt-4 w-full"
-            disabled={!hasAmount || quoting || minOut === 0n || exceedsBalance || buyTx.busy}
-            onClick={onBuy}
-          >
-            {buyTx.isPending
-              ? "Confirm in wallet…"
-              : buyTx.isConfirming
-                ? "Buying…"
-                : `Buy $${symbol}`}
+          <button type="button" className="btn-primary mt-4 w-full" disabled={!hasAmount || quoting || minOut === 0n || exceedsBalance || buyTx.busy} onClick={onBuy}>
+            {buyTx.isPending ? "Confirm in wallet…" : buyTx.isConfirming ? "Buying…" : `Buy $${symbol}`}
           </button>
-        ) : needsApproval ? (
-          <button
-            type="button"
-            className="btn-danger mt-4 w-full"
-            disabled={approveTx.busy || exceedsBalance}
-            onClick={onApprove}
-          >
-            {approveTx.isPending
-              ? "Confirm in wallet…"
-              : approveTx.isConfirming
-                ? "Approving…"
-                : `1. Approve $${symbol}`}
+        ) : needsErc20Approval ? (
+          <button type="button" className="btn-danger mt-4 w-full" disabled={approveTx.busy || exceedsBalance} onClick={onApprove}>
+            {approveTx.isPending ? "Confirm in wallet…" : approveTx.isConfirming ? "Approving…" : `1. Approve $${symbol}`}
+          </button>
+        ) : needsPermit2Approval ? (
+          <button type="button" className="btn-danger mt-4 w-full" disabled={permit2Tx.busy || exceedsBalance} onClick={onPermit2Approve}>
+            {permit2Tx.isPending ? "Confirm in wallet…" : permit2Tx.isConfirming ? "Approving…" : `2. Permit2 approve`}
           </button>
         ) : (
-          <button
-            type="button"
-            className="btn-danger mt-4 w-full"
-            disabled={!hasAmount || quoting || minOut === 0n || exceedsBalance || sellTx.busy}
-            onClick={onSell}
-          >
-            {sellTx.isPending
-              ? "Confirm in wallet…"
-              : sellTx.isConfirming
-                ? "Selling…"
-                : `Sell $${symbol}`}
+          <button type="button" className="btn-danger mt-4 w-full" disabled={!hasAmount || quoting || minOut === 0n || exceedsBalance || sellTx.busy} onClick={onSell}>
+            {sellTx.isPending ? "Confirm in wallet…" : sellTx.isConfirming ? "Selling…" : `Sell $${symbol}`}
           </button>
         )}
 
@@ -496,11 +433,8 @@ export function TradeWidget({
           <TxStatus tx={buyTx} chainId={chainId} successLabel="Buy confirmed!" />
         ) : (
           <>
-            <TxStatus
-              tx={approveTx}
-              chainId={chainId}
-              successLabel="Approval confirmed, you can sell now."
-            />
+            <TxStatus tx={approveTx} chainId={chainId} successLabel="Approval confirmed." />
+            <TxStatus tx={permit2Tx} chainId={chainId} successLabel="Permit2 approved, you can sell now." />
             <TxStatus tx={sellTx} chainId={chainId} successLabel="Sell confirmed!" />
           </>
         )}
@@ -508,15 +442,10 @@ export function TradeWidget({
         <div className="mt-3 flex items-center justify-between text-[11px] text-neutral-600">
           <span>
             {onCurve
-              ? `Bonding curve — every buy walks the price up until it fills, then migrates. Routes through Uniswap V3 (${feeTier / 10_000}% fee).`
-              : `Swaps route through Uniswap V3 (${feeTier / 10_000}% fee).`}
+              ? `Bonding curve — every buy walks the price up until it fills, then migrates. Routes through Uniswap ${isV4 ? "V4" : "V3"} (${feeTier / 10_000}% fee).`
+              : `Swaps route through Uniswap ${isV4 ? "V4" : "V3"} (${feeTier / 10_000}% fee).`}
           </span>
-          <a
-            href={uniswapSwapUrl(token, chainId)}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex shrink-0 items-center gap-1 text-neutral-500 hover:text-amber-400"
-          >
+          <a href={uniswapSwapUrl(token, chainId)} target="_blank" rel="noreferrer" className="inline-flex shrink-0 items-center gap-1 text-neutral-500 hover:text-amber-400">
             Uniswap
             <ExternalLink className="h-3 w-3" />
           </a>

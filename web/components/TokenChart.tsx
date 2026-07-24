@@ -23,12 +23,17 @@ import { ProgressBar } from "@/components/ProgressBar";
 export function TokenChart({
   token,
   pool,
+  poolId: _poolId,
   isCurve = false,
   bonded = false,
   progressBps = 0n,
 }: {
   token: Address;
+  /** V3 pool address (drives the GeckoTerminal embed). ZERO on V4 chains. */
   pool: Address;
+  /** V4 pool id (V4 chains). GeckoTerminal V4 charting is a future enhancement;
+   *  V4 tokens currently show the live-stats placeholder until GT indexes them. */
+  poolId?: `0x${string}`;
   /** True when this token launched on the bonding-curve pad. */
   isCurve?: boolean;
   /** True once the curve bonded (LP permanently locked). */

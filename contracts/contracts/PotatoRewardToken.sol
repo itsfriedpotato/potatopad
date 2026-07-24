@@ -2,9 +2,14 @@
 pragma solidity 0.8.24;
 
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 
 import {PotatoToken} from "./PotatoToken.sol";
-import {IUniswapV3Pool, IWETH9} from "./interfaces/IUniswapV3.sol";
+import {IWETH9} from "./interfaces/IWETH9.sol";
 
 interface IFeeLocker {
     function collect(uint256 tokenId) external returns (uint256 amount0, uint256 amount1);
@@ -22,7 +27,7 @@ interface IFeeLocker {
 ///
 ///         ## Accounting is decoupled from custody
 ///
-///         Swap fees physically sit inside the locked Uniswap V3 position until
+///         Swap fees physically sit inside the locked Uniswap position until
 ///         somebody calls `PotatoFeeLocker.collect`. The naive reading is that
 ///         holders therefore cannot be credited until a collect happens — which
 ///         would mean fees are attributed to whoever holds AFTER the harvest,
@@ -30,7 +35,7 @@ interface IFeeLocker {
 ///         could hold through a week of trading, sell an hour before a collect,
 ///         and receive nothing.
 ///
-///         But Uniswap tracks fee growth CONTINUOUSLY: `feeGrowthGlobal` moves on
+///         But Uniswap tracks fee growth CONTINUOUSLY: `feeGrowthInside` moves on
 ///         every swap and is readable at any instant. So this contract does not
 ///         wait for custody. On every transfer it reads what the position has
 ///         earned to date and credits the delta immediately. A `collect` is then
@@ -67,17 +72,37 @@ interface IFeeLocker {
 ///         ## Who counts as a holder
 ///
 ///         {eligibleSupply} is the circulating supply: total minus the locked LP
-///         pool, the pad, the locker, the position manager, and the burn address.
-///         Your share is always measured against that, so the ~entire supply
-///         parked in the locked position never dilutes real holders. It is
+///         (custodied by the {PoolManager}), the pad, the locker, and the burn
+///         address. Your share is always measured against that, so the ~entire
+///         supply parked in the locked position never dilutes real holders. It is
 ///         maintained incrementally on transfer — never by iterating holders.
+///
+///         ## What changed for Uniswap V4
+///
+///         V3 exposed fee growth on a per-pair pool contract (`feeGrowthGlobal` +
+///         `ticks`). V4 keeps the identical accounting inside the singleton and
+///         exposes it through `StateLibrary.getFeeGrowthInside(manager, poolId,
+///         lower, upper)`, which returns fee growth for the exact range in one
+///         call. So {_feeGrowthInsideWeth} is now a single library read against
+///         the manager keyed by {poolId}; every downstream formula is unchanged.
 contract PotatoRewardToken is PotatoToken, ReentrancyGuard {
+    using StateLibrary for IPoolManager;
+
     /// @notice Must mirror {PotatoFeeLocker.CREATOR_FEE_SHARE_BPS} — the half of
     ///         fees that is split between the creator and holders.
     uint256 public constant CREATOR_FEE_SHARE_BPS = 5_000;
     uint256 internal constant BPS = 10_000;
 
-    /// @notice The WETH the locker pays holder fees in. Unwrapped to native ETH on {claim}.
+    /// @notice The asset holders are rewarded in — the pool's QUOTE currency (the
+    ///         side buyers pay with). Defaults to WETH; a custom-quote launch pays
+    ///         holders in that ERC-20 instead. Fees accrue in this currency, so no
+    ///         conversion is ever needed.
+    address public immutable rewardAsset;
+    /// @notice True iff {rewardAsset} is WETH, in which case {claim} unwraps to
+    ///         native ETH (the original UX). For any other quote, the ERC-20 is
+    ///         paid out directly.
+    bool public immutable payAsEth;
+    /// @notice The WETH contract, used only to unwrap when {payAsEth}.
     IWETH9 public immutable weth;
 
     // ------------------------------------------------------- accrual state --
@@ -114,10 +139,15 @@ contract PotatoRewardToken is PotatoToken, ReentrancyGuard {
     ///         exist while this contract is being constructed.
     address public locker;
     uint256 public lpTokenId;
+    /// @notice The V4 pool id the locked position lives in — the key {_feeGrowthInsideWeth}
+    ///         reads the singleton by. Replaces V3's per-pool contract address.
+    PoolId public poolId;
     uint128 public positionLiquidity;
     int24 public positionTickLower;
     int24 public positionTickUpper;
-    bool public wethIsToken0;
+    /// @notice Whether the reward/quote currency sorts as token0 in the pool —
+    ///         picks which `feeGrowthInside` side to accrue from.
+    bool public quoteIsToken0;
     /// @notice The creator's cut of TOTAL fees; holders take
     ///         {CREATOR_FEE_SHARE_BPS} minus this.
     uint16 public creatorBps;
@@ -134,31 +164,41 @@ contract PotatoRewardToken is PotatoToken, ReentrancyGuard {
     error NothingToClaim();
     error EthTransferFailed();
     error AlreadyBound();
+    error OnlyPad();
 
+    /// @param weth_ the WETH contract (for unwrapping when the reward asset is WETH).
+    /// @param quote_ the pool's quote currency = the asset holders are rewarded in.
+    ///        Equal to `weth_` for a standard ETH-reward launch.
     constructor(
         string memory name_,
         string memory symbol_,
         uint256 supply_,
         address pad_,
-        address positionManager_,
+        address poolManager_,
         address locker_,
         uint256 maxWallet_,
         uint256 antiSnipeBlocks_,
-        address weth_
+        address weth_,
+        address quote_
     )
-        PotatoToken(name_, symbol_, supply_, pad_, positionManager_, locker_, maxWallet_, antiSnipeBlocks_)
+        PotatoToken(name_, symbol_, supply_, pad_, poolManager_, locker_, maxWallet_, antiSnipeBlocks_)
     {
         weth = IWETH9(weth_);
+        rewardAsset = quote_;
+        payAsEth = quote_ == weth_;
 
         // Mirrors the anti-snipe exempt set (launch infrastructure), plus this
-        // contract itself, which custodies undistributed fees.
+        // contract itself, which custodies undistributed fees. The {PoolManager}
+        // singleton custodies the locked single-sided LP (~the whole supply);
+        // counting it would hand almost all fees back to the position they came
+        // from and starve real holders, so it is excluded here — V3 did this in
+        // `setPool`, but the manager's address is known at construction in V4.
         rewardExcluded[address(0)] = true;
         rewardExcluded[pad_] = true;
-        rewardExcluded[positionManager_] = true;
+        rewardExcluded[poolManager_] = true;
         rewardExcluded[locker_] = true;
         rewardExcluded[DEAD] = true;
         rewardExcluded[address(this)] = true;
-        // The pool is excluded in {setPool}; its address isn't known yet.
 
         // The base constructor minted the entire supply to the pad BEFORE this
         // body ran, so the exclusions above were not yet registered when that
@@ -173,15 +213,6 @@ contract PotatoRewardToken is PotatoToken, ReentrancyGuard {
         return true;
     }
 
-    /// @inheritdoc PotatoToken
-    /// @dev Also excludes the pool from rewards. The pool custodies ~the entire
-    ///      supply as locked single-sided LP; counting it would hand almost all
-    ///      fees back to the position they came from and starve real holders.
-    function setPool(address pool_) public override {
-        super.setPool(pool_);
-        rewardExcluded[pool_] = true;
-    }
-
     /// @notice One-time binding of the locked LP position, called by the pad
     ///         right after it mints. Until this lands nothing accrues — which is
     ///         correct, because no swap can have happened yet.
@@ -190,10 +221,11 @@ contract PotatoRewardToken is PotatoToken, ReentrancyGuard {
     function bindPosition(
         address locker_,
         uint256 lpTokenId_,
+        bytes32 poolId_,
         uint128 liquidity_,
         int24 tickLower_,
         int24 tickUpper_,
-        bool wethIsToken0_,
+        bool quoteIsToken0_,
         uint16 creatorBps_
     ) external {
         if (msg.sender != pad) revert OnlyPad();
@@ -201,17 +233,18 @@ contract PotatoRewardToken is PotatoToken, ReentrancyGuard {
 
         locker = locker_;
         lpTokenId = lpTokenId_;
+        poolId = PoolId.wrap(poolId_);
         positionLiquidity = liquidity_;
         positionTickLower = tickLower_;
         positionTickUpper = tickUpper_;
-        wethIsToken0 = wethIsToken0_;
+        quoteIsToken0 = quoteIsToken0_;
         creatorBps = creatorBps_;
         positionBound = true;
 
         // Checkpoint now so only fees earned from here on are credited. Any dev
         // buy in this same transaction lands after this line, so its fee is
         // picked up by the next accrual rather than lost.
-        feeGrowthInsideLastX128 = _feeGrowthInsideWeth();
+        feeGrowthInsideLastX128 = _feeGrowthInsideQuote();
 
         emit PositionBound(locker_, lpTokenId_, liquidity_);
     }
@@ -230,10 +263,10 @@ contract PotatoRewardToken is PotatoToken, ReentrancyGuard {
         amount = claimable[msg.sender];
         if (amount == 0) revert NothingToClaim();
 
-        uint256 funded = weth.balanceOf(address(this));
+        uint256 funded = IERC20(rewardAsset).balanceOf(address(this));
         if (funded < amount) {
             _harvest();
-            funded = weth.balanceOf(address(this));
+            funded = IERC20(rewardAsset).balanceOf(address(this));
             // The harvest may itself have accrued more (its own swap fees are
             // already reflected), so re-settle before deciding the payout.
             _accrue();
@@ -247,14 +280,24 @@ contract PotatoRewardToken is PotatoToken, ReentrancyGuard {
         if (amount > funded) amount = funded;
         if (amount == 0) revert NothingToClaim();
 
-        // Effects before interaction: debit before any ETH moves, so a reentrant
+        // Effects before interaction: debit before any funds move, so a reentrant
         // caller finds nothing left.
         claimable[msg.sender] -= amount;
         totalClaimed += amount;
 
-        weth.withdraw(amount);
-        (bool ok,) = msg.sender.call{value: amount}("");
-        if (!ok) revert EthTransferFailed();
+        if (payAsEth) {
+            // Standard launch: unwrap WETH and pay native ETH (the original UX).
+            weth.withdraw(amount);
+            (bool ok,) = msg.sender.call{value: amount}("");
+            if (!ok) revert EthTransferFailed();
+        } else {
+            // Custom-quote launch: pay the reward ERC-20 directly. Lightweight safe
+            // transfer (same pattern the locker uses) — avoids pulling in the full
+            // SafeERC20 library, which would bloat the pad's initcode past EIP-3860.
+            (bool ok, bytes memory ret) =
+                rewardAsset.call(abi.encodeWithSelector(IERC20.transfer.selector, msg.sender, amount));
+            if (!ok || (ret.length != 0 && !abi.decode(ret, (bool)))) revert EthTransferFailed();
+        }
 
         emit RewardsClaimed(msg.sender, amount);
     }
@@ -289,7 +332,7 @@ contract PotatoRewardToken is PotatoToken, ReentrancyGuard {
         uint256 owed = totalRewarded - totalClaimed;
         (uint256 pendingCut,) = _previewAccrual();
         owed += pendingCut;
-        uint256 funded = weth.balanceOf(address(this));
+        uint256 funded = IERC20(rewardAsset).balanceOf(address(this));
         return owed > funded ? owed - funded : 0;
     }
 
@@ -323,7 +366,7 @@ contract PotatoRewardToken is PotatoToken, ReentrancyGuard {
         // that is zero, so skip the pool reads entirely.
         if (creatorBps >= CREATOR_FEE_SHARE_BPS) return (0, 0);
 
-        newGrowth = _feeGrowthInsideWeth();
+        newGrowth = _feeGrowthInsideQuote();
 
         uint256 delta;
         unchecked {
@@ -351,28 +394,14 @@ contract PotatoRewardToken is PotatoToken, ReentrancyGuard {
         }
     }
 
-    /// @dev `feeGrowthInside` for the WETH side of the locked range, in Q128.128.
-    ///      Standard Uniswap V3 derivation: global growth minus the growth that
-    ///      happened below the range and above it. All of it wraps by design.
-    function _feeGrowthInsideWeth() internal view returns (uint256) {
-        IUniswapV3Pool p = IUniswapV3Pool(pool);
-        bool isToken0 = wethIsToken0;
-
-        (, int24 tickCurrent,,,,,) = p.slot0();
-        uint256 growthGlobal = isToken0 ? p.feeGrowthGlobal0X128() : p.feeGrowthGlobal1X128();
-
-        (,, uint256 lower0, uint256 lower1,,,,) = p.ticks(positionTickLower);
-        (,, uint256 upper0, uint256 upper1,,,,) = p.ticks(positionTickUpper);
-        uint256 lowerOutside = isToken0 ? lower0 : lower1;
-        uint256 upperOutside = isToken0 ? upper0 : upper1;
-
-        unchecked {
-            uint256 below =
-                tickCurrent >= positionTickLower ? lowerOutside : growthGlobal - lowerOutside;
-            uint256 above =
-                tickCurrent < positionTickUpper ? upperOutside : growthGlobal - upperOutside;
-            return growthGlobal - below - above;
-        }
+    /// @dev `feeGrowthInside` for the QUOTE side of the locked range, in Q128.128.
+    ///      V4 exposes this directly on the singleton via {StateLibrary}, which
+    ///      performs the standard "global minus below minus above" derivation
+    ///      internally — the same wrapping arithmetic V3 did by hand.
+    function _feeGrowthInsideQuote() internal view returns (uint256) {
+        (uint256 feeGrowthInside0X128, uint256 feeGrowthInside1X128) =
+            IPoolManager(poolManager).getFeeGrowthInside(poolId, positionTickLower, positionTickUpper);
+        return quoteIsToken0 ? feeGrowthInside0X128 : feeGrowthInside1X128;
     }
 
     /// @dev Best-effort harvest. Never bubbles a revert: the locker's collect is
@@ -419,9 +448,10 @@ contract PotatoRewardToken is PotatoToken, ReentrancyGuard {
     ///      move and the anti-snipe cap.
     ///
     ///      Reading pool state here is safe mid-swap: Uniswap writes `slot0` and
-    ///      `feeGrowthGlobal` BEFORE it transfers tokens, and the getters carry no
-    ///      reentrancy lock — so a buy is credited with its own fee, in the same
-    ///      transaction that generated it.
+    ///      fee growth BEFORE it hands the output tokens to the buyer (the `take`
+    ///      that triggers this transfer runs after `swap` returns), and the
+    ///      `extsload` getters carry no reentrancy lock — so a buy is credited
+    ///      with its own fee, in the same transaction that generated it.
     function _update(address from, address to, uint256 value) internal override {
         _accrue();
         _settle(from);

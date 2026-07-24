@@ -1,9 +1,11 @@
 "use client";
 
-// Live buy detection for the Discover "Recent buys" sort. A single Swap-event
-// filter spans every token pool (viem accepts an address array), so the RPC
-// cost is constant no matter how many tokens are listed. A buy bumps its token
-// to the front of the grid; sells are ignored by design.
+// Live buy detection for the Discover "Recent buys" sort. The Discover feed is
+// chain-pinned (Robinhood / Uniswap V3), so this watches the V3 pool `Swap` event
+// across every token pool via ONE filter (viem accepts an address array), at
+// constant RPC cost. A buy bumps its token to the front of the grid; sells are
+// ignored by design. (V4 token pages get their own live updates via useTokenPad /
+// usePoolStats; the singleton `Swap` event is only needed for a V4-chain feed.)
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Address } from "viem";
@@ -15,11 +17,7 @@ import { ANALYTICS_CHAIN_ID } from "@/lib/robinhoodPublicClient";
 /** Robinhood-pinned pricing WETH (same basis as the rest of the Discover feed). */
 const RH_WETH = WETH_ADDRESSES[ANALYTICS_CHAIN_ID] ?? ZERO_ADDRESS;
 
-/** Faster than the global 30s wagmi poll so a buy feels live: one getLogs poll
- *  per interval per visitor, independent of pool count. (The /api/rpc proxy
- *  rejects stateful eth_newFilter — filters don't survive its round-robin node
- *  pool — so viem's watcher falls back to the stateless getLogs strategy, and
- *  identical polls from concurrent visitors collapse in the proxy's cache.) */
+/** Faster than the global 30s wagmi poll so a buy feels live. */
 const BUYS_POLL_MS = 10_000;
 
 export interface BuyTick {
@@ -35,15 +33,13 @@ export interface TokenPoolPair {
 }
 
 /**
- * Watches Uniswap V3 `Swap` on every given pool via ONE event filter and keeps
- * a map of token (lowercase) → latest buy. `onBuys` fires once per poll batch
- * that contained at least one buy (e.g. to refresh pool prices).
+ * Watches Uniswap V3 `Swap` on every given pool via ONE event filter and keeps a
+ * map of token (lowercase) → latest buy. `onBuys` fires once per poll batch that
+ * contained at least one buy (e.g. to refresh pool prices).
  */
 export function useRecentBuys(pairs: TokenPoolPair[], onBuys?: () => void) {
   const [buys, setBuys] = useState<Record<string, BuyTick>>({});
 
-  // pool (lowercase) → token. `pools` is content-stable so the watch only
-  // re-subscribes when the pool SET changes, not on every feed refetch.
   const poolToToken = useMemo(() => {
     const map = new Map<string, Address>();
     for (const { token, pool } of pairs) {
@@ -54,7 +50,6 @@ export function useRecentBuys(pairs: TokenPoolPair[], onBuys?: () => void) {
   const poolsKey = useMemo(() => [...poolToToken.keys()].sort().join(","), [poolToToken]);
   const pools = useMemo(() => (poolsKey ? (poolsKey.split(",") as Address[]) : []), [poolsKey]);
 
-  // The watch callback reads the latest maps via refs so it never re-subscribes.
   const mapRef = useRef(poolToToken);
   const onBuysRef = useRef(onBuys);
   useEffect(() => {
@@ -66,8 +61,6 @@ export function useRecentBuys(pairs: TokenPoolPair[], onBuys?: () => void) {
     address: pools,
     abi: uniswapV3SwapEventAbi,
     eventName: "Swap",
-    // Pin to Robinhood like the rest of the feed — the buys grid must not go
-    // quiet just because the connected wallet sits on another chain.
     chainId: ANALYTICS_CHAIN_ID,
     enabled: pools.length > 0,
     pollingInterval: BUYS_POLL_MS,
@@ -78,7 +71,8 @@ export function useRecentBuys(pairs: TokenPoolPair[], onBuys?: () => void) {
         const token = mapRef.current.get(log.address.toLowerCase());
         if (!token) continue;
         const args = log.args as { amount0?: bigint; amount1?: bigint };
-        // A buy sends WETH INTO the pool: the WETH-side amount is positive.
+        // A buy sends WETH INTO the pool: the WETH-side amount is positive (V3's
+        // pool-perspective sign).
         const wethIn = tokenIsToken0(token, RH_WETH) ? (args.amount1 ?? 0n) : (args.amount0 ?? 0n);
         if (wethIn <= 0n) continue;
         fresh[token.toLowerCase()] = { at: now, weth: Number(wethIn) / 1e18 };

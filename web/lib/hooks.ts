@@ -3,7 +3,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { getChainId } from "@wagmi/core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Address } from "viem";
+import type { Address, Hex } from "viem";
 import {
   useChainId,
   usePublicClient,
@@ -15,12 +15,15 @@ import { potatoCurvePadAbi, potatoPadAbi } from "@/lib/abi";
 import {
   CURVE_PAD_ADDRESSES,
   PAD_ADDRESSES,
+  UNISWAP_VERSION,
   WETH_ADDRESSES,
   ZERO_ADDRESS,
   allPadDeployments,
   isMigrated,
 } from "@/lib/config";
 import { wagmiConfig } from "@/lib/wagmi";
+
+const ZERO_POOL_ID = "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex;
 
 /**
  * Resolve the active chain's pads + WETH. `curvePad` is the PRIMARY (write) pad
@@ -242,9 +245,13 @@ export interface ResolvedToken {
   /** The pad (curve or direct/legacy) that launched this token. */
   pad: Address;
   creator: Address;
-  /** The Uniswap pool — non-zero from creation for both curve and direct tokens
-   *  (the single-sided-v3 curve trades on Uniswap from block one). */
+  /** V3 pool address (legacy tokens); ZERO on V4 chains. Non-zero from creation. */
   pool: Address;
+  /** V4 pool id (new tokens); ZERO on V3 chains. Non-zero from creation. */
+  poolId: Hex;
+  /** The pool's quote currency — WETH by default, a custom ERC-20 for a
+   *  custom-reward launch. Holders of a reward token earn this asset. */
+  quote: Address;
   /** The locked position id — 0 until the curve bonds; direct/legacy: the locked LP id. */
   lpTokenId: bigint;
   /** Curve tokens flip true once bonded (position locked into the fee locker);
@@ -272,6 +279,8 @@ export function useTokenPad(token: Address | undefined): ResolvedToken {
   const chainId = useChainId();
   const pads = useMemo(() => allPadDeployments(chainId), [chainId]);
   const curvePad = CURVE_PAD_ADDRESSES[chainId] ?? ZERO_ADDRESS;
+  const isV4 = UNISWAP_VERSION[chainId] === "v4";
+  const weth = WETH_ADDRESSES[chainId] ?? ZERO_ADDRESS;
 
   const { data, isLoading } = useReadContracts({
     allowFailure: true,
@@ -293,6 +302,8 @@ export function useTokenPad(token: Address | undefined): ResolvedToken {
       pad: curvePad,
       creator: ZERO_ADDRESS,
       pool: ZERO_ADDRESS,
+      poolId: ZERO_POOL_ID,
+      quote: weth,
       lpTokenId: 0n,
       bonded: false,
       onCurve: false,
@@ -305,15 +316,17 @@ export function useTokenPad(token: Address | undefined): ResolvedToken {
       const res = data[i];
       if (res?.status !== "success") continue;
       if (pads[i].kind === "curve") {
-        // curves() => (creator, pool, positionId, bonded)
-        const c = res.result as readonly [Address, Address, bigint, boolean];
+        // curves() => (creator, pool|poolId, positionId, bonded, quote?)
+        const c = res.result as readonly [Address, Address | Hex, bigint, boolean, Address?];
         if (c[0] && c[0] !== ZERO_ADDRESS) {
           const bonded = isMigrated(token ?? ZERO_ADDRESS, c[3]);
           return {
             kind: "curve",
             pad: pads[i].address,
             creator: c[0],
-            pool: c[1],
+            pool: isV4 ? ZERO_ADDRESS : (c[1] as Address),
+            poolId: isV4 ? (c[1] as Hex) : ZERO_POOL_ID,
+            quote: c[4] && c[4] !== ZERO_ADDRESS ? c[4] : weth,
             // The locker owns (and can collect on) the position from launch.
             lpTokenId: c[2],
             bonded,
@@ -324,14 +337,16 @@ export function useTokenPad(token: Address | undefined): ResolvedToken {
           };
         }
       } else {
-        // tokens() => (creator, pool, lpTokenId)
-        const info = res.result as readonly [Address, Address, bigint];
+        // tokens() => (creator, pool|poolId, lpTokenId, quote?)
+        const info = res.result as readonly [Address, Address | Hex, bigint, Address?];
         if (info[0] && info[0] !== ZERO_ADDRESS) {
           return {
             kind: "direct",
             pad: pads[i].address,
             creator: info[0],
-            pool: info[1],
+            pool: isV4 ? ZERO_ADDRESS : (info[1] as Address),
+            poolId: isV4 ? (info[1] as Hex) : ZERO_POOL_ID,
+            quote: info[3] && info[3] !== ZERO_ADDRESS ? info[3] : weth,
             lpTokenId: info[2],
             bonded: true,
             onCurve: false,
@@ -343,5 +358,5 @@ export function useTokenPad(token: Address | undefined): ResolvedToken {
       }
     }
     return fallback;
-  }, [data, pads, curvePad, isLoading]);
+  }, [data, pads, curvePad, isV4, isLoading]);
 }

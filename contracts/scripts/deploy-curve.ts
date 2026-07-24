@@ -2,16 +2,14 @@ import { ethers, network } from "hardhat";
 import * as fs from "fs";
 import * as path from "path";
 
-import FactoryArtifact from "@uniswap/v3-core/artifacts/contracts/UniswapV3Factory.sol/UniswapV3Factory.json";
-import NPMArtifact from "@uniswap/v3-periphery/artifacts/contracts/NonfungiblePositionManager.sol/NonfungiblePositionManager.json";
+import { resolveV4, deployLocalV4 } from "./lib/v4";
 
 /**
- * Deploys {PotatoCurvePad} — the bonding-curve launcher — and the fee locker it
- * creates in its constructor.
+ * Deploys {PotatoCurvePad} — the bonding-curve launcher (Uniswap V4) — and the
+ * fee locker it creates in its constructor.
  *
- * `scripts/deploy.ts` deploys the LEGACY direct-to-Uniswap pad; this is its
- * counterpart. Without it the curve pad has no deploy path at all, even though
- * web/.env.example designates it the PRIMARY launcher.
+ * `scripts/deploy.ts` deploys the direct-to-Uniswap pad; this is its counterpart.
+ * web/.env.example designates the curve pad the PRIMARY launcher.
  *
  * The constructor also takes the blacklist admin (`owner_`) and the seed word
  * list (`initialBannedWords_`), so the anti-vampire shield is live from block one
@@ -20,29 +18,15 @@ import NPMArtifact from "@uniswap/v3-periphery/artifacts/contracts/NonfungiblePo
  * Env overrides:
  *   TREASURY           fee recipient               (default: PotatoPad treasury)
  *   OWNER              blacklist admin             (default: TREASURY)
+ *   POOL_MANAGER/WETH  V4 addresses for the chain  (default: canonical per network)
  *   START_FDV_ETH      opening FDV in ETH          (default: 3)
  *   BOND_FDV_ETH       bond-price FDV in ETH       (default: 75 — the value the
  *                      contract's own test suite uses, ~80% sold at bond)
  *   ANTI_SNIPE_BLOCKS  max-wallet (2%) window      (default: 1200 ≈ 2min at
  *                      Robinhood's 0.1s blocks)
  *
- * Run: npx hardhat run scripts/deploy-curve.ts --network robinhoodMainnet
+ * Run: npx hardhat run scripts/deploy-curve.ts --network baseSepolia
  */
-const CANONICAL: Record<string, { factory: string; npm: string; weth: string }> = {
-  // https://developers.uniswap.org/contracts/v3/reference/deployments/base-deployments
-  baseSepolia: {
-    factory: "0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24",
-    npm: "0x27F971cb582BF9E50F397e4d29a5C7A34f11faA2",
-    weth: "0x4200000000000000000000000000000000000006",
-  },
-  // Robinhood Chain mainnet (chainId 4663). Uniswap V3 lives at NON-canonical
-  // addresses here; these are the same verified addresses scripts/deploy.ts uses.
-  robinhoodMainnet: {
-    factory: "0x1f7d7550b1b028f7571e69a784071f0205fd2efa",
-    npm: "0x73991a25c818bf1f1128deaab1492d45638de0d3",
-    weth: "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
-  },
-};
 
 const DEFAULT_TREASURY = "0xd3358b1F39A6a71911c6e33717D185F99d43e80d";
 
@@ -83,26 +67,20 @@ async function main() {
   );
   console.log(`anti-snipe:  ${antiSnipeBlocks} blocks (max wallet 2%)\n`);
 
-  let factory: string, npm: string, weth: string;
-  if (CANONICAL[network.name]) {
-    ({ factory, npm, weth } = CANONICAL[network.name]);
-  } else if (isLocal) {
-    const wethC = await (await ethers.getContractFactory("WETH9")).deploy();
-    const factoryC = await (await ethers.getContractFactoryFromArtifact(FactoryArtifact)).deploy();
-    const npmC = await (
-      await ethers.getContractFactoryFromArtifact(NPMArtifact)
-    ).deploy(factoryC.target, wethC.target, ethers.ZeroAddress);
-    [factory, npm, weth] = [factoryC.target as string, npmC.target as string, wethC.target as string];
-    console.log(`local WETH9:                      ${weth}`);
-    console.log(`local UniswapV3Factory:           ${factory}`);
-    console.log(`local NonfungiblePositionManager: ${npm}\n`);
+  let poolManager: string, weth: string;
+  if (isLocal) {
+    ({ poolManager, weth } = await deployLocalV4(deployer));
+    console.log(`local WETH9:            ${weth}`);
+    console.log(`local V4 PoolManager:   ${poolManager}\n`);
   } else {
-    throw new Error(`no Uniswap V3 addresses configured for network '${network.name}'`);
+    ({ poolManager, weth } = resolveV4(network.name));
+    console.log(`V4 PoolManager:         ${poolManager}`);
+    console.log(`WETH:                   ${weth}\n`);
   }
 
   const pad = await (
     await ethers.getContractFactory("PotatoCurvePad")
-  ).deploy(treasury, startFdv, bondFdv, antiSnipeBlocks, factory, npm, weth, owner, ANCIENT_BANNED);
+  ).deploy(treasury, startFdv, bondFdv, antiSnipeBlocks, poolManager, weth, owner, ANCIENT_BANNED);
   await pad.waitForDeployment();
 
   const locker = await pad.locker();
@@ -131,8 +109,7 @@ async function main() {
     startFdv: startFdv.toString(),
     bondFdv: bondFdv.toString(),
     antiSnipeBlocks: antiSnipeBlocks.toString(),
-    v3Factory: factory,
-    positionManager: npm,
+    poolManager,
     weth,
   };
   const file = path.join(__dirname, `../deployments.curve.${network.name}.json`);

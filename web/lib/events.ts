@@ -44,7 +44,8 @@ export interface CreationEvent {
   creator: Address;
   name: string;
   symbol: string;
-  /** The token's Uniswap pool — non-zero from creation for both curve and direct tokens. */
+  /** The token's Uniswap pool address. Present for V3-chain feeds (the Discover
+   *  feed is chain-pinned); V4 token pages resolve their poolId via useTokenPad. */
   pool: Address;
   imageURI: string;
   website: string;

@@ -92,15 +92,15 @@ export default function DiscoverPage() {
     query: { enabled: isDeployed && hasCurve },
   });
 
-  // The Uniswap pool to price each token from. Curve tokens (single-sided-v3) have
-  // a live pool from block one — pre- AND post-migration — so use curves().pool;
+  // The Uniswap pool to price each token from. The Discover feed is Robinhood-
+  // pinned (V3), so this reads V3 pool contracts. Curve tokens use curves().pool;
   // direct tokens use their own pool from the creation event.
   const effectivePools = useMemo<Address[]>(
     () =>
       creations.map((c, i) => {
         if (c.kind === "curve") {
           const cv = curveReads?.[2 * i]?.result as
-            | readonly [Address, Address, bigint, bigint, boolean]
+            | readonly [Address, Address, bigint, boolean]
             | undefined;
           return cv?.[1] ?? c.pool ?? ZERO_ADDRESS;
         }
@@ -179,8 +179,8 @@ export default function DiscoverPage() {
           symbol: c.symbol,
           creator: c.creator,
           creatorName: creatorProfiles?.[c.creator.toLowerCase()]?.username,
-          // Curve tokens price from curves().pool; direct tokens from the event pool.
-          pool: effectivePools[i],
+          // Price/mcap are computed here from the poolId slot0; the card doesn't
+          // need the pool identifier itself (V4 tokens aren't linked by pool address).
           priceWeth,
           marketCapEth: priceWeth != null ? priceWeth * TOTAL_SUPPLY_WHOLE : null,
           createdAt: c.timestamp,

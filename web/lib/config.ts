@@ -26,6 +26,10 @@ export const robinhoodChain = defineChain({
 export const ZERO_ADDRESS =
   "0x0000000000000000000000000000000000000000" as Address;
 
+/** Permit2 — deployed at the same canonical address on every chain. */
+export const PERMIT2_ADDRESS =
+  "0x000000000022D473030F116dDEE9F6B43aC78BA3" as Address;
+
 /**
  * Tokens shown as Migrated even though their on-chain `bonded` latch is false.
  *
@@ -101,9 +105,19 @@ export interface PadDeployment {
  * map exported from this file is DERIVED from these entries, so there is exactly
  * one edit site. See docs/ADDING_A_CHAIN.md for the end-to-end process.
  */
+/** Which Uniswap the chain's pads launch into — routes reads + trading + event decoding. */
+export type UniswapVersion = "v3" | "v4";
+
 export interface ChainConfig {
   /** The viem/wagmi chain object (id, RPC, explorer). */
   chain: Chain;
+  /**
+   * Which Uniswap version this chain's PotatoPad pools live on. Legacy chains
+   * (Robinhood) launched on V3 and keep trading via SwapRouter02; new chains use
+   * V4 (singleton + Universal Router). Existing V3 tokens are never stranded —
+   * the data layer routes reads/trades/decoding by this tag. Defaults to "v3".
+   */
+  uniswapVersion?: UniswapVersion;
   /**
    * The read-only DIRECT-to-Uniswap PotatoPad address (legacy launch mode), from
    * a public env var. New launches no longer use it, but its tokens still resolve
@@ -119,9 +133,17 @@ export interface ChainConfig {
   curvePadStartBlock?: bigint;
   /** Canonical WETH the single-sided LP pairs against (locker pays fees in WETH). */
   weth: Address;
-  /** Uniswap SwapRouter02 for in-app buy/sell. Omit to disable the in-app router. */
+  /** (V3 chains) Uniswap SwapRouter02 for in-app buy/sell. Omit to disable the router. */
   swapRouter?: Address;
-  /** Uniswap QuoterV2 for accurate buy/sell estimates. Omit to disable in-app quotes. */
+  /** (V4 chains) Uniswap V4 PoolManager singleton — emits the `Swap` event (keyed by poolId). */
+  poolManager?: Address;
+  /** (V4 chains) Uniswap V4 StateView — reads pool price/liquidity from the singleton by poolId. */
+  stateView?: Address;
+  /** (V4 chains) Uniswap V4 Universal Router for in-app buy/sell. Omit to disable in-app trading. */
+  universalRouter?: Address;
+  /** (V4 chains) Permit2 — token approvals for Universal Router sells. Canonical on every chain. */
+  permit2?: Address;
+  /** Uniswap Quoter (QuoterV2 on V3 chains, V4Quoter on V4 chains) — accurate estimates. */
   quoter?: Address;
   /** Block to start scanning pad event logs from (the pad's deploy block). */
   padStartBlock: bigint;
@@ -141,12 +163,15 @@ export interface ChainConfig {
 export const CHAINS: ChainConfig[] = [
   {
     chain: robinhoodChain,
+    // Robinhood's pads launched on Uniswap V3 — keep V3 reads + SwapRouter02 trading
+    // so every existing token keeps displaying and trading.
+    uniswapVersion: "v3",
     padAddress: process.env.NEXT_PUBLIC_PAD_ADDRESS_ROBINHOOD,
     curvePadAddress: process.env.NEXT_PUBLIC_CURVE_PAD_ADDRESS_ROBINHOOD,
     curvePadStartBlock: 14_984_900n, // PotatoCurvePad 0x94085E…6069 (~$2.5k open / $44k bond, holder rewards) deploy block 14984902
     // Verified on-chain (a live Uniswap pool's token0) and in Robinhood's docs.
     weth: "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
-    // Only Robinhood is wired for in-app trading (router + quoter present).
+    // Robinhood is wired for in-app V3 trading (SwapRouter02 + QuoterV2).
     swapRouter: "0xcaf681a66d020601342297493863e78c959e5cb2",
     quoter: "0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7",
     // The DIRECT pad is read-only now: the curve pad above is the primary launcher.
@@ -181,25 +206,37 @@ export const CHAINS: ChainConfig[] = [
   },
   {
     chain: baseSepolia,
+    uniswapVersion: "v4",
     padAddress: process.env.NEXT_PUBLIC_PAD_ADDRESS_BASE_SEPOLIA,
     curvePadAddress: process.env.NEXT_PUBLIC_CURVE_PAD_ADDRESS_BASE_SEPOLIA,
     curvePadStartBlock: 0n,
     weth: "0x4200000000000000000000000000000000000006",
     padStartBlock: 0n,
+    // Canonical Uniswap V4 addresses on Base Sepolia (chainId 84532), from
+    // developers.uniswap.org/contracts/v4/deployments — wires in-app V4 trading.
+    poolManager: "0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408",
+    stateView: "0x571291b572ed32ce6751a2cb2486ebee8defb9b4",
+    universalRouter: "0x492e6456d9528771018deb9e87ef7750ef184104",
+    permit2: PERMIT2_ADDRESS,
+    quoter: "0x4a6513c898fe1b2d0e78d3b0e0a4a151589b1cba",
     uniswapSlug: "base_sepolia",
     // NB: base-sepolia is NOT indexed by GeckoTerminal (404s), so no chart network.
   },
   {
     chain: hardhat,
+    uniswapVersion: "v4", // local deploy scripts stand up a V4 PoolManager
     padAddress: process.env.NEXT_PUBLIC_PAD_ADDRESS_LOCALHOST,
     curvePadAddress: process.env.NEXT_PUBLIC_CURVE_PAD_ADDRESS_LOCALHOST,
     curvePadStartBlock: 0n, // fresh local chain scans from genesis
     weth: envAddress(process.env.NEXT_PUBLIC_WETH_ADDRESS_LOCALHOST),
     padStartBlock: 0n, // fresh local chain scans from genesis
-    // A local chain has no canonical Uniswap deployment, so the router and
-    // quoter are whatever `scripts/local-playground.ts` just deployed. Unset
-    // means no in-app trading, exactly as on any other unwired chain.
-    swapRouter: envAddressOpt(process.env.NEXT_PUBLIC_SWAP_ROUTER_LOCALHOST),
+    // A local chain has no canonical Uniswap deployment, so the V4 read/trade
+    // addresses are whatever a local playground script just deployed. Unset means
+    // no in-app trading, exactly as on any other unwired chain.
+    poolManager: envAddressOpt(process.env.NEXT_PUBLIC_POOL_MANAGER_LOCALHOST),
+    stateView: envAddressOpt(process.env.NEXT_PUBLIC_STATE_VIEW_LOCALHOST),
+    universalRouter: envAddressOpt(process.env.NEXT_PUBLIC_UNIVERSAL_ROUTER_LOCALHOST),
+    permit2: envAddressOpt(process.env.NEXT_PUBLIC_PERMIT2_LOCALHOST),
     quoter: envAddressOpt(process.env.NEXT_PUBLIC_QUOTER_LOCALHOST),
   },
 ];
@@ -224,20 +261,43 @@ export const CURVE_PAD_ADDRESSES: Record<number, Address> = byChain((c) => envAd
 export const WETH_ADDRESSES: Record<number, Address> = byChain((c) => c.weth);
 
 /**
- * Uniswap V3 1% fee tier — the tier every PotatoPad pool is launched into.
- * Buys/sells and quotes must target this exact tier.
+ * Uniswap V4 1% fee / tick spacing 200 — every PotatoPad pool is launched into
+ * this (fee, tickSpacing, hooks=0) key. Buys/sells and quotes target it exactly.
  */
 export const POOL_FEE_TIER = 10_000;
 
-/**
- * Uniswap SwapRouter02 per chain, for in-app buy/sell. Only Robinhood is wired
- * for in-app trading; other chains are `undefined`, which disables the router
- * path and falls back to the "Trade on Uniswap" link.
- */
+/** Which Uniswap version each chain's pads use (defaults to v3 for legacy chains). */
+export const UNISWAP_VERSION: Record<number, UniswapVersion> = byChain((c) => c.uniswapVersion ?? "v3");
+
+/** True iff the chain's pools live on Uniswap V4 (else V3). */
+export function isV4Chain(chainId: number): boolean {
+  return UNISWAP_VERSION[chainId] === "v4";
+}
+
+/** (V3 chains) Uniswap SwapRouter02 per chain, for in-app V3 buy/sell. */
 export const SWAP_ROUTER_ADDRESSES: Record<number, Address | undefined> = byChain((c) => c.swapRouter);
 
+/** Uniswap V4 PoolManager singleton per chain — source of the `Swap` event. */
+export const POOL_MANAGER_ADDRESSES: Record<number, Address | undefined> = byChain((c) => c.poolManager);
+
 /**
- * Uniswap QuoterV2 per chain, for accurate buy/sell output estimates that
+ * Uniswap V4 StateView per chain — reads pool price/liquidity from the singleton
+ * by poolId (V4 has no per-pool contract). Undefined disables live pool stats.
+ */
+export const STATE_VIEW_ADDRESSES: Record<number, Address | undefined> = byChain((c) => c.stateView);
+
+/**
+ * Uniswap V4 Universal Router per chain, for in-app buy/sell. Chains without it
+ * are `undefined`, which disables the in-app path and falls back to the "Trade on
+ * Uniswap" link.
+ */
+export const UNIVERSAL_ROUTER_ADDRESSES: Record<number, Address | undefined> = byChain((c) => c.universalRouter);
+
+/** Permit2 per chain (canonical address), for Universal Router sell approvals. */
+export const PERMIT2_ADDRESSES: Record<number, Address | undefined> = byChain((c) => c.permit2);
+
+/**
+ * Uniswap V4 Quoter per chain, for accurate buy/sell output estimates that
  * account for the single-sided pool's price impact. Optional — a missing quote
  * disables the in-app trade button (the Uniswap link still works).
  */

@@ -4,10 +4,10 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent } from "react";
-import { bytesToHex, decodeEventLog } from "viem";
+import { bytesToHex, decodeEventLog, getAddress, isAddress } from "viem";
 import { useAccount, useReadContracts, useSignMessage } from "wagmi";
 import { potatoCurvePadAbi } from "@/lib/abi";
-import { SITE_URL } from "@/lib/config";
+import { SITE_URL, ZERO_ADDRESS } from "@/lib/config";
 import { usePad, useTx } from "@/lib/hooks";
 import { useAncientTokens } from "@/lib/ancient";
 import { DESCRIPTION_MAX, tokenDescriptionHash } from "@/lib/feedback/message";
@@ -35,6 +35,12 @@ const MAX_CREATOR_CUT_PCT = CREATOR_HALF_PCT - 5;
 const inputCls =
   "w-full rounded-lg border border-neutral-800 bg-black px-3 py-2.5 text-sm text-neutral-100 placeholder-neutral-700 outline-none transition-colors focus:border-neutral-600";
 const labelCls = "text-[10px] font-bold uppercase tracking-wider text-neutral-500";
+
+/** Minimal ERC-20 metadata reads used to vet a custom denomination currency. */
+const erc20MetaAbi = [
+  { inputs: [], name: "decimals", outputs: [{ type: "uint8" }], stateMutability: "view", type: "function" },
+  { inputs: [], name: "symbol", outputs: [{ type: "string" }], stateMutability: "view", type: "function" },
+] as const;
 
 export default function CreatePage() {
   const router = useRouter();
@@ -97,10 +103,45 @@ export default function CreatePage() {
 
   // Holder rewards: share the creator's half of the fees with everyone holding.
   const [rewardsOn, setRewardsOn] = useState(false);
+  // Denomination currency (top-level, INDEPENDENT of rewards): the token can be
+  // priced in ETH (default) or any 18-decimal ERC-20. When holder rewards are ALSO
+  // on, this same currency is what holders earn — the pool's quote asset is both the
+  // price denominator and the reward asset (there is only ever one custom currency).
+  const [denomMode, setDenomMode] = useState<"eth" | "custom">("eth");
+  const [denom, setDenom] = useState("");
   // True when the server reports a newer pad than this bundle was built with.
   const [staleClient, setStaleClient] = useState(false);
   const [creatorCutPct, setCreatorCutPct] = useState(0);
   const holderCutPct = CREATOR_HALF_PCT - creatorCutPct;
+
+  // Validate the custom denomination: it must be an 18-decimal ERC-20 (the pad's
+  // FDV↔tick math assumes 18 decimals; the pad no longer re-checks on-chain).
+  const denomIsCustom = denomMode === "custom";
+  const denomTrimmed = denom.trim();
+  const denomValidAddr = denomIsCustom && denomTrimmed !== "" && isAddress(denomTrimmed);
+  // "Custom" is selected but no usable address is entered yet — blocks submit.
+  const denomNeedsAddr = denomIsCustom && !denomValidAddr;
+  const { data: denomInfo } = useReadContracts({
+    allowFailure: true,
+    contracts: denomValidAddr
+      ? [
+          { address: getAddress(denomTrimmed), abi: erc20MetaAbi, functionName: "decimals" },
+          { address: getAddress(denomTrimmed), abi: erc20MetaAbi, functionName: "symbol" },
+        ]
+      : [],
+    query: { enabled: denomValidAddr },
+  });
+  const denomDecimals = denomInfo?.[0]?.result as number | undefined;
+  const denomSymbol = denomInfo?.[1]?.result as string | undefined;
+  const denomBadDecimals = denomValidAddr && denomDecimals !== undefined && Number(denomDecimals) !== 18;
+  // A fully-resolved custom denomination (valid 18-dec ERC-20). Blank/ETH → false.
+  const customQuote = denomValidAddr && !denomBadDecimals;
+  // Human label for "priced in X" / "holders earn X" copy.
+  const denomLabel = customQuote
+    ? denomSymbol && denomSymbol.trim() !== ""
+      ? denomSymbol
+      : "your token"
+    : "ETH";
 
   async function handleUpload(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -130,9 +171,13 @@ export default function CreatePage() {
   }
 
   const devBuyWei = devBuy.trim() === "" ? 0n : tryParseEther(devBuy);
+  // A custom denomination pool isn't token/WETH, so the ETH dev-buy can't run — the
+  // pad reverts if ETH is attached. Disable (and ignore) the dev-buy in that case.
+  const devBuyDisabled = customQuote;
   // A requested dev-buy is "too large" if it exceeds the cap — or if the cap
   // hasn't loaded yet (fail closed so a race can't submit an over-cap buy).
   const devBuyTooLarge =
+    !devBuyDisabled &&
     devBuyWei !== undefined &&
     devBuyWei > 0n &&
     (maxDevBuyWei === undefined || devBuyWei > maxDevBuyWei);
@@ -158,8 +203,9 @@ export default function CreatePage() {
     symbol.trim().length > 0 &&
     image.trim().length > 0 &&
     !vampBlocked &&
-    devBuyWei !== undefined &&
-    !devBuyTooLarge;
+    (devBuyDisabled || (devBuyWei !== undefined && !devBuyTooLarge)) &&
+    !denomNeedsAddr &&
+    !denomBadDecimals;
 
   useEffect(() => {
     if (!tx.confirmed || !tx.receipt) return;
@@ -231,7 +277,9 @@ export default function CreatePage() {
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
-    if (!formValid || devBuyWei === undefined) return;
+    // devBuyWei may be undefined for a custom denomination (dev-buy is disabled and
+    // ignored there); formValid already gates the ETH path, so trust it alone.
+    if (!formValid) return;
     // Stale-client guard. The pad address is baked into this bundle at build
     // time; a tab left open across a repoint keeps writing to the RETIRED pad
     // (that is exactly how DeepFryer/FROG/POND launched onto the old
@@ -263,24 +311,36 @@ export default function CreatePage() {
       twitter: normalizeSocialUrl(twitter, "twitter") ?? "",
       telegram: normalizeSocialUrl(telegram, "telegram") ?? "",
     };
-    const common = { address: curvePad, abi: potatoCurvePadAbi, value: devBuyWei } as const;
     const trimmedName = name.trim();
     const ticker = symbol.trim().toUpperCase();
 
-    // Both entry points launch identically — same locked LP, same treasury cut.
-    // createRewardToken additionally splits the creator half with holders.
+    // Denomination currency (top-level, independent of rewards). A fully-resolved
+    // custom 18-dec ERC-20 → that address; otherwise the zero address, which the pad
+    // maps to WETH (the token is priced in ETH). This feeds BOTH launch paths.
+    const quote = customQuote ? getAddress(denomTrimmed) : ZERO_ADDRESS;
+    // A custom-quote launch can't take a native-ETH dev-buy (the pool isn't token/WETH),
+    // and the pad reverts if ETH is attached — so drop the dev-buy in that case.
+    const common = {
+      address: curvePad,
+      abi: potatoCurvePadAbi,
+      value: customQuote ? 0n : (devBuyWei ?? 0n),
+    } as const;
+
+    // Both entry points launch identically — same locked LP, same treasury cut, same
+    // denomination. createRewardToken additionally splits the creator half with
+    // holders, paid in `quote` (ETH when quote is the zero address).
     if (rewardsOn) {
       tx.writeContract({
         ...common,
         functionName: "createRewardToken",
-        args: [trimmedName, ticker, meta, salt, creatorCutPct * 100],
+        args: [trimmedName, ticker, meta, salt, creatorCutPct * 100, quote],
       });
       return;
     }
     tx.writeContract({
       ...common,
       functionName: "createToken",
-      args: [trimmedName, ticker, meta, salt],
+      args: [trimmedName, ticker, meta, salt, quote],
     });
   }
 
@@ -304,7 +364,7 @@ export default function CreatePage() {
             <div>
               <h1 className="text-lg font-bold tracking-tight text-neutral-100">Plant token</h1>
               <p className="mt-1 text-xs text-neutral-500">
-                Deploy a fixed-supply token straight into a permanently locked Uniswap V3 position.
+                Deploy a fixed-supply token straight into a permanently locked Uniswap V4 position.
               </p>
             </div>
 
@@ -434,7 +494,79 @@ export default function CreatePage() {
                 </p>
               </div>
 
-              <div className="space-y-1.5">
+              {/* ── Denominate in: the pool's quote currency (ETH or any 18-dec ERC-20).
+                  A first-class choice, independent of holder rewards; when rewards
+                  ARE on, this same currency is what holders earn. ── */}
+              <div className="space-y-3 border-t border-neutral-800/60 pt-4">
+                <label className={labelCls}>Denominate in</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setDenomMode("eth")}
+                    className={`rounded-lg border px-3 py-2.5 text-left transition-colors ${
+                      denomMode === "eth"
+                        ? "border-amber-500/60 bg-amber-500/10"
+                        : "border-neutral-800 bg-black hover:border-neutral-700"
+                    }`}
+                  >
+                    <span className="block text-xs font-bold text-neutral-100">ETH</span>
+                    <span className="mt-0.5 block text-[10px] leading-tight text-neutral-500">
+                      Priced in ETH (default).
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDenomMode("custom")}
+                    className={`rounded-lg border px-3 py-2.5 text-left transition-colors ${
+                      denomMode === "custom"
+                        ? "border-amber-500/60 bg-amber-500/10"
+                        : "border-neutral-800 bg-black hover:border-neutral-700"
+                    }`}
+                  >
+                    <span className="block text-xs font-bold text-neutral-100">Custom token</span>
+                    <span className="mt-0.5 block text-[10px] leading-tight text-neutral-500">
+                      Priced in any 18-dec ERC-20.
+                    </span>
+                  </button>
+                </div>
+
+                {denomIsCustom && (
+                  <div className="space-y-1.5 rounded-lg border border-neutral-800/60 bg-black p-3.5">
+                    <label htmlFor="denom" className={labelCls}>
+                      Denomination token
+                    </label>
+                    <input
+                      id="denom"
+                      type="text"
+                      placeholder="0x…  an 18-decimal ERC-20"
+                      value={denom}
+                      onChange={(e) => setDenom(e.target.value)}
+                      spellCheck={false}
+                      className={`${inputCls} font-mono text-xs`}
+                    />
+                    {denomTrimmed !== "" && !isAddress(denomTrimmed) ? (
+                      <p className="text-[10px] text-rose-400">
+                        Enter a valid contract address, or choose ETH.
+                      </p>
+                    ) : denomBadDecimals ? (
+                      <p className="text-[10px] text-rose-400">
+                        Denomination token must be an 18-decimal ERC-20.
+                      </p>
+                    ) : customQuote ? (
+                      <p className="text-[10px] leading-relaxed text-neutral-500">
+                        Priced in <span className="font-semibold text-neutral-300">{denomLabel}</span>. The
+                        ETH dev-buy is disabled for a custom denomination.
+                      </p>
+                    ) : (
+                      <p className="text-[10px] leading-relaxed text-neutral-600">
+                        Any 18-decimal ERC-20 — the token trades against it instead of ETH.
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-1.5 border-t border-neutral-800/60 pt-4">
                 <div className="flex items-center justify-between">
                   <label htmlFor="devbuy" className={labelCls}>
                     Initial dev buy (ETH)
@@ -445,21 +577,30 @@ export default function CreatePage() {
                 </div>
                 <input
                   id="devbuy"
-                  className={`${inputCls} font-mono tabular-nums`}
+                  className={`${inputCls} font-mono tabular-nums ${devBuyDisabled ? "opacity-40" : ""}`}
                   placeholder="0.00"
                   inputMode="decimal"
-                  value={devBuy}
+                  value={devBuyDisabled ? "" : devBuy}
+                  disabled={devBuyDisabled}
                   onChange={(e) => setDevBuy(e.target.value)}
                 />
-                {devBuy.trim() !== "" && devBuyWei === undefined && (
-                  <p className="text-xs text-rose-400">Enter a valid ETH amount.</p>
-                )}
-                {devBuyTooLarge && (
-                  <p className="text-xs text-rose-400">
-                    {maxDevBuyWei !== undefined
-                      ? `Capped at ${formatEth(maxDevBuyWei)} ETH (5% of supply) during the anti-snipe window.`
-                      : "Loading the dev-buy cap…"}
+                {devBuyDisabled ? (
+                  <p className="text-xs text-neutral-500">
+                    Dev-buy is ETH-only — disabled for a custom denomination ({denomLabel}).
                   </p>
+                ) : (
+                  <>
+                    {devBuy.trim() !== "" && devBuyWei === undefined && (
+                      <p className="text-xs text-rose-400">Enter a valid ETH amount.</p>
+                    )}
+                    {devBuyTooLarge && (
+                      <p className="text-xs text-rose-400">
+                        {maxDevBuyWei !== undefined
+                          ? `Capped at ${formatEth(maxDevBuyWei)} ETH (5% of supply) during the anti-snipe window.`
+                          : "Loading the dev-buy cap…"}
+                      </p>
+                    )}
+                  </>
                 )}
               </div>
 
@@ -491,7 +632,7 @@ export default function CreatePage() {
                   >
                     <span className="block text-xs font-bold text-neutral-100">Holder rewards</span>
                     <span className="mt-0.5 block text-[10px] leading-tight text-neutral-500">
-                      Holders earn the fees, in ETH.
+                      Holders earn the fees, in {denomLabel}.
                     </span>
                   </button>
                 </div>
@@ -546,6 +687,17 @@ export default function CreatePage() {
                       holder share. Credit lands as each swap happens, so holders earn exactly the
                       volume they held through, and keep it even if they sell before anyone
                       harvests. Fixed at launch; it can never be changed afterwards.
+                    </p>
+
+                    {/* Holders are rewarded in whatever denomination was chosen above —
+                        the pool's quote asset is both the price denominator and the
+                        reward currency (there is only ever one custom currency). */}
+                    <p className="border-t border-neutral-800/60 pt-3 text-[10px] leading-relaxed text-neutral-500">
+                      Rewards are paid in{" "}
+                      <span className="font-semibold text-neutral-300">{denomLabel}</span>
+                      {customQuote
+                        ? " — the denomination you chose above."
+                        : " (ETH). Pick a custom denomination above to reward holders in another token."}
                     </p>
                   </div>
                 )}
