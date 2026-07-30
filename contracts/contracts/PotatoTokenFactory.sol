@@ -81,6 +81,30 @@ contract PotatoTokenFactory {
         if (deployed == address(0)) revert DeployFailed();
     }
 
+    /// @notice initCodeHash for a MIGRATION token: a plain {PotatoToken} deployed
+    ///         with anti-snipe DISABLED (see {deployMigration}).
+    function initCodeHashMigration(string calldata name, string calldata symbol)
+        external
+        view
+        returns (bytes32)
+    {
+        return keccak256(_migrationInitCode(name, symbol));
+    }
+
+    /// @notice CREATE2-deploys a MIGRATION token (zero anti-snipe). Pad-only.
+    function deployMigration(string calldata name, string calldata symbol, bytes32 salt)
+        external
+        returns (address deployed)
+    {
+        if (msg.sender != pad) revert OnlyPad();
+
+        bytes memory code = _migrationInitCode(name, symbol);
+        assembly ("memory-safe") {
+            deployed := create2(0, add(code, 0x20), mload(code), salt)
+        }
+        if (deployed == address(0)) revert DeployFailed();
+    }
+
     /// @notice The address a launch will deploy to for `salt`.
     function computeAddress(bytes32 salt, bytes32 hash) external view returns (address) {
         return address(
@@ -116,6 +140,20 @@ contract PotatoTokenFactory {
             abi.encode(
                 name, symbol, totalSupply, pad, positionManager, locker, maxWallet, antiSnipeBlocks
             )
+        );
+    }
+
+    /// @dev A migration token is a plain {PotatoToken} with antiSnipeBlocks == 0:
+    ///      the reserved 1:1 claim slice is pre-committed, so the cap would only
+    ///      block large holders from claiming. Everything else matches a launch.
+    function _migrationInitCode(string calldata name, string calldata symbol)
+        internal
+        view
+        returns (bytes memory)
+    {
+        return abi.encodePacked(
+            type(PotatoToken).creationCode,
+            abi.encode(name, symbol, totalSupply, pad, positionManager, locker, maxWallet, uint256(0))
         );
     }
 }

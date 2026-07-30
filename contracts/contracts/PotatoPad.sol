@@ -97,6 +97,17 @@ contract PotatoPad is ReentrancyGuard {
     ///         this only iterates under an active griefing attack.
     uint256 public constant MAX_SALT_TRIES = 64;
 
+    /// @notice Full-range ticks (aligned to TICK_SPACING) for a migration two-sided seed.
+    int24 internal constant MIN_FULL_TICK = -887200;
+    int24 internal constant MAX_FULL_TICK = 887200;
+
+    /// @notice Burn sink for a migration peg's leftover float (anti-snipe exempt on the token).
+    address internal constant DEAD_ADDR = 0x000000000000000000000000000000000000dEaD;
+
+    /// @notice Minimum tradeable float a migration launch must leave in the LP (5%),
+    ///         so the reserved 1:1 claim slice can never starve the pool.
+    uint256 public constant MIN_LP_FLOAT = TOTAL_SUPPLY / 20;
+
     // ----------------------------------------------------------- immutables --
 
     /// @notice Receives the protocol half of all LP fees (via the locker).
@@ -187,6 +198,10 @@ contract PotatoPad is ReentrancyGuard {
     );
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event BannedSet(bytes32 indexed wordHash, bool banned);
+    /// @dev Emitted IN ADDITION to {TokenCreated} for a migration launch.
+    event MigrationTokenCreated(
+        address indexed token, address indexed reserveRecipient, uint256 reserveAmount
+    );
 
     // --------------------------------------------------------------- errors --
 
@@ -199,6 +214,8 @@ contract PotatoPad is ReentrancyGuard {
     error LaunchGriefed();
     error Banned();
     error OnlyOwner();
+    error InvalidReserve();
+    error ZeroAddress();
 
     // ------------------------------------------------------------- modifiers --
 
@@ -450,6 +467,151 @@ contract PotatoPad is ReentrancyGuard {
         if (msg.value > 0) {
             _devBuy(token, pool, tokenIs0, tickLower, tickUpper, msg.value);
         }
+    }
+
+    /// @notice Migration launch (TWO-SIDED, no anti-snipe). Reserves `reserveAmount`
+    ///         to `reserveRecipient` (a migrator's 1:1 claim pool) and opens a
+    ///         permanently-locked FULL-RANGE two-sided position pairing the remaining
+    ///         `TOTAL_SUPPLY - reserveAmount` tokens with `wethAmount` WETH pulled from
+    ///         the caller (recovered proceeds from selling the old token). Opening
+    ///         price = wethAmount / float — derived from real recovered liquidity, not
+    ///         a fixed floor. `feeCreator` gets the LP fee-creator role. NO dev-buy, so
+    ///         no address ends up holding the float. LP NFT is locked in {PotatoFeeLocker}.
+    /// @dev Migration tokens deploy with anti-snipe DISABLED: the reserved slice is a
+    ///      pre-committed 1:1 claim pool, so the cap would only block large holders from
+    ///      claiming. The claim-pool holder is anti-snipe exempt regardless.
+    /// @param targetFdvWei Desired opening FDV (WETH wei, ≈ old closing mcap). Seeds only
+    ///        the tokens that open at this FDV and burns the leftover float; 0 = no peg
+    ///        (full float, derived open). A target below derived clamps to the full float.
+    function createMigrationToken(
+        string calldata name,
+        string calldata symbol,
+        TokenMeta calldata meta,
+        bytes32 salt,
+        uint256 reserveAmount,
+        address reserveRecipient,
+        uint256 wethAmount,
+        address feeCreator,
+        uint256 targetFdvWei
+    ) external nonReentrant returns (address token) {
+        if (reserveRecipient == address(0) || feeCreator == address(0)) revert ZeroAddress();
+        if (reserveAmount == 0 || reserveAmount > TOTAL_SUPPLY - MIN_LP_FLOAT) revert InvalidReserve();
+        if (wethAmount == 0) revert InvalidReserve();
+
+        address pool;
+        bool tokenIs0;
+        (token, pool, tokenIs0) = _deployMigrationToken(name, symbol, salt);
+
+        // Exempt the claim-pool holder from the anti-snipe cap (it receives > maxWallet).
+        PotatoToken(token).setMigrationExempt(reserveRecipient, address(0));
+
+        // Carve out the 1:1 claim reserve; the rest is the available LP float.
+        IERC20(token).safeTransfer(reserveRecipient, reserveAmount);
+        uint256 fullFloat = TOTAL_SUPPLY - reserveAmount;
+
+        // Pull the recovered WETH from the caller to seed the WETH side.
+        IERC20(address(weth)).safeTransferFrom(msg.sender, address(this), wethAmount);
+
+        // Peg: pick the pool token amount to open at targetFdvWei (FDV = price × TOTAL_SUPPLY),
+        // clamped to the float; burn the remainder so we open at the target, not the lower
+        // derived price. targetFdvWei == 0 → no peg (full float, derived open).
+        uint256 lpTokens = fullFloat;
+        if (targetFdvWei != 0) {
+            uint256 wantTokens = (wethAmount * TOTAL_SUPPLY) / targetFdvWei;
+            if (wantTokens < fullFloat) lpTokens = wantTokens;
+        }
+        if (lpTokens == 0) revert InvalidReserve();
+        uint256 burnAmount = fullFloat - lpTokens;
+        if (burnAmount > 0) IERC20(token).safeTransfer(DEAD_ADDR, burnAmount);
+
+        uint256 lpTokenId = _seedTwoSided(token, pool, tokenIs0, lpTokens, wethAmount);
+
+        tokens[token] = TokenInfo({creator: feeCreator, pool: pool, lpTokenId: lpTokenId});
+        allTokens.push(token);
+        // Migration launches are never reward tokens: no reward sink, zero creator fee.
+        locker.register(lpTokenId, token, feeCreator, address(0), 0);
+
+        emit TokenCreated(
+            token, feeCreator, name, symbol, pool, meta.imageURI, meta.website, meta.twitter, meta.telegram
+        );
+        emit MigrationTokenCreated(token, reserveRecipient, reserveAmount);
+    }
+
+    /// @dev Griefing-safe CREATE2 deploy of a MIGRATION token (anti-snipe disabled),
+    ///      then create + register its WETH pool. Mirrors {_launch}'s salt walk, but
+    ///      routes through the factory's migration path.
+    function _deployMigrationToken(string calldata name, string calldata symbol, bytes32 salt)
+        internal
+        returns (address token, address pool, bool tokenIs0)
+    {
+        if (banned[_normHash(bytes(name))] || banned[_normHash(bytes(symbol))]) revert Banned();
+
+        bytes32 initCodeHash = tokenFactory.initCodeHashMigration(name, symbol);
+        uint256 seed = uint256(keccak256(abi.encode(msg.sender, salt)));
+        uint256 tries;
+        address predicted;
+        for (; tries < MAX_SALT_TRIES;) {
+            predicted = _computeTokenAddress(bytes32(seed), initCodeHash);
+            if (v3Factory.getPool(predicted, address(weth), POOL_FEE) == address(0) && predicted.code.length == 0)
+            {
+                break;
+            }
+            unchecked {
+                ++tries;
+                ++seed;
+            }
+        }
+        if (tries == MAX_SALT_TRIES) revert LaunchGriefed();
+
+        token = tokenFactory.deployMigration(name, symbol, bytes32(seed));
+        assert(token == predicted);
+
+        tokenIs0 = token < address(weth);
+        pool = v3Factory.getPool(token, address(weth), POOL_FEE);
+        if (pool == address(0)) pool = v3Factory.createPool(token, address(weth), POOL_FEE);
+        PotatoToken(token).setPool(pool);
+    }
+
+    /// @dev Opens a permanently-locked FULL-RANGE two-sided position: `newAmount` tokens
+    ///      paired with `wethAmount` WETH, initialized at price wethAmount/newAmount
+    ///      (token0 convention), so both sides seed fully. LP NFT → locker.
+    function _seedTwoSided(address token, address pool, bool tokenIs0, uint256 newAmount, uint256 wethAmount)
+        internal
+        returns (uint256 lpTokenId)
+    {
+        // token0-convention price = amount(token1)/amount(token0).
+        uint160 sqrtP = tokenIs0
+            ? uint160(Math.sqrt(Math.mulDiv(wethAmount, 1 << 192, newAmount))) // token0=token: WETH/token
+            : uint160(Math.sqrt(Math.mulDiv(newAmount, 1 << 192, wethAmount))); // token0=WETH: token/WETH
+        (uint160 existing,,,,,,) = IUniswapV3Pool(pool).slot0();
+        if (existing == 0) IUniswapV3Pool(pool).initialize(sqrtP);
+
+        IERC20(token).forceApprove(address(positionManager), newAmount);
+        IERC20(address(weth)).forceApprove(address(positionManager), wethAmount);
+
+        (address t0, address t1) = tokenIs0 ? (token, address(weth)) : (address(weth), token);
+        (uint256 a0, uint256 a1) = tokenIs0 ? (newAmount, wethAmount) : (wethAmount, newAmount);
+
+        uint128 liquidity;
+        (lpTokenId, liquidity,,) = positionManager.mint(
+            INonfungiblePositionManager.MintParams({
+                token0: t0,
+                token1: t1,
+                fee: POOL_FEE,
+                tickLower: MIN_FULL_TICK,
+                tickUpper: MAX_FULL_TICK,
+                amount0Desired: a0,
+                amount1Desired: a1,
+                amount0Min: 0,
+                amount1Min: 0,
+                recipient: address(locker),
+                deadline: block.timestamp
+            })
+        );
+        IERC20(token).forceApprove(address(positionManager), 0);
+        IERC20(address(weth)).forceApprove(address(positionManager), 0);
+        if (liquidity == 0) revert SeedFailed();
+        emit Launched(token, pool, lpTokenId, liquidity, newAmount);
     }
 
     // ---------------------------------------------------------------- admin --

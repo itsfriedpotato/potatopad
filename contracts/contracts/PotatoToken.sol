@@ -83,6 +83,24 @@ contract PotatoToken is ERC20 {
         antiSnipeExempt[pool_] = true;
     }
 
+    /// @notice True once the pad has exempted this token's migration addresses.
+    bool public migrationExemptSet;
+
+    error MigrationExemptAlreadySet();
+
+    /// @notice One-time hook for the pad to exempt a migration launch's claim-pool
+    ///         holder (the migrator, which receives the reserved slice) and dev-buy
+    ///         recipient (the treasury) from the anti-snipe cap — both can end the
+    ///         launch tx holding more than `maxWallet`. Pad-only and one-shot, like
+    ///         {setPool}; address(0) entries are skipped.
+    function setMigrationExempt(address reserve, address devBuy) external {
+        if (msg.sender != pad) revert OnlyPad();
+        if (migrationExemptSet) revert MigrationExemptAlreadySet();
+        migrationExemptSet = true;
+        if (reserve != address(0)) antiSnipeExempt[reserve] = true;
+        if (devBuy != address(0)) antiSnipeExempt[devBuy] = true;
+    }
+
     /// @notice Always address(0). PotatoToken has no owner, mint, pause, or
     ///         blacklist — it is renounced by construction (there was never an owner
     ///         to renounce). Exposed purely so scanners and DEX tools that detect
